@@ -533,9 +533,18 @@ pub(super) fn user_visible_definitions<'db>(
     db: &'db dyn Db,
     definitions: impl IntoIterator<Item = Definition<'db>>,
 ) -> FxIndexSet<Definition<'db>> {
+    user_visible_definitions_with_completeness(db, definitions).0
+}
+
+/// Also reports whether every definition could be projected to user-visible sources.
+pub(crate) fn user_visible_definitions_with_completeness<'db>(
+    db: &'db dyn Db,
+    definitions: impl IntoIterator<Item = Definition<'db>>,
+) -> (FxIndexSet<Definition<'db>>, bool) {
     let mut pending = definitions.into_iter().collect::<VecDeque<_>>();
     let mut seen = FxHashSet::default();
     let mut result = FxIndexSet::default();
+    let mut is_complete = true;
 
     while let Some(definition) = pending.pop_front() {
         if !seen.insert(definition) {
@@ -551,19 +560,27 @@ pub(super) fn user_visible_definitions<'db>(
                     .filter_map(|binding| binding.binding.definition());
                 // A lazy function proxy can lead to an eager comprehension proxy. Follow that
                 // proxy-only chain without exposing ordinary lazy nested assignments.
-                pending.extend(sources.filter(|source| {
-                    nested.execution == NestedBindingExecution::Eager
+                let mut has_source = false;
+                for source in sources {
+                    if nested.execution == NestedBindingExecution::Eager
                         || matches!(source.kind(db), DefinitionKind::NestedBindings(_))
-                }));
+                    {
+                        has_source = true;
+                        pending.push_back(source);
+                    } else {
+                        is_complete = false;
+                    }
+                }
+                is_complete &= has_source;
             }
             kind if kind.is_user_visible() => {
                 result.insert(definition);
             }
-            _ => {}
+            _ => is_complete = false,
         }
     }
 
-    result
+    (result, is_complete)
 }
 
 fn resolve_reachable_definitions<'db>(

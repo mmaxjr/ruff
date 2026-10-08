@@ -10,7 +10,7 @@ use crate::place::{
 };
 use crate::place_load::{ImplicitPlaceLoad, PlaceLoadSource, PlaceLoadSourceKind};
 use crate::reachability::ReachabilityConstraintsExtension;
-use crate::types::ProgramEnvironment;
+use crate::types::{ProgramEnvironment, user_visible_definitions_with_completeness};
 
 /// Records the definitions that can supply a name's value and the limits of that resolution.
 ///
@@ -60,6 +60,28 @@ impl<'db> DefinitionResolution<'db> {
     /// Returns whether resolution crosses a `global` or `nonlocal` declaration.
     pub(crate) fn crosses_scope_declaration(&self) -> bool {
         self.crosses_scope_declaration
+    }
+
+    pub(crate) fn into_source_definitions(mut self, db: &'db dyn Db) -> Self {
+        let (definitions, is_complete) =
+            user_visible_definitions_with_completeness(db, self.definitions.iter().copied());
+        self.definitions = definitions.into_iter().collect();
+        self.is_complete &= is_complete;
+        self
+    }
+
+    pub(crate) fn add_source(
+        &mut self,
+        db: &'db dyn Db,
+        environment: &ProgramEnvironment<'db>,
+        scope: ScopeId<'db>,
+        source: &PlaceLoadSource<'db>,
+    ) {
+        self.extend(Self::from_place_load_source(db, environment, scope, source));
+    }
+
+    pub(crate) fn mark_incomplete(&mut self) {
+        self.is_complete = false;
     }
 
     pub(crate) fn finish(mut self, crosses_scope_declaration: bool) -> Self {

@@ -589,7 +589,6 @@ impl<'db, 'ast> PlaceLoadResolution<'db, 'ast> {
     }
 
     /// Returns whether the lookup has followed a `global` or `nonlocal` declaration.
-    #[cfg_attr(not(test), expect(dead_code, reason = "awaiting IDE integration"))]
     pub(crate) fn crosses_scope_declaration(&self) -> bool {
         self.crosses_scope_declaration
     }

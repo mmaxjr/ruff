@@ -54,6 +54,7 @@ use salsa::plumbing::AsId;
 use std::borrow::Cow;
 pub(super) use ty_python_core::frozen::{FrozenMap, FrozenSet, FrozenValueMap};
 
+use crate::place::definitions::DefinitionResolution;
 use crate::types::diagnostic::TypeCheckDiagnostics;
 use crate::types::function::{FunctionDecorators, FunctionType};
 use crate::types::generics::Specialization;
@@ -491,8 +492,39 @@ pub(crate) fn infer_complete_scope_types<'db>(
     infer_scope_types_impl(db, InferScope::new(db, scope, TypeContext::default()))
 }
 
+pub(crate) type DefinitionResolutionsByExpression<'db> =
+    FxHashMap<ExpressionNodeKey, DefinitionResolution<'db>>;
+
+/// Returns the name resolutions produced when inferring the scope with its type context.
+///
+/// The caller must first pass the scope through `scope_for_complete_type_inference`.
+#[cfg_attr(not(test), expect(dead_code, reason = "awaiting IDE integration"))]
+pub(crate) fn reaching_definitions_for_scope<'db>(
+    db: &'db dyn Db,
+    scope: ScopeId<'db>,
+) -> DefinitionResolutionsByExpression<'db> {
+    let program_file = scope.program_file(db);
+    let python_file = program_file.python_file(db);
+    let module = parsed_module(db, python_file).load(db);
+    let index = semantic_index(db, program_file);
+    let env = ProgramEnvironment::from_file(program_file);
+    TypeInferenceBuilder::new(
+        db,
+        &env,
+        InferenceRegion::Scope(scope, TypeContext::default()),
+        python_file.file(db),
+        program_file,
+        index,
+        &module,
+    )
+    .reaching_definitions_for_region()
+}
+
 /// Returns the scope that supplies the type context needed to infer `scope`.
-fn scope_for_complete_type_inference<'db>(db: &'db dyn Db, scope: ScopeId<'db>) -> ScopeId<'db> {
+pub(crate) fn scope_for_complete_type_inference<'db>(
+    db: &'db dyn Db,
+    scope: ScopeId<'db>,
+) -> ScopeId<'db> {
     // Scopes that may require type context are inferred during the inference of
     // their outer scope.
     if scope.accepts_type_context(db) {

@@ -29,17 +29,62 @@ use crate::place_load::{
 use crate::types::ide_support::{ImportAliasResolution, definition_for_name};
 use crate::types::list_members::{all_members, all_reachable_members};
 use crate::types::{
-    CycleDetector, ProgramEnvironment, SpecialFormType, Type, TypeQualifiers, binding_type,
-    infer_complete_scope_types, infer_definition_types, inferred_declaration,
-    is_discarded_dict_key_assignment,
+    CycleDetector, DefinitionResolutionsByExpression, ProgramEnvironment, SpecialFormType, Type,
+    TypeQualifiers, binding_type, infer_complete_scope_types, infer_definition_types,
+    inferred_declaration, is_discarded_dict_key_assignment, reaching_definitions_for_scope,
+    scope_for_complete_type_inference,
 };
 use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_core::place::PlaceExpr;
 use ty_python_core::place_table;
-use ty_python_core::scope::{FileScopeId, Scope};
+use ty_python_core::scope::{FileScopeId, Scope, ScopeId};
 use ty_python_core::semantic_index;
 use ty_python_core::symbol::Symbol;
 use ty_python_core::{BindingWithConstraintsIterator, Program, ProgramFile};
+
+/// Resolves name loads on demand, reusing results for the duration of an IDE operation.
+///
+/// Create a new instance for each operation and use it only with models from the same Salsa
+/// database revision.
+#[derive(Default)]
+#[cfg_attr(not(test), expect(dead_code, reason = "awaiting IDE integration"))]
+struct ReachingDefinitions<'db> {
+    by_scope: FxHashMap<ScopeId<'db>, DefinitionResolutionsByExpression<'db>>,
+}
+
+#[cfg_attr(not(test), expect(dead_code, reason = "awaiting IDE integration"))]
+impl<'db> ReachingDefinitions<'db> {
+    /// Creates an empty operation-local lookup.
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns the definitions that may supply a name load.
+    ///
+    /// The result contains source definitions. It is incomplete if a synthetic binding cannot be
+    /// mapped to a source definition.
+    /// Returns `None` when inference did not visit this name. For names in string
+    /// annotations, use the model returned by [`SemanticModel::enter_string_annotation`].
+    fn for_name(
+        &mut self,
+        model: &SemanticModel<'db>,
+        name: &ast::ExprName,
+    ) -> Option<DefinitionResolution<'db>> {
+        let db = model.db();
+        let file = model.program_file();
+        let scope =
+            scope_for_complete_type_inference(db, model.scope(name.into())?.to_scope_id(db, file));
+        let resolutions = self
+            .by_scope
+            .entry(scope)
+            .or_insert_with(|| reaching_definitions_for_scope(db, scope));
+
+        resolutions
+            .get(&ast::ExprRef::Name(name).into())
+            .cloned()
+            .map(|resolution| resolution.into_source_definitions(db))
+    }
+}
 
 /// The primary interface the LSP should use for querying semantic information about a [`File`].
 ///
@@ -1190,10 +1235,15 @@ impl HasType for ast::ExceptHandlerExceptHandler {
 
 #[cfg(test)]
 mod tests {
+    use super::ReachingDefinitions;
     use crate::db::tests::TestDbBuilder;
     use crate::{HasType, SemanticModel};
     use ruff_db::files::system_path_to_file;
     use ruff_db::parsed::parsed_module;
+    use ruff_python_ast as ast;
+    use ruff_python_ast::visitor::{Visitor, walk_expr};
+    use ruff_python_trivia::textwrap::dedent;
+    use ruff_text_size::Ranged;
     use ty_python_core::ProgramFile;
 
     #[test]
@@ -1256,5 +1306,82 @@ mod tests {
         assert!(ty.is_class_literal());
 
         Ok(())
+    }
+
+    #[test]
+    fn reaching_definitions_follow_inference_across_regions() {
+        let source = dedent(
+            "
+            from __future__ import annotations
+
+            value = str
+            class C:
+                if condition:
+                    value = bytes
+                result = value
+                value = float
+                definite = value
+
+            @value
+            def function(argument: value = value):
+                return [value for item in (value,)]
+            value = int
+            ",
+        );
+        let db = TestDbBuilder::new()
+            .with_file("/src/test.py", &source)
+            .build()
+            .unwrap();
+        let file = system_path_to_file(&db, "/src/test.py").unwrap();
+        let file = ProgramFile::new(&db, file, db.program_environment().program(&db));
+        let module = parsed_module(&db, file.python_file(&db)).load(&db);
+        let model = SemanticModel::new(&db, file);
+        let mut names = ValueLoads { names: Vec::new() };
+        names.visit_body(module.suite());
+
+        let mut reaching_definitions = ReachingDefinitions::new();
+        let actual: Vec<Vec<&str>> = names
+            .names
+            .into_iter()
+            .map(|name| {
+                let resolution = reaching_definitions
+                    .for_name(&model, name)
+                    .unwrap_or_else(|| panic!("no resolution for {name:?} in {source}"));
+                resolution
+                    .definitions()
+                    .iter()
+                    .map(|definition| &source[definition.full_range(&db, &module).range()])
+                    .collect()
+            })
+            .collect();
+
+        assert_eq!(
+            actual,
+            [
+                vec!["value = bytes", "value = str"], // Class-body fallback
+                vec!["value = float"],                // No fallback
+                vec!["value = str"],                  // Decorator
+                vec!["value = str"],                  // Default
+                vec!["value = str", "value = int"],   // Deferred annotation
+                vec!["value = str", "value = int"],   // Comprehension iterable
+                vec!["value = str", "value = int"],   // Comprehension body
+            ]
+        );
+    }
+
+    struct ValueLoads<'ast> {
+        names: Vec<&'ast ast::ExprName>,
+    }
+
+    impl<'ast> Visitor<'ast> for ValueLoads<'ast> {
+        fn visit_expr(&mut self, expression: &'ast ast::Expr) {
+            if let ast::Expr::Name(name) = expression
+                && name.ctx.is_load()
+                && name.id == "value"
+            {
+                self.names.push(name);
+            }
+            walk_expr(self, expression);
+        }
     }
 }
