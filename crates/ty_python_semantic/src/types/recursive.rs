@@ -85,9 +85,9 @@ use super::relation::{TypeRelation, TypeRelationChecker};
 use super::type_alias::AliasCycleSummary;
 use super::variance::{VarianceInferable, VarianceOrigin};
 use super::{
-    ApplyTypeMappingVisitor, BoundTypeVarIdentity, ClassLiteral, ClassType, GenericContext,
-    MaterializationKind, Type, TypeContext, TypeMapping, TypeRecursionContext, TypedDictType,
-    VarianceTerm,
+    ApplyTypeMappingVisitor, BoundTypeVarIdentity, CallableType, ClassLiteral, ClassType,
+    GenericContext, MaterializationKind, Type, TypeContext, TypeMapping, TypeRecursionContext,
+    TypedDictType, VarianceTerm,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -107,6 +107,29 @@ impl<'a, 'env, 'db, Mode> TypeExpansionContext<'a, 'env, 'db, Mode> {
             mapping,
             mode: PhantomData,
         }
+    }
+}
+
+impl<'db, Mode> TypeExpansionContext<'_, '_, 'db, Mode> {
+    /// Guard signature substitution while the caller keeps its operation guard active.
+    pub(super) fn expand_signature<R>(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        expand: impl FnOnce(&TypeRecursionContext<'db>) -> R,
+    ) -> Option<R> {
+        let context = self.mapping.recursion_context();
+        context.expand_signature(db, callable, || expand(context))
+    }
+
+    /// Inspect a deferred signature under this operation's recursion policy.
+    pub(super) fn inspect_signatures<R>(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+    ) -> Option<R> {
+        callable.inspect_signatures_in_operation(db, self, inspect)
     }
 }
 
@@ -450,6 +473,20 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         visit(&Self::new(env, operation))
     }
 
+    pub(super) fn recursion_context(&self) -> &TypeRecursionContext<'db> {
+        self.mapping().recursion_context()
+    }
+
+    /// Keep deferred signature expansion active while the consumer visits its contents.
+    pub(super) fn inspect_signatures<R>(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+    ) -> Option<R> {
+        callable.inspect_signatures(db, self.recursion_context(), inspect)
+    }
+
     pub(crate) fn environment(&self) -> &ProgramEnvironment<'db> {
         self.env
     }
@@ -687,6 +724,19 @@ where
         self.traversal.environment()
     }
 
+    pub(super) fn recursion_context(&self) -> &TypeRecursionContext<'db> {
+        self.traversal.recursion_context()
+    }
+
+    pub(super) fn inspect_signatures<R>(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+    ) -> Option<R> {
+        callable.inspect_signatures(db, self.recursion_context(), inspect)
+    }
+
     fn mapping_visitor(&self) -> &ApplyTypeMappingVisitor<'env, 'db> {
         self.traversal.mapping()
     }
@@ -819,7 +869,7 @@ pub(super) struct NormalizedType<'db> {
 }
 
 /// A scoped inspection that keeps recursion guards active while normalizing outer alternatives.
-pub(super) struct TypeInspector<'env, 'db> {
+pub(crate) struct TypeInspector<'env, 'db> {
     traversal: StructuralTypeTraversal<'env, 'db, InspectType>,
 }
 
@@ -871,6 +921,25 @@ where
 }
 
 impl<'env, 'db> TypeInspector<'env, 'db> {
+    pub(super) fn inspect_signatures<R>(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+    ) -> Option<R> {
+        self.traversal.inspect_signatures(db, callable, inspect)
+    }
+
+    pub(super) fn map_signatures(
+        &self,
+        db: &'db dyn Db,
+        signatures: &super::signatures::CallableSignature<'db>,
+        mapping: &TypeMapping<'_, 'db>,
+        tcx: TypeContext<'db>,
+    ) -> super::signatures::CallableSignature<'db> {
+        signatures.apply_type_mapping_impl(db, mapping, tcx, self.traversal.mapping())
+    }
+
     pub(super) fn scope<R>(
         env: &'env ProgramEnvironment<'db>,
         inspect: impl FnOnce(&Self) -> R,

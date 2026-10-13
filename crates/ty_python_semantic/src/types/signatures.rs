@@ -383,51 +383,60 @@ impl<'db> CallableSignature<'db> {
                 {
                     let env = visitor.env;
                     Some(CallableSignature::from_overloads(
-                        callable.signatures(db).iter().map(|signature| Signature {
-                            generic_context: GenericContext::merge_optional(
-                                db,
-                                signature.generic_context,
-                                self_signature.generic_context.map(|context| {
-                                    type_mapping.update_signature_generic_context(db, env, context)
-                                }),
-                            ),
-                            // Keep the enclosing method's definition for binding `Self` and
-                            // other receiver type variables after specializing its parameters.
-                            definition: self_signature.definition,
-                            extras: SignatureExtras::new(
-                                signature.source_overload_index_raw(),
-                                {
-                                    let mapped = self_signature.map_receiver_constraints(
+                        callable
+                            .explicit_signatures(db)?
+                            .iter()
+                            .map(|signature| Signature {
+                                generic_context: GenericContext::merge_optional(
+                                    db,
+                                    signature.generic_context,
+                                    self_signature.generic_context.map(|context| {
+                                        type_mapping
+                                            .update_signature_generic_context(db, env, context)
+                                    }),
+                                ),
+                                // Keep the enclosing method's definition for binding `Self` and
+                                // other receiver type variables after specializing its parameters.
+                                definition: self_signature.definition,
+                                extras: SignatureExtras::new(
+                                    signature.source_overload_index_raw(),
+                                    {
+                                        let mapped = self_signature.map_receiver_constraints(
+                                            db,
+                                            type_mapping,
+                                            tcx,
+                                            visitor,
+                                        );
+                                        merge_receiver_constraints(
+                                            db,
+                                            env,
+                                            signature.receiver_constraints(),
+                                            mapped.as_ref(),
+                                        )
+                                    },
+                                    self_signature.is_paramspec_value(),
+                                ),
+                                parameters: signature.parameters().with_prefix(
+                                    prefix_parameters.iter().map(|param| {
+                                        param.apply_type_mapping_impl(
+                                            db,
+                                            type_mapping,
+                                            tcx,
+                                            visitor,
+                                        )
+                                    }),
+                                ),
+                                return_ty: if self_signature.is_paramspec_value() {
+                                    self_signature.return_ty
+                                } else {
+                                    self_signature.return_ty.apply_type_mapping_impl(
                                         db,
                                         type_mapping,
                                         tcx,
                                         visitor,
-                                    );
-                                    merge_receiver_constraints(
-                                        db,
-                                        env,
-                                        signature.receiver_constraints(),
-                                        mapped.as_ref(),
                                     )
                                 },
-                                self_signature.is_paramspec_value(),
-                            ),
-                            parameters: signature.parameters().with_prefix(
-                                prefix_parameters.iter().map(|param| {
-                                    param.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
-                                }),
-                            ),
-                            return_ty: if self_signature.is_paramspec_value() {
-                                self_signature.return_ty
-                            } else {
-                                self_signature.return_ty.apply_type_mapping_impl(
-                                    db,
-                                    type_mapping,
-                                    tcx,
-                                    visitor,
-                                )
-                            },
-                        }),
+                            }),
                     ))
                 }
                 _ => None,
@@ -558,12 +567,6 @@ impl<'db> CallableSignature<'db> {
             .as_ref()
             .unwrap_or(self)
             .bind_self_with_receiver(db, env, Some(receiver_type), Some(typing_self_type))
-    }
-
-    pub(crate) fn has_parameters(&self) -> bool {
-        self.overloads
-            .iter()
-            .any(|signature| !signature.parameters().as_slice().is_empty())
     }
 
     /// Replaces `typing.Self` while supplying the runtime receiver for a previously bound
@@ -2210,18 +2213,13 @@ impl<'db> Signature<'db> {
     }
 }
 
-impl<'db> VarianceInferable<'db> for &Signature<'db> {
+impl<'db> VarianceInferable<'db> for &Parameters<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        tracing::trace!(
-            "Checking variance of `{tvar}` in `{self:?}`",
-            tvar = typevar.identity.name(db)
-        );
-
         let parameter_variance = |parameter: &Parameter<'db>| {
             parameter
                 .annotated_type()
@@ -2229,29 +2227,39 @@ impl<'db> VarianceInferable<'db> for &Signature<'db> {
                 .variance_of(db, env, typevar)
         };
 
-        let parameter_variances = if let Some((prefix_parameters, paramspec)) =
-            self.parameters.as_paramspec_with_prefix()
-        {
-            Either::Left(
-                prefix_parameters
-                    .iter()
-                    .map(parameter_variance)
-                    .chain(std::iter::once(
-                        Type::TypeVar(paramspec)
-                            .with_polarity(TypeVarVariance::Contravariant)
-                            .variance_of(db, env, typevar),
-                    )),
-            )
-        } else {
-            Either::Right(self.parameters.iter().map(parameter_variance))
-        };
+        let parameter_variances =
+            if let Some((prefix_parameters, paramspec)) = self.as_paramspec_with_prefix() {
+                Either::Left(
+                    prefix_parameters
+                        .iter()
+                        .map(parameter_variance)
+                        .chain(std::iter::once(
+                            Type::TypeVar(paramspec)
+                                .with_polarity(TypeVarVariance::Contravariant)
+                                .variance_of(db, env, typevar),
+                        )),
+                )
+            } else {
+                Either::Right(self.iter().map(parameter_variance))
+            };
 
+        VarianceTerm::join(db, parameter_variances)
+    }
+}
+
+impl<'db> VarianceInferable<'db> for &Signature<'db> {
+    fn variance_of(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
         VarianceTerm::join(
             db,
-            itertools::chain(
-                parameter_variances,
-                Some(self.return_ty.variance_of(db, env, typevar)),
-            ),
+            [
+                self.parameters().variance_of(db, env, typevar),
+                self.return_ty.variance_of(db, env, typevar),
+            ],
         )
     }
 }
@@ -5625,13 +5633,12 @@ impl<'db> Parameters<'db> {
             return self.clone();
         }
 
-        let [mapped_signature] = paramspec_callable.signatures(db).overloads.as_slice() else {
+        let Some(mapped_parameters) = paramspec_callable.single_parameters(db) else {
             return self.clone();
         };
 
-        let expanded = mapped_signature
-            .parameters()
-            .with_prefix(self.data.value[..variadic_index].iter().cloned());
+        let expanded =
+            mapped_parameters.with_prefix(self.data.value[..variadic_index].iter().cloned());
         if variadic_index + 2 == self.len() {
             expanded
         } else {

@@ -17,7 +17,7 @@ use crate::types::function::FunctionDecorators;
 use crate::types::recursive::TypeExpansionContext;
 use crate::types::relation_error::ErrorRelation;
 use crate::types::set_theoretic::RecursivelyDefined;
-use crate::types::signatures::{ParametersKind, SignatureRelationVisitor};
+use crate::types::signatures::{CallableSignature, ParametersKind, SignatureRelationVisitor};
 use crate::types::tuple::TupleType;
 use crate::types::typevar::TypeVarDomain;
 use crate::types::{
@@ -2342,10 +2342,15 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (
                 Type::KnownInstance(KnownInstanceType::FunctoolsPartial(partial)),
                 Type::NominalInstance(target_instance),
-            ) if target_instance.has_known_class(db, KnownClass::FunctoolsPartial) => {
-                let specialized = partial.partial(db).into_functools_partial_instance(db, env);
-                self.check_type_pair(db, specialized, target)
-            }
+            ) if target_instance.has_known_class(db, KnownClass::FunctoolsPartial) => self
+                .with_recursion_guard(db, source, target, |_| {
+                    let specialized = partial.partial(db).into_functools_partial_instance(
+                        db,
+                        env,
+                        self.materialization_visitor.recursion_context(),
+                    );
+                    self.check_type_pair(db, specialized, target)
+                }),
 
             // Dynamic is only a subtype of `object` and only a supertype of `Never`; both were
             // handled above. It's always assignable, though.
@@ -2658,12 +2663,18 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 ),
                 Type::FunctionLiteral(target_function),
             ) if matches!(self.relation, TypeRelation::Assignability) => {
-                self.with_recursion_guard(db, source, target, |_| {
-                    self.check_callable_signature_pair(
-                        db,
-                        source_partial.partial(db).signatures(db),
-                        target_function.into_callable_type(db).signatures(db),
-                    )
+                self.with_recursion_guard(db, source, target, |expansion| {
+                    expansion
+                        .inspect_signatures(db, source_partial.partial(db), |source| {
+                            expansion
+                                .inspect_signatures(
+                                    db,
+                                    target_function.into_callable_type(db),
+                                    |target| self.check_callable_signature_pair(db, source, target),
+                                )
+                                .unwrap_or_else(|| self.never())
+                        })
+                        .unwrap_or_else(|| self.never())
                 })
             }
             (Type::BoundMethod(source_method), Type::BoundMethod(target_method)) => {
@@ -3326,9 +3337,8 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     fn is_gradual_paramspec_value(db: &'db dyn Db, callable: CallableType<'db>) -> bool {
         callable.kind(db) == CallableTypeKind::ParamSpecValue
             && callable
-                .signatures(db)
-                .iter()
-                .all(|signature| signature.parameters().kind() == ParametersKind::Gradual)
+                .parameter_lists(db)
+                .all(|parameters| parameters.kind() == ParametersKind::Gradual)
     }
 }
 
@@ -3423,6 +3433,19 @@ pub(super) struct DisjointnessChecker<'a, 'c, 'db> {
 }
 
 impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
+    pub(super) fn inspect_signatures<R>(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        inspect: impl FnOnce(&CallableSignature<'db>) -> R,
+    ) -> Option<R> {
+        callable.inspect_signatures(
+            db,
+            self.materialization_visitor.recursion_context(),
+            inspect,
+        )
+    }
+
     /// Keep tuple element normalization inside this comparison's recursion context.
     pub(super) fn project_nominal_class(
         &self,

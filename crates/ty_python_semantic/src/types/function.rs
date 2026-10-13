@@ -548,9 +548,16 @@ impl<'db> OverloadLiteral<'db> {
         db: &'db dyn Db,
     ) -> impl Iterator<Item = Signature<'db>> + Clone + 'db {
         match binding_type(db, self.definition(db)) {
-            Type::Callable(callable) => {
-                Either::Left(callable.signatures(db).overloads.iter().cloned())
-            }
+            Type::Callable(callable) => Either::Left(
+                callable
+                    .inspect_signatures_root(
+                        db,
+                        &ProgramEnvironment::from_definition(self.definition(db)),
+                        |_, signatures| signatures.overloads.clone(),
+                    )
+                    .unwrap_or_default()
+                    .into_iter(),
+            ),
             _ => Either::Right(std::iter::once(self.signature(db))),
         }
     }
@@ -1219,14 +1226,22 @@ impl<'db> FunctionType<'db> {
             .and_then(|updated| updated.signature.as_ref())
     }
 
-    fn updated_implementation_signature(self, db: &'db dyn Db) -> Option<&'db Signature<'db>> {
+    fn updated_implementation_signature(self, db: &'db dyn Db) -> Option<Signature<'db>> {
         let [callable] = self.updated_implementation_callables(db)? else {
             return None;
         };
-        let [signature] = callable.signatures(db).overloads.as_slice() else {
-            return None;
-        };
-        Some(signature)
+        callable
+            .inspect_signatures_root(
+                db,
+                &ProgramEnvironment::from_definition(self.definition(db)),
+                |_, signatures| {
+                    let [signature] = signatures.overloads.as_slice() else {
+                        return None;
+                    };
+                    Some(signature.clone())
+                },
+            )
+            .flatten()
     }
 
     fn updated_implementation_callables(self, db: &'db dyn Db) -> Option<&'db [CallableType<'db>]> {
@@ -1278,12 +1293,21 @@ impl<'db> FunctionType<'db> {
             self.implementation_callables(db)
                 .iter()
                 .map(|callable| {
-                    callable.with_signatures(
-                        db,
-                        callable
-                            .signatures(db)
-                            .with_inherited_generic_context(db, inherited_generic_context),
-                    )
+                    callable
+                        .inspect_signatures_root(
+                            db,
+                            &ProgramEnvironment::from_definition(self.definition(db)),
+                            |_, signatures| {
+                                callable.with_signatures(
+                                    db,
+                                    signatures.with_inherited_generic_context(
+                                        db,
+                                        inherited_generic_context,
+                                    ),
+                                )
+                            },
+                        )
+                        .unwrap_or(*callable)
                 })
                 .collect()
         });
@@ -1687,7 +1711,6 @@ impl<'db> FunctionType<'db> {
         let literal = self.literal(db);
         if literal.has_separate_implementation(db) {
             self.updated_implementation_signature(db)
-                .cloned()
                 .unwrap_or_else(|| literal.last_definition_signature(db))
         } else {
             self.updated_signature(db)

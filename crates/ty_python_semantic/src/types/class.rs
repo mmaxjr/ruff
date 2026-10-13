@@ -2469,9 +2469,15 @@ impl<'db> ClassType<'db> {
 
             // Step 3: If the return type of the `__new__` evaluates to a type that is not a subclass of this class,
             // then we should ignore the `__init__` and just return the `__new__` method.
-            let returns_non_subclass = bound_callables
-                .signatures(db)
-                .any(|signature| !signature.return_ty.is_assignable_to(db, env, instance_type));
+            let returns_non_subclass = bound_callables.iter().any(|callable| {
+                callable
+                    .inspect_signatures_root(db, env, |_, signatures| {
+                        signatures.iter().any(|signature| {
+                            !signature.return_ty.is_assignable_to(db, env, instance_type)
+                        })
+                    })
+                    .unwrap_or(true)
+            });
 
             if returns_non_subclass {
                 return bound_callables;
@@ -2499,13 +2505,17 @@ impl<'db> ClassType<'db> {
         {
             let signature = match ty {
                 Type::FunctionLiteral(dunder_init_function) => {
-                    Some(dunder_init_function.signature(db))
+                    Some(dunder_init_function.into_callable_type(db))
                 }
-                Type::Callable(callable) => Some(callable.signatures(db)),
+                Type::Callable(callable) => Some(callable),
                 _ => None,
             };
 
-            if let Some(signature) = signature {
+            if let Some(signature) = signature.and_then(|callable| {
+                callable
+                    .with_return_type(db, instance_type)
+                    .explicit_signatures(db)
+            }) {
                 let synthesized_signature = |signature: &Signature<'db>| {
                     let self_annotation = signature
                         .parameters()

@@ -64,41 +64,53 @@ impl<'db> TypeQuery<'db> for CanSuppressExceptions {
 
         let exception_type = KnownClass::BaseException.to_subclass_of(db, env);
         let exception_instance = KnownClass::BaseException.to_instance(db, env);
-        for signature in callables
-            .iter()
-            .flat_map(|callable| callable.signatures(db))
-        {
-            if signature
-                .parameters()
-                .get_positional(0)
-                .is_some_and(|parameter| {
-                    parameter
-                        .annotated_type()
-                        .is_disjoint_from(db, env, exception_type)
+        for callable in &callables {
+            if traversal
+                .inspect_signatures(db, *callable, |signatures| {
+                    for signature in signatures {
+                        if signature
+                            .parameters()
+                            .get_positional(0)
+                            .is_some_and(|parameter| {
+                                parameter
+                                    .annotated_type()
+                                    .is_disjoint_from(db, env, exception_type)
+                            })
+                            || signature
+                                .parameters()
+                                .get_positional(1)
+                                .is_some_and(|parameter| {
+                                    parameter.annotated_type().is_disjoint_from(
+                                        db,
+                                        env,
+                                        exception_instance,
+                                    )
+                                })
+                        {
+                            continue;
+                        }
+
+                        let return_type = if is_async {
+                            let Ok(awaited) = signature.return_ty.try_await(db, env) else {
+                                continue;
+                            };
+                            awaited
+                        } else {
+                            signature.return_ty
+                        };
+
+                        if return_type.is_equivalent_to(
+                            db,
+                            env,
+                            KnownClass::Bool.to_instance(db, env),
+                        ) || return_type.is_equivalent_to(db, env, Type::bool_literal(true))
+                        {
+                            return true;
+                        }
+                    }
+                    false
                 })
-                || signature
-                    .parameters()
-                    .get_positional(1)
-                    .is_some_and(|parameter| {
-                        parameter
-                            .annotated_type()
-                            .is_disjoint_from(db, env, exception_instance)
-                    })
-            {
-                continue;
-            }
-
-            let return_type = if is_async {
-                let Ok(awaited) = signature.return_ty.try_await(db, env) else {
-                    continue;
-                };
-                awaited
-            } else {
-                signature.return_ty
-            };
-
-            if return_type.is_equivalent_to(db, env, KnownClass::Bool.to_instance(db, env))
-                || return_type.is_equivalent_to(db, env, Type::bool_literal(true))
+                .unwrap_or(false)
             {
                 return true;
             }

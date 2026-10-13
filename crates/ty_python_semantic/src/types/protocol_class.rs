@@ -26,8 +26,8 @@ use crate::{
         CallableType, ClassBase, ClassLiteral, ClassType, ErrorContext, FindLegacyTypeVarsVisitor,
         GenericAlias, GenericContext, InstanceFallbackShadowsNonDataDescriptor, KnownFunction,
         KnownInstanceType, MaterializationKind, MemberLookupKey, MemberLookupPolicy, Parameter,
-        ProtocolInstanceType, SelfBinding, Signature, StaticClassLiteral, Type, TypeMapping,
-        TypeQualifiers, TypeVarVariance, UnionType, VarianceInferable, VarianceTerm,
+        ProtocolInstanceType, SelfBinding, StaticClassLiteral, Type, TypeMapping, TypeQualifiers,
+        TypeVarVariance, UnionType, VarianceInferable, VarianceTerm,
         constraints::{ConstraintSet, IteratorConstraintsExtension, OptionConstraintsExtension},
         context::InferContext,
         diagnostic::{INVALID_PROTOCOL, report_undeclared_protocol_member},
@@ -721,7 +721,26 @@ pub(super) fn walk_protocol_instance_member<'db, V: super::visitor::TypeVisitor<
                 visitor.visit_type(db, method);
                 return;
             };
-            for signature in callable.signatures(db) {
+            let Some(signatures) = callable.explicit_signatures(db) else {
+                let callable = if kind != ProtocolMethodKind::Static
+                    && callable.single_parameters(db).is_some_and(|parameters| {
+                        parameters.get(0).is_some_and(|parameter| {
+                            parameter.is_positional() && parameter.inferred_annotation
+                        })
+                    }) {
+                    let runtime_type = if kind == ProtocolMethodKind::Class {
+                        receiver_ty.to_meta_type(db, env)
+                    } else {
+                        receiver_ty
+                    };
+                    callable.bind_self(db, env, runtime_type, receiver_ty)
+                } else {
+                    callable
+                };
+                visitor.visit_type(db, Type::Callable(callable));
+                return;
+            };
+            for signature in signatures {
                 if signature.has_implicit_positional_receiver_annotation()
                     && kind != ProtocolMethodKind::Static
                 {
@@ -1894,12 +1913,14 @@ impl<'db> ProtocolMemberKind<'db> {
                     return Self::Method(current.cycle_normalized(db, env, previous, cycle), kind);
                 };
                 debug_assert_eq!(current_callable.kind(db), previous_callable.kind(db));
-                let signatures = current_callable.signatures(db).cycle_normalized(
-                    db,
-                    env,
-                    previous_callable.signatures(db),
-                    cycle,
-                );
+                let (Some(current_signatures), Some(previous_signatures)) = (
+                    current_callable.explicit_signatures(db),
+                    previous_callable.explicit_signatures(db),
+                ) else {
+                    return Self::Method(current.cycle_normalized(db, env, previous, cycle), kind);
+                };
+                let signatures =
+                    current_signatures.cycle_normalized(db, env, previous_signatures, cycle);
                 Self::Method(
                     Type::Callable(current_callable.with_signatures(db, signatures)),
                     kind,
@@ -2153,21 +2174,23 @@ impl<'a, 'db> ProtocolMember<'a, 'db> {
         else {
             return false;
         };
-        callable.signatures(db).iter().next().is_some()
-            && callable.signatures(db).iter().all(|signature| {
-                signature.has_implicit_positional_receiver_annotation()
-                    || (signature.has_explicit_positional_receiver_annotation()
-                        && signature.parameters().get(0).is_some_and(|parameter| {
-                            parameter
-                                .annotated_type()
-                                .as_protocol_instance()
-                                .is_some_and(|protocol| {
-                                    protocol.materialization_kind(db).is_none()
-                                        && protocol.class_origin(db).is_some_and(|class| {
-                                            class.class_literal(db) == class_origin
-                                        })
-                                })
-                        }))
+        callable.parameter_lists(db).len() > 0
+            && callable.parameter_lists(db).all(|parameters| {
+                parameters.get(0).is_some_and(|parameter| {
+                    parameter.is_positional() && parameter.inferred_annotation
+                }) || parameters.get(0).is_some_and(|parameter| {
+                    parameter.is_positional()
+                        && !parameter.inferred_annotation
+                        && parameter
+                            .annotated_type()
+                            .as_protocol_instance()
+                            .is_some_and(|protocol| {
+                                protocol.materialization_kind(db).is_none()
+                                    && protocol.class_origin(db).is_some_and(|class| {
+                                        class.class_literal(db) == class_origin
+                                    })
+                            })
+                })
             })
     }
 
@@ -2175,10 +2198,11 @@ impl<'a, 'db> ProtocolMember<'a, 'db> {
     pub(super) fn has_explicit_receiver_annotation(&self, db: &'db dyn Db) -> bool {
         match self.data.kind {
             ProtocolMemberKind::Method(Type::Callable(callable), ProtocolMethodKind::Instance) => {
-                callable
-                    .signatures(db)
-                    .iter()
-                    .any(Signature::has_explicit_positional_receiver_annotation)
+                callable.parameter_lists(db).any(|parameters| {
+                    parameters.get(0).is_some_and(|parameter| {
+                        parameter.is_positional() && !parameter.inferred_annotation
+                    })
+                })
             }
             _ => false,
         }
@@ -2227,33 +2251,36 @@ impl<'a, 'db> ProtocolMember<'a, 'db> {
         let Type::Callable(callable) = callable else {
             return StructuralMemberPriority::Recursive;
         };
-        let signatures = callable.signatures(db);
-        let finite_priority = match signatures.iter().len() {
-            0 => return StructuralMemberPriority::Recursive,
-            1 => StructuralMemberPriority::Simple,
-            _ => StructuralMemberPriority::FiniteOverload,
-        };
+        callable
+            .inspect_signatures_root(db, env, |_, signatures| {
+                let finite_priority = match signatures.iter().len() {
+                    0 => return StructuralMemberPriority::Recursive,
+                    1 => StructuralMemberPriority::Simple,
+                    _ => StructuralMemberPriority::FiniteOverload,
+                };
 
-        let is_recursive = signatures.iter().any(|signature| {
-            signature
-                .receiver_constraint_types()
-                .chain(
+                let is_recursive = signatures.iter().any(|signature| {
                     signature
-                        .parameters()
-                        .iter()
-                        .skip(usize::from(
-                            signature.has_implicit_positional_receiver_annotation(),
-                        ))
-                        .map(Parameter::annotated_type),
-                )
-                .chain(std::iter::once(signature.return_ty))
-                .any(is_recursive_type)
-        });
-        if is_recursive {
-            return StructuralMemberPriority::Recursive;
-        }
+                        .receiver_constraint_types()
+                        .chain(
+                            signature
+                                .parameters()
+                                .iter()
+                                .skip(usize::from(
+                                    signature.has_implicit_positional_receiver_annotation(),
+                                ))
+                                .map(Parameter::annotated_type),
+                        )
+                        .chain(std::iter::once(signature.return_ty))
+                        .any(is_recursive_type)
+                });
+                if is_recursive {
+                    return StructuralMemberPriority::Recursive;
+                }
 
-        finite_priority
+                finite_priority
+            })
+            .unwrap_or(StructuralMemberPriority::Recursive)
     }
 
     fn is_instance_method(&self) -> bool {
@@ -2439,10 +2466,12 @@ fn property_get_member_type<'db>(
     let mut get_types = Vec::new();
     let mut definition = None;
     for callable in &getter.try_upcast_to_callable(db, env)? {
-        for signature in callable.signatures(db) {
-            get_types.push(signature.return_ty);
-            definition = definition.or(signature.definition());
-        }
+        callable.inspect_signatures_root(db, env, |_, signatures| {
+            for signature in signatures {
+                get_types.push(signature.return_ty);
+                definition = definition.or(signature.definition());
+            }
+        })?;
     }
     Some(ProtocolAnnotation {
         ty: UnionType::from_elements(db, env, get_types),
@@ -2699,36 +2728,43 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                         if callable.is_function_like(db) {
                             // Require a positional receiver before binding: a zero-argument static
                             // method otherwise loses no parameters while the protocol loses `self`.
-                            let signatures = CallableSignature::from_overloads(
-                                callable
-                                    .signatures(db)
-                                    .iter()
-                                    .filter(|signature| {
-                                        let parameters = signature.parameters();
-                                        parameters.get_positional(0).is_some()
-                                            || parameters.variadic().is_some()
-                                    })
-                                    .map(|signature| {
-                                        signature.bind_self(
-                                            db,
-                                            env,
-                                            Some(implementation_self_binding_ty),
-                                        )
-                                    }),
-                            );
-                            if signatures.overloads.is_empty() {
-                                return self.never();
-                            }
-                            self.check_callable_pair(
-                                db,
-                                callable.with_signatures(db, signatures),
-                                protocol_bind_self(
+                            callable
+                                .inspect_signatures(
                                     db,
-                                    env.program(db),
-                                    required_callable,
-                                    Some(protocol_self_binding_ty),
-                                ),
-                            )
+                                    self.materialization_visitor.recursion_context(),
+                                    |original| {
+                                        let signatures = CallableSignature::from_overloads(
+                                            original
+                                                .iter()
+                                                .filter(|signature| {
+                                                    let parameters = signature.parameters();
+                                                    parameters.get_positional(0).is_some()
+                                                        || parameters.variadic().is_some()
+                                                })
+                                                .map(|signature| {
+                                                    signature.bind_self(
+                                                        db,
+                                                        env,
+                                                        Some(implementation_self_binding_ty),
+                                                    )
+                                                }),
+                                        );
+                                        if signatures.overloads.is_empty() {
+                                            return self.never();
+                                        }
+                                        self.check_callable_pair(
+                                            db,
+                                            callable.with_signatures(db, signatures),
+                                            protocol_bind_self(
+                                                db,
+                                                env.program(db),
+                                                required_callable,
+                                                Some(protocol_self_binding_ty),
+                                            ),
+                                        )
+                                    },
+                                )
+                                .unwrap_or_else(|| self.never())
                         } else {
                             self.check_callable_pair(db, *callable, required_callable)
                         }
@@ -3214,10 +3250,6 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
             else {
                 return self.never();
             };
-            if !callable_has_only_non_never_returns(db, method) {
-                return self.never();
-            }
-
             let Some(callables) =
                 ty.try_upcast_to_callable_with_policy(db, env, UpcastPolicy::Sound)
             else {
@@ -3225,38 +3257,47 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
             };
 
             callables.iter().when_all(db, self.constraints, |callable| {
-                if !callable_has_only_non_never_returns(db, *callable) {
-                    return self.never();
-                }
-
                 // Disjointness distributes over unions. Compare the overload return arms
                 // directly so that recursive return types do not require canonicalizing an
                 // intermediate union merely to distribute it again.
-                method
-                    .signatures(db)
-                    .iter()
-                    .when_all(db, self.constraints, |method_signature| {
-                        callable.signatures(db).iter().when_all(
+                self.inspect_signatures(db, method, |method_signatures| {
+                    if !signatures_have_only_non_never_returns(db, method_signatures) {
+                        return self.never();
+                    }
+                    self.inspect_signatures(db, *callable, |callable_signatures| {
+                        if !signatures_have_only_non_never_returns(db, callable_signatures) {
+                            return self.never();
+                        }
+                        method_signatures.iter().when_all(
                             db,
                             self.constraints,
-                            |callable_signature| {
-                                let result = self.check_type_pair(
+                            |method_signature| {
+                                callable_signatures.iter().when_all(
                                     db,
-                                    method_signature.return_ty,
-                                    callable_signature.return_ty,
-                                );
-                                if let Some(context) = self.report_context()
-                                    && result.is_always_satisfied(db, env, self.inferable)
-                                {
-                                    context.push(ErrorContext::DisjointReturnTypes {
-                                        left: method_signature.return_ty,
-                                        right: callable_signature.return_ty,
-                                    });
-                                }
-                                result
+                                    self.constraints,
+                                    |callable_signature| {
+                                        let result = self.check_type_pair(
+                                            db,
+                                            method_signature.return_ty,
+                                            callable_signature.return_ty,
+                                        );
+                                        if let Some(context) = self.report_context()
+                                            && result.is_always_satisfied(db, env, self.inferable)
+                                        {
+                                            context.push(ErrorContext::DisjointReturnTypes {
+                                                left: method_signature.return_ty,
+                                                right: callable_signature.return_ty,
+                                            });
+                                        }
+                                        result
+                                    },
+                                )
                             },
                         )
                     })
+                    .unwrap_or_else(|| self.never())
+                })
+                .unwrap_or_else(|| self.never())
             })
         };
         if let Some(context) = self.report_context()
@@ -3450,14 +3491,18 @@ fn supports_protocol_variance_inference<'db>(
         if let Type::Callable(callable) = ty {
             // Bound receivers constrain when a method can be called, but they are not input
             // or output positions in variance inference. Match `Signature::variance_of`.
-            callable.signatures(db).iter().all(|signature| {
-                signature
-                    .parameters()
-                    .iter()
-                    .map(Parameter::annotated_type)
-                    .chain(std::iter::once(signature.return_ty))
-                    .all(supports_type)
-            })
+            callable
+                .inspect_signatures_root(db, &env, |_, signatures| {
+                    signatures.iter().all(|signature| {
+                        signature
+                            .parameters()
+                            .iter()
+                            .map(Parameter::annotated_type)
+                            .chain(std::iter::once(signature.return_ty))
+                            .all(supports_type)
+                    })
+                })
+                .unwrap_or(false)
         } else {
             supports_type(ty)
         }
@@ -3579,14 +3624,20 @@ fn protocol_bind_self<'db>(
     }
 
     let env = ProgramEnvironment::from_program(program);
-    callable
-        .with_signatures(
+    match callable.signature_source(db) {
+        crate::types::callable::SignatureSource::Explicit(signatures) => callable.with_signatures(
             db,
-            callable
-                .signatures(db)
-                .bind_self_with_receiver(db, &env, self_type, self_type),
-        )
-        .into_regular(db)
+            signatures.bind_self_with_receiver(db, &env, self_type, self_type),
+        ),
+        crate::types::callable::SignatureSource::Lambda(lambda) => {
+            let lambda = match self_type {
+                Some(receiver) => lambda.bind_receiver(db, &env, receiver, receiver),
+                None => lambda.with_bound_parameters(db, lambda.parameters(db).bind_receiver(db)),
+            };
+            callable.with_lambda_signature(db, lambda)
+        }
+    }
+    .into_regular(db)
 }
 
 /// Cache receiver and `Self` binding only for protocol-member compatibility checks.
@@ -3611,13 +3662,14 @@ fn protocol_apply_self_with_receiver<'db>(
 ///
 /// Return-type disjointness is a pragmatic approximation for method members: a callable returning
 /// `Never` could satisfy otherwise-incompatible signatures, so it must not establish disjointness.
-fn callable_has_only_non_never_returns<'db>(db: &'db dyn Db, callable: CallableType<'db>) -> bool {
-    let mut signatures = callable.signatures(db).iter();
+fn signatures_have_only_non_never_returns<'db>(
+    db: &'db dyn Db,
+    signatures: &CallableSignature<'db>,
+) -> bool {
+    let mut signatures = signatures.iter();
     let Some(first) = signatures.next() else {
-        // An empty signature previously produced `Unknown`, which cannot establish disjointness.
         return false;
     };
-
     !first.return_ty.has_outer_type(db, |ty| ty.is_never())
         && signatures.all(|signature| !signature.return_ty.has_outer_type(db, |ty| ty.is_never()))
 }

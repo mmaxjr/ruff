@@ -1114,17 +1114,31 @@ fn single_descriptor_setter_domain<'db>(
     };
     let mut callable_domains = Vec::with_capacity(callables.iter().len());
     for callable in &callables {
-        let mut write_types = Vec::new();
-        for signature in callable.signatures(db) {
-            match descriptor_setter_signature_domain(db, env, signature, self_ty, receiver_ty) {
-                DescriptorSetterSignatureDomain::Inapplicable => {}
-                DescriptorSetterSignatureDomain::Known(write_ty) => write_types.push(write_ty),
-                DescriptorSetterSignatureDomain::Deferred => {
-                    return DescriptorSetterDomain::Deferred;
+        let domain = callable
+            .inspect_signatures_root(db, env, |_, signatures| {
+                let mut write_types = Vec::new();
+                for signature in signatures {
+                    match descriptor_setter_signature_domain(
+                        db,
+                        env,
+                        signature,
+                        self_ty,
+                        receiver_ty,
+                    ) {
+                        DescriptorSetterSignatureDomain::Inapplicable => {}
+                        DescriptorSetterSignatureDomain::Known(write_ty) => {
+                            write_types.push(write_ty);
+                        }
+                        DescriptorSetterSignatureDomain::Deferred => return None,
+                    }
                 }
-            }
-        }
-        callable_domains.push(UnionType::from_elements(db, env, write_types));
+                Some(UnionType::from_elements(db, env, write_types))
+            })
+            .flatten();
+        let Some(domain) = domain else {
+            return DescriptorSetterDomain::Deferred;
+        };
+        callable_domains.push(domain);
     }
     IntersectionType::bounded_from_elements(db, env, callable_domains).map_or(
         DescriptorSetterDomain::Deferred,
@@ -1250,10 +1264,15 @@ pub(super) fn property_setter_value_type<'db>(
     let mut set_types = Vec::new();
     let mut definition = None;
     for callable in &setter.try_upcast_to_callable(db, env)? {
-        for signature in callable.signatures(db) {
-            set_types.push(signature.parameters().get_positional(1)?.annotated_type());
-            definition = definition.or(signature.definition());
+        for parameters in callable.parameter_lists(db) {
+            set_types.push(parameters.get_positional(1)?.annotated_type());
         }
+        definition = definition.or_else(|| {
+            callable
+                .explicit_signatures(db)?
+                .iter()
+                .find_map(Signature::definition)
+        });
     }
     Some((UnionType::from_elements(db, env, set_types), definition))
 }
@@ -1624,11 +1643,9 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             .try_upcast_to_callable_with_policy(db, env, UpcastPolicy::from(self.relation))
             .when_some_and(db, self.constraints, |callables| {
                 callables.iter().when_all(db, self.constraints, |callable| {
-                    callable.signatures(db).into_iter().when_any(
-                        db,
-                        self.constraints,
-                        |signature| {
-                            let parameters = signature.parameters();
+                    callable
+                        .parameter_lists(db)
+                        .when_any(db, self.constraints, |parameters| {
                             parameters
                                 .get_positional(parameter_index)
                                 .or_else(|| {
@@ -1644,8 +1661,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                                 .when_some_and(db, self.constraints, |write_ty| {
                                     self.check_type_pair(db, value_ty, write_ty)
                                 })
-                        },
-                    )
+                        })
                 })
             })
     }

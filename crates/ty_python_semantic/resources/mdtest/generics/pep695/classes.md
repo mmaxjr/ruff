@@ -3948,5 +3948,22 @@ cursor(0)  # error: [too-many-positional-arguments]
 wrong: int = cursor()  # error: [invalid-assignment]
 ```
 
+## Recursive class methods with growing type arguments
+
+Each call returns the same class method with `T` replaced by `list[T]`:
+
+```py
+class Growing[T]:
+    next = classmethod(lambda cls: Growing[list[T]].next)
+
+cursor = Growing[int].next
+```
+
+The returned method retains its specialized class receiver:
+
+```py
+reveal_type(cursor().__self__)  # revealed: <class 'Growing[list[int]]'>
+```
+
 [crtp]: https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern
 [f-bound]: https://en.wikipedia.org/wiki/Bounded_quantification#F-bounded_quantification

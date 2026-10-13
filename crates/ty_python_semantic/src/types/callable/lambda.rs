@@ -6,7 +6,8 @@ use rustc_hash::FxHashSet;
 use salsa::plumbing::AsId;
 
 use super::{
-    CallableType, LambdaSignature, SignatureSource, infer_lambda_signature, walk_callable_type,
+    CallableType, LambdaSignature, LambdaSource, SignatureSource, infer_lambda_signature,
+    walk_callable_type,
 };
 use crate::types::constraints::resolution::type_dependencies;
 use crate::types::generics::{
@@ -74,8 +75,8 @@ fn lambda_inference_sources<'db>(
             &self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            false
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            None
         }
 
         fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
@@ -147,77 +148,6 @@ struct LambdaTransformation<'db> {
 }
 
 impl<'db> LambdaTransformation<'db> {
-    /// Derive variance from the source and substitution arguments. Expanding the specialized
-    /// signature would create unbounded equations for returns such as `C[list[T]].callback`.
-    fn variance_equation(
-        &self,
-        db: &'db dyn Db,
-        source: LambdaSignature<'db>,
-        typevar: BoundTypeVarIdentity<'db>,
-    ) -> Option<VarianceTerm<'db>> {
-        if matches!(self.mapping, LambdaMapping::Promote(..)) {
-            // Promotion widens literals without introducing type variables or changing their
-            // polarity. Reuse the source equation; it is conservative if union simplification
-            // removes an occurrence. The full signature still retains the promotion.
-            return Some(VarianceTerm::variable(
-                db,
-                VarianceOrigin::Lambda(source),
-                typevar,
-            ));
-        }
-        let LambdaMapping::Specialize {
-            specialization,
-            materialization: None,
-            ..
-        } = &self.mapping
-        else {
-            return None;
-        };
-        let env = ProgramEnvironment::from_scope(source.scope(db));
-        // Keep source equations in terms of their own captures. Variables introduced by
-        // a caller belong in the argument terms, and do not create new source equations.
-        let arguments = source.captured_typevars(db).variables(db).map(|parameter| {
-            let argument = specialization
-                .get(db, parameter)
-                .unwrap_or(Type::TypeVar(parameter));
-            let argument = if parameter.is_paramspec(db) {
-                // ParamSpec arguments encode parameter lists as callables. Their variance
-                // already includes parameter contravariance, which the source equation also
-                // accounts for. Reverse it here so that composition counts it only once.
-                Self::paramspec_argument_variance(db, &env, argument, typevar)
-                    .compose_thunk(db, || TypeVarVariance::Contravariant.into())
-            } else {
-                argument.variance_of(db, &env, typevar)
-            };
-            argument.compose_thunk(db, || {
-                VarianceTerm::variable(db, VarianceOrigin::Lambda(source), parameter.identity(db))
-            })
-        });
-        Some(VarianceTerm::join(db, arguments))
-    }
-
-    /// Give an unspecialized `ParamSpec` the variance of its callable parameter-list value.
-    fn paramspec_argument_variance(
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        argument: Type<'db>,
-        typevar: BoundTypeVarIdentity<'db>,
-    ) -> VarianceTerm<'db> {
-        match argument {
-            Type::Union(union) => VarianceTerm::join(
-                db,
-                union
-                    .elements(db)
-                    .iter()
-                    .map(|argument| Self::paramspec_argument_variance(db, env, *argument, typevar)),
-            ),
-            Type::TypeVar(parameter) if parameter.is_paramspec(db) => argument
-                .variance_of(db, env, typevar)
-                .compose_thunk(db, || TypeVarVariance::Contravariant.into()),
-            _ => argument.variance_of(db, env, typevar),
-        }
-    }
-
     fn parameters(
         &self,
         db: &'db dyn Db,
@@ -282,18 +212,6 @@ impl<'db> LambdaTransformation<'db> {
 }
 
 impl<'db> LambdaSignatureMapping<'db> {
-    pub(super) fn variance_equation(
-        &self,
-        db: &'db dyn Db,
-        typevar: BoundTypeVarIdentity<'db>,
-    ) -> Option<VarianceTerm<'db>> {
-        let (last, prefix) = self.steps.split_last()?;
-        let source = self
-            .source
-            .with_transformations(db, prefix, &TypeRecursionContext::default());
-        last.variance_equation(db, source, typevar)
-    }
-
     /// Expand the original body once, then apply the normalized transformations in order.
     /// A plan never recursively opens another transformed lambda to recover its source.
     pub(super) fn signature(
@@ -304,7 +222,7 @@ impl<'db> LambdaSignatureMapping<'db> {
         let source = self.source;
         let env = ProgramEnvironment::from_scope(source.scope(db));
         self.steps.iter().fold(
-            infer_lambda_signature(db, source).clone(),
+            infer_lambda_signature(db, LambdaSource::of(db, source)).clone(),
             |signature, step| step.signature(db, &env, signature, context),
         )
     }
@@ -471,6 +389,73 @@ impl<'db> CallableType<'db> {
 
 #[salsa::tracked]
 impl<'db> LambdaSignature<'db> {
+    /// Compose the source return equation with its captured arguments. Parameter binding is
+    /// already reflected in the visible parameters, so it never requires opening the return.
+    pub(super) fn variance_of(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        let source = LambdaSource::of(db, self);
+        let return_variance = if self.mapping(db).is_none() {
+            VarianceTerm::variable(db, VarianceOrigin::LambdaReturn(source), typevar)
+        } else {
+            VarianceTerm::join(
+                db,
+                self.captured_arguments(db).map(|(parameter, arguments)| {
+                    let argument_variance = |argument| {
+                        if parameter.is_paramspec(db) {
+                            Self::paramspec_argument_variance(db, env, argument, typevar)
+                                .compose_thunk(db, || TypeVarVariance::Contravariant.into())
+                        } else {
+                            argument.variance_of(db, env, typevar)
+                        }
+                    };
+                    VarianceTerm::substitute(
+                        db,
+                        VarianceTerm::variable(
+                            db,
+                            VarianceOrigin::LambdaReturn(source),
+                            parameter.identity(db),
+                        ),
+                        argument_variance(arguments[0]),
+                        argument_variance(arguments[1]),
+                    )
+                }),
+            )
+        };
+        VarianceTerm::join(
+            db,
+            [
+                self.parameters(db).variance_of(db, env, typevar),
+                return_variance,
+            ],
+        )
+    }
+
+    /// Give an unspecialized `ParamSpec` the variance of its callable parameter-list value.
+    fn paramspec_argument_variance(
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        argument: Type<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        match argument {
+            Type::Union(union) => VarianceTerm::join(
+                db,
+                union
+                    .elements(db)
+                    .iter()
+                    .map(|argument| Self::paramspec_argument_variance(db, env, *argument, typevar)),
+            ),
+            Type::TypeVar(parameter) if parameter.is_paramspec(db) => argument
+                .variance_of(db, env, typevar)
+                .compose_thunk(db, || TypeVarVariance::Contravariant.into()),
+            _ => argument.variance_of(db, env, typevar),
+        }
+    }
+
     /// Share comparisons of specialized views when the differing captures cannot affect their
     /// signatures. Computing this during construction would re-enter inference of the source.
     #[salsa::tracked(
@@ -656,7 +641,7 @@ impl<'db> LambdaSignature<'db> {
     }
 
     /// Keep parameter binding independent of the inputs used to infer the body.
-    pub(super) fn with_bound_parameters(
+    pub(in crate::types) fn with_bound_parameters(
         self,
         db: &'db dyn Db,
         parameters: Parameters<'db>,
@@ -673,7 +658,7 @@ impl<'db> LambdaSignature<'db> {
         )
     }
 
-    pub(super) fn bind_receiver(
+    pub(in crate::types) fn bind_receiver(
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
@@ -826,7 +811,8 @@ impl<'db> LambdaSignature<'db> {
         type_dependencies(
             db,
             &env,
-            [infer_lambda_signature(db, self).overload_return_type_or_unknown(db, &env)],
+            [infer_lambda_signature(db, LambdaSource::of(db, self))
+                .overload_return_type_or_unknown(db, &env)],
         )
     }
 
@@ -1243,7 +1229,11 @@ function = lambda value: (value, 1, C)
             .expect_type()
             .as_callable()
             .ok_or_else(|| anyhow::anyhow!("expected a callable"))?;
-        let explicit = function.with_signatures(&db, function.signatures(&db).clone());
+        let explicit = function
+            .inspect_signatures_root(&db, &env, |_, signatures| {
+                function.with_signatures(&db, signatures.clone())
+            })
+            .ok_or_else(|| anyhow::anyhow!("unexpected recursive signature"))?;
         let promote = |callable, kind| {
             CallableType::apply_type_mapping_impl(
                 callable,
@@ -1266,7 +1256,11 @@ function = lambda value: (value, 1, C)
             for kind in kinds.into_iter().chain([PromotionKind::Regular]) {
                 deferred = promote(deferred, kind);
                 eager = promote(eager, kind);
-                assert_eq!(deferred.signatures(&db), eager.signatures(&db));
+                deferred
+                    .inspect_signatures_root(&db, &env, |_, signatures| {
+                        assert_eq!(Some(signatures), eager.explicit_signatures(&db));
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("unexpected recursive signature"))?;
             }
             assert_eq!(deferred, canonical);
         }

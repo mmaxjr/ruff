@@ -505,8 +505,8 @@ impl<'db> StaticClassLiteral<'db> {
                 self.env
             }
 
-            fn should_visit_lazy_type_attributes(&self) -> bool {
-                false
+            fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+                None
             }
 
             fn visit_recursive_type(
@@ -1449,7 +1449,9 @@ impl<'db> StaticClassLiteral<'db> {
             match ty {
                 Type::Callable(callable_ty)
                     if callable_ty.is_regular(db)
-                        && callable_ty.signatures(db).has_parameters() =>
+                        && callable_ty
+                            .parameter_lists(db)
+                            .any(|parameters| !parameters.as_slice().is_empty()) =>
                 {
                     Type::Callable(callable_ty.into_function_like(db))
                 }
@@ -1518,7 +1520,10 @@ impl<'db> StaticClassLiteral<'db> {
             match ty {
                 Type::Callable(callable_ty)
                     if callable_ty.is_regular(db)
-                        && callable_ty.signatures(db).is_single_paramspec().is_some() =>
+                        && callable_ty
+                            .single_parameters(db)
+                            .and_then(Parameters::as_paramspec)
+                            .is_some() =>
                 {
                     Type::Callable(callable_ty.into_dunder_paramspec(db))
                 }
@@ -1705,22 +1710,29 @@ impl<'db> StaticClassLiteral<'db> {
         {
             let bool_ty = KnownClass::Bool.to_instance(db, env);
             let synthesized_callables = callables.map(|callable| {
-                let signatures = CallableSignature::from_overloads(
-                    callable.signatures(db).iter().map(|signature| {
-                        // The generated methods return a union of the root method's return type
-                        // and `bool`. This is because `@total_ordering` synthesizes methods like:
-                        //     def __gt__(self, other): return not (self == other or self < other)
-                        // If `__lt__` returns `int`, then `__gt__` could return `int | bool`.
-                        let return_ty =
-                            UnionType::from_two_elements(db, env, signature.return_ty, bool_ty);
-                        Signature::new_generic(
-                            signature.generic_context,
-                            signature.parameters().clone(),
-                            return_ty,
-                        )
-                    }),
-                );
-                CallableType::new(db, signatures, CallableTypeKind::FunctionLike)
+                callable
+                    .inspect_signatures_root(db, env, |_, original| {
+                        let signatures =
+                            CallableSignature::from_overloads(original.iter().map(|signature| {
+                                // The generated methods return a union of the root method's return type
+                                // and `bool`. This is because `@total_ordering` synthesizes methods like:
+                                //     def __gt__(self, other): return not (self == other or self < other)
+                                // If `__lt__` returns `int`, then `__gt__` could return `int | bool`.
+                                let return_ty = UnionType::from_two_elements(
+                                    db,
+                                    env,
+                                    signature.return_ty,
+                                    bool_ty,
+                                );
+                                Signature::new_generic(
+                                    signature.generic_context,
+                                    signature.parameters().clone(),
+                                    return_ty,
+                                )
+                            }));
+                        CallableType::new(db, signatures, CallableTypeKind::FunctionLike)
+                    })
+                    .unwrap_or(callable)
             });
 
             return Some(synthesized_callables.to_type(db, env));

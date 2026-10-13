@@ -47,8 +47,13 @@ use crate::types::{
 pub(crate) trait TypeVisitor<'db> {
     fn program_environment(&self) -> &ProgramEnvironment<'db>;
 
-    /// Should the visitor trigger inference of and visit lazily-inferred type attributes?
-    fn should_visit_lazy_type_attributes(&self) -> bool;
+    /// Supply the shared recursion state when visiting lazily inferred attributes.
+    /// The default walkers skip deferred attributes when this is `None`.
+    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>>;
+
+    fn should_visit_lazy_type_attributes(&self) -> bool {
+        self.lazy_type_context().is_some()
+    }
 
     /// Notify the visitor that lazily-inferred type attributes were not visited.
     fn notify_skipped_lazy_type_attributes(&self) {}
@@ -553,8 +558,8 @@ pub(super) fn dynamic_content_impl<'db>(
             self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            true
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            Some(self.mapping.recursion_context())
         }
 
         fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
@@ -751,8 +756,8 @@ pub(super) fn contains_growing_type<'db>(
             self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            true
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            Some(self.recursive.mapping_visitor().recursion_context())
         }
 
         fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
@@ -902,8 +907,10 @@ where
             self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            self.mode.should_visit_lazy_type_attributes()
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            self.mode
+                .should_visit_lazy_type_attributes()
+                .then(|| self.recursive.mapping_visitor().recursion_context())
         }
 
         fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {

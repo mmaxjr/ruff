@@ -200,8 +200,8 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
         self.env
     }
 
-    fn should_visit_lazy_type_attributes(&self) -> bool {
-        false
+    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+        None
     }
 
     fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {

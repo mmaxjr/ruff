@@ -641,8 +641,8 @@ fn protocol_materialization_is_noop_with_type_parameters<'db>(
             self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            false
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            None
         }
 
         fn visit_recursive_type(
@@ -1457,8 +1457,8 @@ fn non_recursive_protocol_interface<'db>(
             self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            false
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            None
         }
 
         fn visit_recursive_type(

@@ -35,7 +35,7 @@ use crate::{
     place_load::{PlaceLoadMode, PlaceLoadResolutionStep, resolve_place_load},
     reachability::is_range_reachable,
     types::{
-        KnownClass, KnownUnion, LintDiagnosticGuard, LintDiagnosticGuardBuilder,
+        CallableType, KnownClass, KnownUnion, LintDiagnosticGuard, LintDiagnosticGuardBuilder,
         MemberLookupPolicy, Type, UnionType,
         call::bind::CallableDescription,
         context::InferContext,
@@ -50,7 +50,6 @@ use crate::{
             },
         },
         narrow::{NarrowingConstraint, infer_narrowing_constraints},
-        signatures::CallableSignature,
         tuple::{Tuple, TupleLength},
     },
 };
@@ -64,9 +63,9 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     ) -> Option<LintDiagnosticGuard<'ctx, 'ctx>> {
         #[derive(Debug)]
         enum FunctionInfo<'db> {
-            Function(&'db CallableSignature<'db>, &'db str),
-            Method(&'db CallableSignature<'db>, Option<Cow<'db, str>>),
-            Lambda(&'db CallableSignature<'db>),
+            Function(CallableType<'db>, &'db str),
+            Method(CallableType<'db>, Option<Cow<'db, str>>),
+            Lambda(CallableType<'db>),
         }
 
         impl<'db> FunctionInfo<'db> {
@@ -77,11 +76,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 }
             }
 
-            fn signature(&self) -> &'db CallableSignature<'db> {
+            fn callable(&self) -> CallableType<'db> {
                 match self {
-                    FunctionInfo::Function(signature, _) => signature,
-                    FunctionInfo::Method(signature, _) => signature,
-                    FunctionInfo::Lambda(signature) => signature,
+                    FunctionInfo::Function(callable, _)
+                    | FunctionInfo::Method(callable, _)
+                    | FunctionInfo::Lambda(callable) => *callable,
                 }
             }
         }
@@ -236,15 +235,16 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             diagnostic
                 .info("Callable objects are usually functions, and functions are always truthy");
 
-            let should_await = self.should_await_call(
-                test,
-                callables.iter().flat_map(|callable| {
-                    callable
-                        .signatures(db)
-                        .iter()
-                        .map(|signature| signature.return_ty)
-                }),
-            );
+            let should_await = callables.iter().all(|callable| {
+                callable
+                    .inspect_signatures_root(db, env, |_, signatures| {
+                        self.should_await_call(
+                            test,
+                            signatures.iter().map(|signature| signature.return_ty),
+                        )
+                    })
+                    .unwrap_or(false)
+            });
 
             if should_await {
                 diagnostic.help("Did you mean to call and await this callable?");
@@ -253,9 +253,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             }
 
             let uncalled_function = UncalledFunction {
-                has_parameters: callables
-                    .iter()
-                    .any(|callable| callable.signatures(db).has_parameters()),
+                has_parameters: callables.iter().any(|callable| {
+                    callable
+                        .parameter_lists(db)
+                        .any(|parameters| !parameters.as_slice().is_empty())
+                }),
                 should_await,
             };
 
@@ -451,12 +453,12 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
 
             let function_info = match test_type {
                 Type::FunctionLiteral(function) => Some(FunctionInfo::Function(
-                    function.signature(db),
+                    function.into_callable_type(db),
                     function.name(db),
                 )),
-                Type::BoundMethod(method) if let Some(signatures) = method.bound_signatures(db) => {
+                Type::BoundMethod(method) if let Some(callable) = method.into_callable_type(db) => {
                     Some(FunctionInfo::Method(
-                        signatures,
+                        callable,
                         method.function(db).map(|function| {
                             CallableDescription::defining_class(db, *test_type)
                                 .map(|class| {
@@ -467,7 +469,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     ))
                 }
                 Type::Callable(callable) if callable.is_function_like(db) => {
-                    Some(FunctionInfo::Lambda(callable.signatures(db)))
+                    Some(FunctionInfo::Lambda(*callable))
                 }
                 _ => None,
             };
@@ -476,13 +478,15 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 let mut diagnostic =
                     builder.into_diagnostic(format_args!("{function} is always truthy"));
 
-                let should_await = self.should_await_call(
-                    test,
-                    function
-                        .signature()
-                        .iter()
-                        .map(|signature| signature.return_ty),
-                );
+                let should_await = function
+                    .callable()
+                    .inspect_signatures_root(db, env, |_, signatures| {
+                        self.should_await_call(
+                            test,
+                            signatures.iter().map(|signature| signature.return_ty),
+                        )
+                    })
+                    .unwrap_or(false);
 
                 let kind = function.kind();
 
@@ -497,7 +501,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 }
 
                 let uncalled_function = UncalledFunction {
-                    has_parameters: function.signature().has_parameters(),
+                    has_parameters: function
+                        .callable()
+                        .parameter_lists(db)
+                        .any(|parameters| !parameters.as_slice().is_empty()),
                     should_await,
                 };
 

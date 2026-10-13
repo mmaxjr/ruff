@@ -14,7 +14,7 @@ use crate::{
         known_instance::InternedConstraintSet,
         relation::TypeRelationChecker,
         signatures::CallableSignature,
-        variance::{VarianceInferable, VarianceOrigin, VarianceTerm},
+        variance::{VarianceInferable, VarianceTerm},
         visitor,
     },
 };
@@ -126,26 +126,17 @@ pub(super) fn walk_bound_method_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>
 
 #[salsa::tracked]
 impl<'db> BoundMethodType<'db> {
-    /// Refer to the bound signature's equation without expanding recursive return types.
+    /// Analyze the bound callable view without expanding a lambda's return signature.
     pub(super) fn variance_of(
-        self,
-        db: &'db dyn Db,
-        typevar: BoundTypeVarIdentity<'db>,
-    ) -> VarianceTerm<'db> {
-        VarianceTerm::variable(db, VarianceOrigin::BoundMethod(self), typevar)
-    }
-
-    /// Preserve receiver substitution and overload selection while building a variance equation.
-    pub(in crate::types) fn variance_equation(
         self,
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         let env = ProgramEnvironment::from_program(self.program(db));
         if matches!(self.func(db), Type::FunctionLiteral(_) | Type::Callable(_))
-            && let Some(signatures) = self.bound_signatures(db)
+            && let Some(callable) = self.into_callable_type(db)
         {
-            signatures.variance_of(db, &env, typevar)
+            callable.variance_of(db, &env, typevar)
         } else {
             // Callable instances also expose their attributes through `__func__` and retain the
             // additional receiver bound by classmethod through `__self__`.
@@ -234,7 +225,7 @@ impl<'db> BoundMethodType<'db> {
     pub(crate) fn unbound_signatures(self, db: &'db dyn Db) -> Option<&'db CallableSignature<'db>> {
         match self.func(db) {
             Type::FunctionLiteral(function) => Some(function.signature(db)),
-            Type::Callable(callable) => Some(callable.signatures(db)),
+            Type::Callable(callable) => callable.explicit_signatures(db),
             _ => None,
         }
     }
@@ -324,10 +315,6 @@ impl<'db> BoundMethodType<'db> {
     /// callable alternatives. Use [`Self::callables`] to handle multiple alternatives.
     pub(crate) fn into_callable_type(self, db: &'db dyn Db) -> Option<CallableType<'db>> {
         self.callables(db).and_then(CallableTypes::exactly_one)
-    }
-
-    pub(crate) fn bound_signatures(self, db: &'db dyn Db) -> Option<&'db CallableSignature<'db>> {
-        Some(self.into_callable_type(db)?.signatures(db))
     }
 
     pub(super) fn recursive_type_normalized_impl(

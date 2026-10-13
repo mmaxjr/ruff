@@ -721,22 +721,24 @@ impl<'db> GenericContext<'db> {
                             })
                             .collect();
                         let apply = ApplySpecialization::ReturnCallables(&typevar_replacements);
-                        let signatures = callable.signatures(db).apply_type_mapping_impl(
-                            db,
-                            &TypeMapping::ApplySpecialization(apply),
-                            TypeContext::default(),
-                            &ApplyTypeMappingVisitor::new(&env),
-                        );
-                        let generic_context = GenericContext::from_typevar_instances(
-                            db,
-                            &env,
-                            typevar_replacements.values().copied(),
-                        );
-                        let signatures =
-                            signatures.with_inherited_generic_context(db, generic_context);
-                        let replacement = callable.with_signatures(db, signatures);
+                        callable.inspect_signatures_root(db, &env, |inspector, signatures| {
+                            let signatures = inspector.map_signatures(
+                                db,
+                                signatures,
+                                &TypeMapping::ApplySpecialization(apply),
+                                TypeContext::default(),
+                            );
+                            let generic_context = GenericContext::from_typevar_instances(
+                                db,
+                                &env,
+                                typevar_replacements.values().copied(),
+                            );
+                            let signatures =
+                                signatures.with_inherited_generic_context(db, generic_context);
+                            let replacement = callable.with_signatures(db, signatures);
 
-                        Some((callable, replacement))
+                            (callable, replacement)
+                        })
                     })
                     .collect();
 
@@ -761,8 +763,8 @@ impl<'db> GenericContext<'db> {
                 self.env
             }
 
-            fn should_visit_lazy_type_attributes(&self) -> bool {
-                false
+            fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+                None
             }
 
             fn visit_bound_type_var_type(
@@ -3896,6 +3898,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         formal: CallableType<'db>,
         actual_callables: CallableTypes<'db>,
         polarity: TypeVarVariance,
+        expansion: &TypeExpansionContext<'_, '_, 'db>,
     ) -> Result<(), SpecializationError<'db>> {
         let db = self.db;
         if !matches!(polarity, TypeVarVariance::Covariant) {
@@ -3907,65 +3910,78 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             return self.infer_from_constraint_set(when);
         }
 
-        let formal_signature = formal.signatures(db);
-        let formal_is_single_paramspec = formal_signature.is_single_paramspec().is_some();
-        for actual_callable in &actual_callables {
-            if formal_is_single_paramspec {
-                let when = actual_callable
-                    .signatures(db)
-                    .when_constraint_set_assignable_to(
-                        db,
-                        self.env,
-                        formal_signature,
-                        self.constraints,
-                    );
-                self.infer_from_constraint_set(when)?;
-            } else {
-                // An overloaded actual callable is compatible if at least one overload matches.
-                // Analyze every alternative without changing the builder; only accepted overloads
-                // contribute mappings after their combined relation has been committed.
+        expansion
+            .inspect_signatures(db, formal, |formal_signature| {
+                let formal_is_single_paramspec = formal_signature.is_single_paramspec().is_some();
+                for actual_callable in &actual_callables {
+                    expansion
+                        .inspect_signatures(db, *actual_callable, |actual_signatures| {
+                            if formal_is_single_paramspec {
+                                let when = actual_signatures.when_constraint_set_assignable_to(
+                                    db,
+                                    self.env,
+                                    formal_signature,
+                                    self.constraints,
+                                );
+                                self.infer_from_constraint_set(when)?;
+                            } else {
+                                // An overloaded actual callable is compatible if at least one overload matches.
+                                // Analyze every alternative without changing the builder; only accepted overloads
+                                // contribute mappings after their combined relation has been committed.
 
-                let env = self.env.clone();
-                let constraints = self.constraints;
-                let mut first_rejection = None;
-                let mut accepted =
-                    SmallVec::<[(ConstraintSet<'db, 'c>, ConstraintSetAnalysis<'db>); 1]>::new();
-                for actual_signature in &actual_callable.signatures(db).overloads {
-                    let when = actual_signature.when_constraint_set_assignable_to_signatures(
-                        db,
-                        &env,
-                        formal_signature,
-                        constraints,
-                    );
-                    let analysis = self.analyze_constraint_set(when);
-                    match analysis {
-                        rejected @ ConstraintSetAnalysis::Unsatisfiable(_) => {
-                            first_rejection.get_or_insert(rejected);
-                        }
-                        analysis => accepted.push((when, analysis)),
-                    }
+                                let env = self.env.clone();
+                                let constraints = self.constraints;
+                                let mut first_rejection = None;
+                                let mut accepted = SmallVec::<
+                                    [(ConstraintSet<'db, 'c>, ConstraintSetAnalysis<'db>); 1],
+                                >::new();
+                                for actual_signature in &actual_signatures.overloads {
+                                    let when = actual_signature
+                                        .when_constraint_set_assignable_to_signatures(
+                                            db,
+                                            &env,
+                                            formal_signature,
+                                            constraints,
+                                        );
+                                    let analysis = self.analyze_constraint_set(when);
+                                    match analysis {
+                                        rejected @ ConstraintSetAnalysis::Unsatisfiable(_) => {
+                                            first_rejection.get_or_insert(rejected);
+                                        }
+                                        analysis => accepted.push((when, analysis)),
+                                    }
+                                }
+
+                                let combined = accepted
+                                    .iter()
+                                    .map(|(when, _)| *when)
+                                    .reduce(|left, right| left.or(db, constraints, || right));
+                                let Some(combined) = combined else {
+                                    self.record_constraint_set(ConstraintSet::from_bool(
+                                        self.constraints,
+                                        false,
+                                    ));
+                                    return first_rejection
+                                        .and_then(|analysis| {
+                                            analysis.specialization_error(db, &env)
+                                        })
+                                        .map_or(Ok(()), Err);
+                                };
+
+                                // Retain every alternative that was not proved unsatisfiable. Solving the
+                                // combined TDD here would repeat their potentially expensive path traversals.
+                                self.record_constraint_set(combined);
+                                for (_, analysis) in accepted {
+                                    self.project_for_legacy_fallback(&analysis);
+                                }
+                            }
+                            Ok(())
+                        })
+                        .unwrap_or(Ok(()))?;
                 }
-
-                let combined = accepted
-                    .iter()
-                    .map(|(when, _)| *when)
-                    .reduce(|left, right| left.or(db, constraints, || right));
-                let Some(combined) = combined else {
-                    self.record_constraint_set(ConstraintSet::from_bool(self.constraints, false));
-                    return first_rejection
-                        .and_then(|analysis| analysis.specialization_error(db, &env))
-                        .map_or(Ok(()), Err);
-                };
-
-                // Retain every alternative that was not proved unsatisfiable. Solving the
-                // combined TDD here would repeat their potentially expensive path traversals.
-                self.record_constraint_set(combined);
-                for (_, analysis) in accepted {
-                    self.project_for_legacy_fallback(&analysis);
-                }
-            }
-        }
-        Ok(())
+                Ok(())
+            })
+            .unwrap_or(Ok(()))
     }
 
     /// Infer type mappings for the specialization based on a given type and its declared type.
@@ -4805,6 +4821,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                     formal_callable,
                     actual_callables,
                     relation_polarity,
+                    expansion,
                 )?;
             }
 

@@ -32,7 +32,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use ty_python_core::definition::Definition;
 
-use crate::types::callable::{LambdaSignature, SignatureSource, infer_lambda_signature};
+use crate::types::callable::{
+    LambdaSignature, LambdaSource, SignatureSource, infer_lambda_signature,
+};
 use crate::types::function::FunctionLiteral;
 use crate::types::generics::{GenericContext, Specialization};
 use crate::types::visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard};
@@ -761,7 +763,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
                 }
             }
             RecursiveDefinition::Lambda(lambda) => {
-                for signature in infer_lambda_signature(db, lambda) {
+                for signature in infer_lambda_signature(db, LambdaSource::of(db, lambda)) {
                     walk_signature(db, signature, self);
                 }
             }
@@ -803,8 +805,8 @@ impl<'db> TypeVisitor<'db> for SpecializationFlowVisitor<'db> {
         &self.env
     }
 
-    fn should_visit_lazy_type_attributes(&self) -> bool {
-        false
+    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+        None
     }
 
     fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: crate::types::RecursiveType<'db>) {
@@ -883,8 +885,8 @@ impl<'db> TypeVisitor<'db> for SourceParameterCollector<'_, 'db> {
         self.env
     }
 
-    fn should_visit_lazy_type_attributes(&self) -> bool {
-        false
+    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+        None
     }
 
     fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: crate::types::RecursiveType<'db>) {
@@ -1526,6 +1528,14 @@ impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
     /// Changes whenever an active guard enters or leaves, including during unwinding.
     pub(super) fn revision(&self) -> u64 {
         self.revision.get()
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.seen.borrow().len()
+    }
+
+    pub(super) fn contains(&self, item: &T) -> bool {
+        self.seen.borrow().contains(item)
     }
 
     pub(crate) fn is_empty(&self) -> bool {

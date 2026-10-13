@@ -482,7 +482,7 @@ fn definition_expression_annotation<'db>(
 /// the active guards; transformation caches remain local to each mapping. Each operation keeps
 /// its own guards because its recursion keys and cycle fallbacks differ.
 #[derive(Clone, Default)]
-struct TypeRecursionContext<'db>(Rc<TypeRecursionState<'db>>);
+pub(crate) struct TypeRecursionContext<'db>(Rc<TypeRecursionState<'db>>);
 
 impl<'db> TypeRecursionContext<'db> {
     fn meta_type(&self) -> &MetaTypeRecursion<'db> {
@@ -6670,7 +6670,11 @@ impl<'db> Type<'db> {
                     let wrapped = partial.wrapped(db).inner(db);
                     let nominal_lookup = partial
                         .partial(db)
-                        .into_functools_partial_instance(db, env)
+                        .into_functools_partial_instance(
+                            db,
+                            env,
+                            traversal.recursion_context(),
+                        )
                         .member_lookup_with_policy_and_receiver(
                             db, env, name_str, policy, receiver,
                         );
@@ -7037,8 +7041,9 @@ impl<'db> Type<'db> {
                 unreachable!("semantic operation on an unbound recursive variable")
             }
             Type::Callable(callable) => {
-                CallableBinding::from_overloads(self, callable.signatures(db).iter().cloned())
-                    .into()
+                return traversal.inspect_signatures(db, callable, |signatures| {
+                    CallableBinding::from_overloads(self, signatures.iter().cloned()).into()
+                });
             }
 
             Type::TypeVar(bound_typevar) => {
@@ -7059,7 +7064,12 @@ impl<'db> Type<'db> {
             }
 
             Type::BoundMethod(bound_method) => {
-                let Some(signature) = bound_method.unbound_signatures(db) else {
+                let callable = match bound_method.func(db) {
+                    Type::FunctionLiteral(function) => Some(function.into_callable_type(db)),
+                    Type::Callable(callable) => Some(callable),
+                    _ => None,
+                };
+                let Some(callable) = callable else {
                     return Some(
                         bound_method
                             .func(db)
@@ -7072,63 +7082,75 @@ impl<'db> Type<'db> {
                                     Bindings::from_union(
                                         self,
                                         callables.iter().map(|callable| {
-                                            CallableBinding::from_overloads(
-                                                self,
-                                                callable.signatures(db).overloads.iter().cloned(),
-                                            )
-                                            .with_bound_type(bound_method.signature_receiver(db))
-                                            .into()
+                                            traversal
+                                                .inspect_signatures(db, *callable, |signatures| {
+                                                    CallableBinding::from_overloads(
+                                                        self,
+                                                        signatures.overloads.iter().cloned(),
+                                                    )
+                                                    .with_bound_type(
+                                                        bound_method.signature_receiver(db),
+                                                    )
+                                                    .into()
+                                                })
+                                                .unwrap_or_else(|| {
+                                                    CallableBinding::not_callable(self).into()
+                                                })
                                         }),
                                     )
                                 },
                             ),
                     );
                 };
-                let self_instance = bound_method.self_instance(db);
-                let signature_receiver = bound_method.signature_receiver(db);
-                // Class-based protocol member lookup has already specialized the method for this
-                // receiver. Bake an implicit positional receiver into the signature instead of
-                // checking it structurally again during call inference.
-                let protocol_receiver_is_specialized = self_instance
-                    .as_protocol_instance()
-                    .is_some_and(|protocol| protocol.class_origin(db).is_some())
-                    && signature
-                        .overloads
-                        .iter()
-                        .all(Signature::has_implicit_positional_receiver_annotation);
-                // Synthesized signatures can contain `Self` without a function's generic
-                // context, so substitute it when capturing the receiver.
-                if bound_method.function(db).is_none()
-                    || protocol_receiver_is_specialized
-                    || signature_receiver != self_instance
-                {
-                    let mut binding =
-                        CallableBinding::from_overloads(self, signature.overloads.iter().cloned())
-                            .with_bound_type(signature_receiver);
-                    binding.bake_bound_type_into_overloads(db, env);
-                    binding.into()
-                } else {
-                    // Solve exact receiver constraints before checking the other arguments, but
-                    // retain the receiver itself for call inference and receiver diagnostics.
-                    let overloads = signature.overloads.iter().flat_map(|overload| {
-                        if overload.has_receiver_determined_method_typevar(db, env)
-                            && let Some(specialized) = overload.specialize_for_bound_receiver(
-                                db,
-                                env,
-                                self_instance,
-                                bound_method.typing_self_type(db),
-                            )
-                        {
-                            specialized.overloads
-                        } else {
-                            smallvec_inline![overload.clone()]
-                        }
-                    });
+                return traversal.inspect_signatures(db, callable, |signature| {
+                    let self_instance = bound_method.self_instance(db);
+                    let signature_receiver = bound_method.signature_receiver(db);
+                    // Class-based protocol member lookup has already specialized the method for this
+                    // receiver. Bake an implicit positional receiver into the signature instead of
+                    // checking it structurally again during call inference.
+                    let protocol_receiver_is_specialized = self_instance
+                        .as_protocol_instance()
+                        .is_some_and(|protocol| protocol.class_origin(db).is_some())
+                        && signature
+                            .overloads
+                            .iter()
+                            .all(Signature::has_implicit_positional_receiver_annotation);
+                    // Synthesized signatures can contain `Self` without a function's generic
+                    // context, so substitute it when capturing the receiver.
+                    if bound_method.function(db).is_none()
+                        || protocol_receiver_is_specialized
+                        || signature_receiver != self_instance
+                    {
+                        let mut binding = CallableBinding::from_overloads(
+                            self,
+                            signature.overloads.iter().cloned(),
+                        )
+                        .with_bound_type(signature_receiver);
+                        binding.bake_bound_type_into_overloads(db, env);
+                        binding.into()
+                    } else {
+                        // Solve exact receiver constraints before checking the other arguments, but
+                        // retain the receiver itself for call inference and receiver diagnostics.
+                        let overloads = signature.overloads.iter().flat_map(|overload| {
+                            if overload.has_receiver_determined_method_typevar(db, env)
+                                && let Some(specialized) = overload.specialize_for_bound_receiver(
+                                    db,
+                                    env,
+                                    self_instance,
+                                    bound_method.typing_self_type(db),
+                                )
+                            {
+                                specialized.overloads
+                            } else {
+                                smallvec_inline![overload.clone()]
+                            }
+                        });
 
-                    CallableBinding::from_overloads(self, overloads)
-                        .with_bound_type(self_instance)
-                        .into()
-                }
+                        CallableBinding::from_overloads(self, overloads)
+                            .with_bound_type(self_instance)
+                            .into()
+                    }
+                });
             }
 
             // Keep the receiver constraints and known-function handling of a direct call.
@@ -7143,11 +7165,15 @@ impl<'db> Type<'db> {
                     Bindings::from_union(
                         self,
                         callables.iter().map(|callable| {
-                            CallableBinding::from_overloads(
-                                self,
-                                callable.signatures(db).iter().cloned(),
-                            )
-                            .into()
+                            traversal
+                                .inspect_signatures(db, *callable, |signatures| {
+                                    CallableBinding::from_overloads(
+                                        self,
+                                        signatures.iter().cloned(),
+                                    )
+                                    .into()
+                                })
+                                .unwrap_or_else(|| CallableBinding::not_callable(self).into())
                         }),
                     )
                 },
@@ -9035,10 +9061,10 @@ impl<'db> Type<'db> {
                         None => method
                             .func(db)
                             .as_callable()
-                            .map(|callable| callable.signatures(db)),
+                            .and_then(|callable| callable.explicit_signatures(db)),
                     }
                 }
-                Type::Callable(callable) => Some(callable.signatures(db)),
+                Type::Callable(callable) => callable.explicit_signatures(db),
                 _ => None,
             };
 

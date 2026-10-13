@@ -135,7 +135,11 @@ fn lambda_body_uses_its_parameter_context() -> anyhow::Result<()> {
             let Some(callable) = inference.expression_type(lambda).as_callable() else {
                 anyhow::bail!("Expected a callable for {expression}");
             };
-            let returned = callable.signatures(&db).overloads[0].return_ty;
+            let returned = callable
+                .inspect_signatures_root(&db, &env, |_, signatures| {
+                    signatures.overloads[0].return_ty
+                })
+                .ok_or_else(|| anyhow::anyhow!("unexpected recursive signature"))?;
             if expression.contains("captured=") {
                 assert_eq!(
                     returned.display(&db, &env).to_string(),

@@ -150,6 +150,7 @@ fn generic_contexts_mentioned_in_type<'db>(
 ) -> FxOrderSet<GenericContext<'db>> {
     struct GenericContextCollector<'a, 'db> {
         env: &'a ProgramEnvironment<'db>,
+        mapping: ApplyTypeMappingVisitor<'a, 'db>,
         generic_contexts: RefCell<FxOrderSet<GenericContext<'db>>>,
         recursion_guard: TypeCollector<'db>,
     }
@@ -174,8 +175,8 @@ fn generic_contexts_mentioned_in_type<'db>(
             self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            false
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            None
         }
 
         fn visit_recursive_type(
@@ -187,9 +188,11 @@ fn generic_contexts_mentioned_in_type<'db>(
         }
 
         fn visit_callable_type(&self, db: &'db dyn Db, callable: CallableType<'db>) {
-            for signature in &callable.signatures(db).overloads {
-                self.visit_signature(db, signature);
-            }
+            callable.inspect_signatures(db, self.mapping.recursion_context(), |signatures| {
+                for signature in signatures {
+                    self.visit_signature(db, signature);
+                }
+            });
         }
 
         fn visit_function_type(&self, db: &'db dyn Db, function: FunctionType<'db>) {
@@ -206,6 +209,7 @@ fn generic_contexts_mentioned_in_type<'db>(
 
     let collector = GenericContextCollector {
         env,
+        mapping: ApplyTypeMappingVisitor::new(env),
         generic_contexts: RefCell::default(),
         recursion_guard: TypeCollector::default(),
     };
@@ -268,9 +272,10 @@ fn normalize_constraint_bound<'db>(
         |_, _| None,
         |_, bound| match bound {
             Type::Callable(callable)
-                if let [signature] = callable.signatures(db).overloads.as_slice()
-                    && signature.generic_context.is_none()
-                    && let Some(paramspec) = signature.parameters().as_paramspec() =>
+                if !callable.has_generic_context(db)
+                    && let Some(paramspec) = callable
+                        .single_parameters(db)
+                        .and_then(Parameters::as_paramspec) =>
             {
                 Some(Type::TypeVar(paramspec))
             }
@@ -1283,8 +1288,11 @@ impl<'db> Bindings<'db> {
         if partial_callables.is_empty() {
             Type::Never
         } else {
-            CallableTypes::from_elements(partial_callables)
-                .into_precise_functools_partial_instance(db, wrapped_callable_ty)
+            CallableTypes::from_elements(partial_callables).into_precise_functools_partial_instance(
+                db,
+                env,
+                wrapped_callable_ty,
+            )
         }
     }
 
@@ -2375,9 +2383,9 @@ impl<'db> Bindings<'db> {
                                         .unbound_signatures(db)
                                         .and_then(signature_generic_context),
 
-                                    Type::Callable(callable) => {
-                                        signature_generic_context(callable.signatures(db))
-                                    }
+                                    Type::Callable(callable) => callable
+                                        .explicit_signatures(db)
+                                        .and_then(signature_generic_context),
 
                                     Type::KnownInstance(KnownInstanceType::TypeAliasType(
                                         alias,
@@ -5985,9 +5993,9 @@ impl<'db> ArgumentTypeChecker<'_, 'db> {
                                 .try_upcast_to_callable(db, env)?
                                 .iter()
                                 .find_map(|callable| {
-                                    callable.signatures(db).iter().find_map(|signature| {
+                                    callable.parameter_lists(db).find_map(|parameters| {
                                         let (prefix, declared_paramspec) =
-                                            signature.parameters().as_paramspec_with_prefix()?;
+                                            parameters.as_paramspec_with_prefix()?;
                                         (declared_paramspec == paramspec).then_some(prefix.len())
                                     })
                                 })
@@ -6020,7 +6028,8 @@ impl<'db> ArgumentTypeChecker<'_, 'db> {
                                 KnownInstanceType::FunctoolsPartial(partial)
                                 | KnownInstanceType::FunctoolsPartialCall(partial),
                             ) => {
-                                let signatures = &partial.partial(db).signatures(db).overloads;
+                                let signatures =
+                                    &partial.partial(db).explicit_signatures(db)?.overloads;
                                 (
                                     partial.wrapped(db).inner(db),
                                     signatures
@@ -7003,8 +7012,8 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             return false;
         };
         let parameters_contain_typevartuple = declared_callables.iter().any(|callable| {
-            callable.signatures(db).iter().any(|signature| {
-                signature.parameters().iter().any(|parameter| {
+            callable.parameter_lists(db).any(|parameters| {
+                parameters.iter().any(|parameter| {
                     any_over_type(db, self.env, parameter.annotated_type(), false, |ty| {
                         matches!(
                             ty,
@@ -7023,29 +7032,23 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
         };
         if argument_callables
             .iter()
-            .any(|callable| callable.signatures(db).overloads.len() > 1)
+            .any(|callable| callable.parameter_lists(db).len() > 1)
         {
             return true;
         }
 
-        let argument_is_generic = argument_callables.iter().any(|callable| {
-            callable
-                .signatures(db)
-                .iter()
-                .any(|signature| signature.generic_context.is_some())
-        });
+        let argument_is_generic = argument_callables
+            .iter()
+            .any(|callable| callable.has_generic_context(db));
         argument_is_generic
             && expected_type
                 .try_upcast_to_callable(db, self.env)
                 .is_some_and(|callables| {
                     callables.iter().any(|callable| {
-                        callable.signatures(db).iter().any(|signature| {
-                            signature
-                                .parameters()
-                                .variadic()
-                                .is_some_and(|(_, parameter)| {
-                                    parameter.annotated_type().is_dynamic()
-                                })
+                        callable.parameter_lists(db).any(|parameters| {
+                            parameters.variadic().is_some_and(|(_, parameter)| {
+                                parameter.annotated_type().is_dynamic()
+                            })
                         })
                     })
                 })
@@ -7184,7 +7187,10 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             return false;
         }
 
-        let signatures = &callable.signatures(db).overloads;
+        let Some(signatures) = callable.explicit_signatures(db) else {
+            return false;
+        };
+        let signatures = &signatures.overloads;
         if signatures.is_empty() {
             return false;
         }
@@ -7603,8 +7609,8 @@ fn inferable_typevar_occurrences<'db>(
             self.env
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            false
+        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
+            None
         }
 
         fn visit_recursive_type(
@@ -7898,7 +7904,7 @@ impl<'db> Binding<'db> {
 
         let specialized_binding = CallableBinding::from_overloads(
             self.signature_type,
-            callable.signatures(db).iter().cloned(),
+            callable.explicit_signatures(db)?.iter().cloned(),
         );
 
         let mut sub_arguments = arguments_types.select_for_paramspec(

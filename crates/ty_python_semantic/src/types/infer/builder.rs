@@ -440,28 +440,34 @@ fn transparent_callable_decorator_result<'db>(
             env,
             ty,
             |_, _| None,
-            |_, ty| {
+            |inspector, ty| {
                 let callable = ty.as_callable()?;
                 if callable.kind(db) != CallableTypeKind::Regular {
                     return None;
                 }
-                let [signature] = callable.signatures(db).overloads.as_slice() else {
-                    return None;
-                };
-                let paramspec = signature.parameters().as_paramspec()?;
-                let return_typevar = if let Some(typevar) = signature.return_ty.as_typevar() {
-                    TransparentCallableReturn::TypeVar(typevar)
-                } else {
-                    let specialization =
-                        signature
-                            .return_ty
-                            .known_specialization(db, env, KnownClass::Awaitable)?;
-                    let [inner] = specialization.types(db) else {
-                        return None;
-                    };
-                    TransparentCallableReturn::Awaitable(inner.as_typevar()?)
-                };
-                Some((paramspec, return_typevar))
+                inspector
+                    .inspect_signatures(db, callable, |signatures| {
+                        let [signature] = signatures.overloads.as_slice() else {
+                            return None;
+                        };
+                        let paramspec = signature.parameters().as_paramspec()?;
+                        let return_typevar = if let Some(typevar) = signature.return_ty.as_typevar()
+                        {
+                            TransparentCallableReturn::TypeVar(typevar)
+                        } else {
+                            let specialization = signature.return_ty.known_specialization(
+                                db,
+                                env,
+                                KnownClass::Awaitable,
+                            )?;
+                            let [inner] = specialization.types(db) else {
+                                return None;
+                            };
+                            TransparentCallableReturn::Awaitable(inner.as_typevar()?)
+                        };
+                        Some((paramspec, return_typevar))
+                    })
+                    .flatten()
             },
         )
     }
@@ -7021,18 +7027,23 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 // Callables made entirely of dynamic types provide no constraints for specializing the
                 // class. The same is true for a parameterless context whose return type is an
                 // unspecialized variable from an enclosing generic call.
-                if target_callable.signatures(db).iter().all(|signature| {
-                    let parameters = signature.parameters().as_slice();
-                    (signature.return_ty.is_dynamic()
-                        && parameters
-                            .iter()
-                            .all(|parameter| parameter.annotated_type().is_dynamic()))
-                        || (parameters.is_empty()
-                            && matches!(
-                                signature.return_ty,
-                                Type::Dynamic(DynamicType::UnspecializedTypeVar)
-                            ))
-                }) {
+                if inspector
+                    .inspect_signatures(db, target_callable, |signatures| {
+                        signatures.iter().all(|signature| {
+                            let parameters = signature.parameters().as_slice();
+                            (signature.return_ty.is_dynamic()
+                                && parameters
+                                    .iter()
+                                    .all(|parameter| parameter.annotated_type().is_dynamic()))
+                                || (parameters.is_empty()
+                                    && matches!(
+                                        signature.return_ty,
+                                        Type::Dynamic(DynamicType::UnspecializedTypeVar)
+                                    ))
+                        })
+                    })
+                    .unwrap_or(false)
+                {
                     return Some(ty);
                 }
                 let Some(class_generic_context) = class.generic_context(db) else {
@@ -7045,8 +7056,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 // method-local constructor variables scoped there, but expose class variables to this
                 // outer contextual-specialization solve.
                 let source_callable = source_callable.map(|callable| {
+                    let Some(original) = callable.explicit_signatures(db) else {
+                        return callable;
+                    };
                     let signatures = CallableSignature::from_overloads(
-                        callable.signatures(db).overloads.iter().map(|signature| {
+                        original.overloads.iter().map(|signature| {
                             let signature_generic_context =
                                 signature.generic_context.and_then(|context| {
                                     let mut variables = context
@@ -9099,18 +9113,22 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 env,
                 annotation.filter_union(db, env, Type::is_callable_type),
                 |_, _| None,
-                |_, ty| {
+                |inspector, ty| {
                     let callable = ty.as_callable()?;
-                    let [signature] = callable.signatures(db).overloads.as_slice() else {
-                        // TODO: Infer against each overload when there is more than one.
-                        return None;
-                    };
-                    Some((callable, signature))
+                    inspector
+                        .inspect_signatures(db, callable, |signatures| {
+                            let [signature] = signatures.overloads.as_slice() else {
+                                // TODO: Infer against each overload when there is more than one.
+                                return None;
+                            };
+                            Some((callable, signature.clone()))
+                        })
+                        .flatten()
                 },
             )
         });
 
-        let callable_tcx = contextual_callable.map(|(_, signature)| signature);
+        let callable_tcx = contextual_callable.as_ref().map(|(_, signature)| signature);
 
         // Extract the annotated parameter types.
         //
@@ -9196,7 +9214,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let scope = scope_id.to_scope_id(self.db(), self.program_file());
 
-        if let Some((source, lambda)) = contextual_callable.and_then(|(callable, _)| {
+        if let Some((source, lambda)) = contextual_callable.as_ref().and_then(|(callable, _)| {
             callable.lambda_with_same_inputs(db, scope, &parameters, self.environment)
         }) {
             self.lambda_inputs.insert(lambda_expression.into(), source);

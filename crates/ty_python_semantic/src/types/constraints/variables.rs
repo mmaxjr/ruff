@@ -11,6 +11,7 @@ use crate::types::constraints::{
     ALWAYS_FALSE, ALWAYS_TRUE, ConstraintSetBuilder, ConstraintSetStorage, Node, NodeId,
     SourceOrderId, max_constructor_and_typevar_depth, wobble_index,
 };
+use crate::types::signatures::Parameters;
 use crate::types::typevar::{BoundTypeVarInstance, TypeVarDomain};
 use crate::types::{ApplyTypeMappingVisitor, Type, TypeContext, TypeMapping};
 use crate::{Db, ProgramEnvironment};
@@ -352,9 +353,10 @@ impl<'db> Constraint<'db> {
     ) -> Type<'db> {
         match bound {
             Type::Callable(callable) if typevar.domain(db) == TypeVarDomain::ParameterSignature => {
-                if let [signature] = callable.signatures(db).overloads.as_slice()
-                    && signature.generic_context.is_none()
-                    && let Some(paramspec) = signature.parameters().as_paramspec()
+                if !callable.has_generic_context(db)
+                    && let Some(paramspec) = callable
+                        .single_parameters(db)
+                        .and_then(Parameters::as_paramspec)
                 {
                     // Callable[P, anything] should be treated the same as P
                     Type::TypeVar(paramspec)

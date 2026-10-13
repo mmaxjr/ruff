@@ -892,9 +892,8 @@ pub fn definitions_for_keyword_argument<'db>(
 
     if let Some(callables) = func_type.try_upcast_to_callable(db, env) {
         // For each signature, find the parameter with the matching name
-        for signature in callables.signatures(db) {
-            if let Some((_param_index, param)) =
-                signature.parameters().keyword_by_name(keyword_name_str)
+        for parameters in callables.parameter_lists(db) {
+            if let Some((_param_index, param)) = parameters.keyword_by_name(keyword_name_str)
                 && let Some(definition) = param.definition()
             {
                 resolved_definitions.push(ResolvedDefinition::Definition(definition));
