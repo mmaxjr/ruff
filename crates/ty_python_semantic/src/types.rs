@@ -532,17 +532,31 @@ impl<'db> TypeRecursionContext<'db> {
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
     fn revision(&self) -> [u64; 8] {
+        // Keep this pattern exhaustive: each new guard must also invalidate cached queries.
         let TypeRecursionState {
-            meta_type: MetaTypeRecursion { aliases, growing_aliases, typevars },
-            normalization, redundancy, signatures, intersections, materialization_equivalence,
+            meta_type:
+                MetaTypeRecursion {
+                    aliases,
+                    growing_aliases,
+                    typevars,
+                },
+            normalization,
+            redundancy,
+            signatures,
+            intersections,
+            materialization_equivalence,
         } = &*self.0;
         [
-            aliases.revision(), growing_aliases.revision(), typevars.revision(),
+            aliases.revision(),
+            growing_aliases.revision(),
+            typevars.revision(),
             normalization.revision(),
             redundancy.get().map_or(0, |guard| guard.revision()),
             signatures.get().map_or(0, |guard| guard.revision()),
             intersections.get().map_or(0, |guard| guard.revision()),
-            materialization_equivalence.get().map_or(0, |guard| guard.revision()),
+            materialization_equivalence
+                .get()
+                .map_or(0, |guard| guard.revision()),
         ]
     }
 }
@@ -6670,11 +6684,7 @@ impl<'db> Type<'db> {
                     let wrapped = partial.wrapped(db).inner(db);
                     let nominal_lookup = partial
                         .partial(db)
-                        .into_functools_partial_instance(
-                            db,
-                            env,
-                            traversal.recursion_context(),
-                        )
+                        .into_functools_partial_instance(db, env, traversal.recursion_context())
                         .member_lookup_with_policy_and_receiver(
                             db, env, name_str, policy, receiver,
                         );

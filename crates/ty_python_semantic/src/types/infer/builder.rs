@@ -131,13 +131,12 @@ use crate::types::{
     ClassType, CycleKind, DynamicType, GeneratorTypeMode, InferenceFlags, InternedConstraintSet,
     InternedType, IntersectionBuilder, IntersectionType, KnownBoundMethodType, KnownClass,
     KnownInstanceType, KnownUnion, LiteralValueType, LiteralValueTypeKind, MemberLookupPolicy,
-    ParamSpecAttrKind, Parameter, ParameterDefault, Parameters, ProgramEnvironment, PropertyDeprecations,
-    SentinelInstance, Signature, SpecialFormType, SubclassOfType, Type, TypeAliasType,
-    TypeAndQualifiers, TypeContext, TypeQualifiers, TypeQuery, TypeQueryContext,
+    ParamSpecAttrKind, Parameter, ParameterDefault, Parameters, ProgramEnvironment,
+    PropertyDeprecations, SentinelInstance, Signature, SpecialFormType, SubclassOfType, Type,
+    TypeAliasType, TypeAndQualifiers, TypeContext, TypeQualifiers, TypeQuery, TypeQueryContext,
     TypeVarBoundOrConstraints, TypeVarKind, TypeVarVariance, TypingModule, UnionAccumulator,
-    UnionBuilder, UnionType, any_over_type, binding_type,
-    extract_fixed_length_iterable_element_types, infer_complete_scope_types, infer_scope_types,
-    is_discarded_dict_key_assignment, todo_type,
+    UnionBuilder, UnionType, any_over_type, extract_fixed_length_iterable_element_types,
+    infer_complete_scope_types, is_discarded_dict_key_assignment, todo_type,
 };
 use crate::{AnalysisSettings, Db, DisplaySettings, FxIndexSet, FxOrderSet, SemanticModel};
 use ty_python_core::definition::{

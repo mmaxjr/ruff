@@ -14,7 +14,7 @@ use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use crate::types::{
     ApplyTypeMappingVisitor, CycleKind, InstanceProjection, ProjectInstance, PromotionKind,
     PromotionMode, Type, TypeContext, TypeMapping, TypePair, TypeQualifiers, TypeQueryContext,
-    TypeRecursionContext, TypeTraversal, TypeWalk,
+    TypeRecursionContext, TypeWalk,
 };
 use crate::types::{TypeVarBoundOrConstraints, visitor};
 use crate::{Db, FxOrderSet};
