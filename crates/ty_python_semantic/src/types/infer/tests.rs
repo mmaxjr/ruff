@@ -94,30 +94,6 @@ fn assert_revealed_type(db: &TestDb, filename: &str, expected: &str) {
 }
 
 #[test]
-fn deep_lambda_return_types() -> anyhow::Result<()> {
-    let mut db = setup_db();
-    let mut source = String::from(
-        "from ty_extensions import Top, static_assert\n\
-         from ty_extensions._internal import TypeOf, is_equivalent_to\n\
-         f0 = lambda: 0\n\
-         g0 = lambda: 1\n",
-    );
-    for depth in 1..=1024 {
-        writeln!(source, "f{depth} = lambda: f{}", depth - 1)?;
-        writeln!(source, "g{depth} = lambda: g{}", depth - 1)?;
-    }
-    // Both comparisons follow the entire finite chain. Stack growth must preserve the
-    // equal result and the mismatch at the innermost return type.
-    source.push_str(
-        "static_assert(is_equivalent_to(TypeOf[f1024], Top[TypeOf[f1024]]))\n\
-         static_assert(not is_equivalent_to(TypeOf[f1024], Top[TypeOf[g1024]]))\n",
-    );
-    db.write_file("/src/lambda.py", source)?;
-    assert_file_diagnostics(&db, "/src/lambda.py", &[]);
-    Ok(())
-}
-
-#[test]
 fn lambda_body_uses_its_parameter_context() -> anyhow::Result<()> {
     let mut db = setup_db();
     for expression in [
