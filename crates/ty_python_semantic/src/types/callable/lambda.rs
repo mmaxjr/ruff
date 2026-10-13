@@ -124,13 +124,10 @@ fn lambda_inference_sources<'db>(
 /// another transformed view first.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub struct LambdaSignatureMapping<'db> {
-    source: LambdaSignatureSource<'db>,
+    /// The original lambda, before any transformations.
+    source: LambdaSignature<'db>,
     steps: Box<[LambdaTransformation<'db>]>,
 }
-
-/// An original set of inference inputs. Only an unmapped lambda can enter a transformation plan.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
-struct LambdaSignatureSource<'db>(LambdaSignature<'db>);
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 struct LambdaTransformation<'db> {
@@ -281,10 +278,9 @@ impl<'db> LambdaSignatureMapping<'db> {
         typevar: BoundTypeVarIdentity<'db>,
     ) -> Option<VarianceTerm<'db>> {
         let (last, prefix) = self.steps.split_last()?;
-        let source =
-            self.source
-                .0
-                .with_transformations(db, prefix, &TypeRecursionContext::default());
+        let source = self
+            .source
+            .with_transformations(db, prefix, &TypeRecursionContext::default());
         last.variance_equation(db, source, typevar)
     }
 
@@ -295,7 +291,7 @@ impl<'db> LambdaSignatureMapping<'db> {
         db: &'db dyn Db,
         context: &TypeRecursionContext<'db>,
     ) -> super::CallableSignature<'db> {
-        let source = self.source.0;
+        let source = self.source;
         let env = ProgramEnvironment::from_scope(source.scope(db));
         self.steps.iter().fold(
             infer_lambda_signature(db, source).clone(),
@@ -570,7 +566,7 @@ impl<'db> LambdaSignature<'db> {
         if let Some(plan) = self.mapping(db) {
             visitor.visit_type(
                 db,
-                Type::Callable(CallableType::from_lambda(db, plan.source.0)),
+                Type::Callable(CallableType::from_lambda(db, plan.source)),
             );
             for step in &plan.steps {
                 if let Some(annotation) = step.context.annotation {
@@ -663,7 +659,7 @@ impl<'db> LambdaSignature<'db> {
 
     /// The original inference inputs, independent of every saved transformation.
     pub(in crate::types) fn source(self, db: &'db dyn Db) -> Self {
-        self.mapping(db).as_ref().map_or(self, |plan| plan.source.0)
+        self.mapping(db).as_ref().map_or(self, |plan| plan.source)
     }
 
     /// Build a view with separate caches for each mapping and shared active recursion guards.
@@ -691,7 +687,7 @@ impl<'db> LambdaSignature<'db> {
             source.return_context(db),
             source.environment(db),
             Some(LambdaSignatureMapping {
-                source: LambdaSignatureSource(source),
+                source,
                 steps: steps.into(),
             }),
         )
@@ -746,7 +742,7 @@ impl<'db> LambdaSignature<'db> {
     pub(in crate::types) fn return_type_dependencies(self, db: &'db dyn Db) -> TypeVarSet<'db> {
         let env = ProgramEnvironment::from_scope(self.scope(db));
         if let Some(plan) = self.mapping(db) {
-            let mut dependencies = plan.source.0.return_type_dependencies(db);
+            let mut dependencies = plan.source.return_type_dependencies(db);
             for step in &plan.steps {
                 let Some(transformation) = step.mapping.as_type_mapping() else {
                     continue;
@@ -914,64 +910,40 @@ impl<'db> LambdaSignature<'db> {
             let steps = plan
                 .steps
                 .iter()
-                .map(|step| {
-                    let transformed = match &step.mapping {
-                        LambdaMapping::Specialize {
-                            specialization,
-                            specialize_self_domain,
-                            materialization,
-                        } => LambdaMapping::Specialize {
-                            specialization: specialization.apply_type_mapping_impl(
-                                db,
-                                mapping,
-                                &[],
-                                visitor,
-                            ),
-                            specialize_self_domain: *specialize_self_domain,
-                            materialization: *materialization,
-                        },
-                        LambdaMapping::BindSelf(binding) => LambdaMapping::BindSelf(SelfBinding {
-                            ty: map(binding.ty),
-                            ..binding.clone()
-                        }),
-                        LambdaMapping::ReplaceSelf(ty) => LambdaMapping::ReplaceSelf(map(*ty)),
+                .cloned()
+                .map(|mut step| {
+                    match &mut step.mapping {
+                        LambdaMapping::Specialize { specialization, .. } => {
+                            *specialization =
+                                specialization.apply_type_mapping_impl(db, mapping, &[], visitor);
+                        }
+                        LambdaMapping::BindSelf(binding) => binding.ty = map(binding.ty),
+                        LambdaMapping::ReplaceSelf(ty) => *ty = map(*ty),
                         LambdaMapping::BindReceiver {
                             receiver,
                             self_binding,
-                        } => LambdaMapping::BindReceiver {
-                            receiver: map(*receiver),
-                            self_binding: SelfBinding {
-                                ty: map(self_binding.ty),
-                                ..self_binding.clone()
-                            },
-                        },
-                        LambdaMapping::ApplyReceiver {
+                        }
+                        | LambdaMapping::ApplyReceiver {
                             receiver,
                             self_binding,
-                        } => LambdaMapping::ApplyReceiver {
-                            receiver: map(*receiver),
-                            self_binding: SelfBinding {
-                                ty: map(self_binding.ty),
-                                ..self_binding.clone()
-                            },
-                        },
-                        LambdaMapping::BindParameters(parameters) => LambdaMapping::BindParameters(
-                            parameters.apply_type_mapping_impl(db, mapping, tcx, visitor),
-                        ),
-                        other => other.clone(),
-                    };
-                    LambdaTransformation {
-                        mapping: transformed,
-                        context: step
-                            .context
-                            .with_annotation(step.context.annotation.map(map)),
-                        materialize_typevar_bounds_and_defaults: step
-                            .materialize_typevar_bounds_and_defaults,
+                        } => {
+                            *receiver = map(*receiver);
+                            self_binding.ty = map(self_binding.ty);
+                        }
+                        LambdaMapping::BindParameters(parameters) => {
+                            *parameters =
+                                parameters.apply_type_mapping_impl(db, mapping, tcx, visitor);
+                        }
+                        _ => {}
                     }
+                    step.context = step
+                        .context
+                        .with_annotation(step.context.annotation.map(map));
+                    step
                 })
                 .collect();
             LambdaSignatureMapping {
-                source: LambdaSignatureSource(plan.source.0.map_inputs(db, mapping, tcx, visitor)),
+                source: plan.source.map_inputs(db, mapping, tcx, visitor),
                 steps,
             }
         });

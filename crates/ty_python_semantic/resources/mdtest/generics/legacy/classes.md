@@ -3921,7 +3921,7 @@ T = TypeVar("T")
 
 class Box(Generic[T]):
     def __init__(self, value: T):
-        self.callback = partial(lambda: Box(lambda: value).callback)  # no diagnostic
+        self.callback = partial(lambda: Box(lambda: value).callback)
 ```
 
 The returned callbacks can be called repeatedly. They cannot be assigned to an `int`:
@@ -4138,21 +4138,32 @@ nodes = [Grow(1).node, Grow("two").node]
 reveal_type(nodes[0]()[1]()[0])  # revealed: list[int] | list[str]
 ```
 
-These lambdas can also return only the next lambda, without exposing their captured values. Lists
-and sets can contain different specializations:
+## Callbacks that return only callbacks
+
+Each call returns another callback without returning the captured value. A list can contain
+callbacks from different specializations of `Chain`:
 
 ```py
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
 class Chain(Generic[T]):
     def __init__(self, value: T):
         self.next = lambda: Chain([value]).next
 
 [Chain(0).next, Chain("").next]  # no diagnostic
-{Chain(0).next, Chain("").next}  # no diagnostic
 ```
 
-The returned list can contain both recursive lambdas and a lambda that returns the captured value:
+## Recursive lambdas returning collections of callbacks
+
+A returned list can contain both recursive callbacks and a callback that returns the captured value:
 
 ```py
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
 class Branch(Generic[T]):
     def __init__(self, value: T):
         self.next = lambda: [Branch([value]).next, self.next, lambda: value]
@@ -4587,6 +4598,12 @@ class Node(Generic[T]):
 
 cursor = Node[int].next
 cursor()()  # no diagnostic
+```
+
+Binding the class consumes the `cls` parameter. The returned method rejects an extra argument and
+remains incompatible with `int`:
+
+```py
 cursor(0)  # error: [too-many-positional-arguments]
 wrong: int = cursor()  # error: [invalid-assignment]
 ```

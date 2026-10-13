@@ -729,9 +729,9 @@ pub(super) fn dynamic_content_impl<'db>(
 
 /// Whether inspecting `ty` can encounter recursive types with changing specializations.
 ///
-/// Exact recursive types are safe to inspect once. For protocol methods and lambda returns,
-/// conservatively treat another use of the same active definition as potentially growing:
-/// their signatures are not included in the specialization-flow analysis used by [`TypeIdentity`].
+/// Exact recursive types are safe to inspect once. Protocol methods and lambda returns can
+/// introduce further specializations while their signatures are inferred, so this inspection
+/// conservatively stops at another use of the same active definition.
 pub(super) fn contains_growing_type<'db>(
     db: &'db dyn Db,
     env: &ProgramEnvironment<'db>,

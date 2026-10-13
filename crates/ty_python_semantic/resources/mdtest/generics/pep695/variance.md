@@ -542,7 +542,7 @@ static_assert(not is_subtype_of(Growing[object], Growing[int]))
 ## Specialized recursive lambda attributes
 
 Calling the recursive lambda on a `Wrapper[T, U]` returns a callback that accepts `U` and returns
-`T`. This makes `Wrapper` covariant in `T` and contravariant in `U`:
+`T`:
 
 ```py
 from typing import Callable, Final
@@ -556,9 +556,18 @@ class Callback[P, R]:
 class Wrapper[T, U]:
     def __init__(self, callback: Callable[[U], T]):
         self.node: Final = Callback[U, T](callback).node
+```
 
+This makes `Wrapper` covariant in `T`:
+
+```py
 static_assert(is_subtype_of(Wrapper[int, object], Wrapper[object, object]))
 static_assert(not is_subtype_of(Wrapper[object, object], Wrapper[int, object]))
+```
+
+It is contravariant in `U`:
+
+```py
 static_assert(is_subtype_of(Wrapper[int, object], Wrapper[int, int]))
 static_assert(not is_subtype_of(Wrapper[int, int], Wrapper[int, object]))
 ```

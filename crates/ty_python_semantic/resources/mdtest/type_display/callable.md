@@ -170,8 +170,8 @@ def f(
 
 ## Recursive lambda methods
 
-When a lambda method returns a bound method with the same signature, we display the recursive part
-as `Divergent`:
+This method returns a tuple containing the same method bound to a new `C`. We display the recursive
+method reference as `Divergent`:
 
 ```py
 class C:

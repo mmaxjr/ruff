@@ -1135,96 +1135,6 @@ p2 = partial(p1, "hello")
 reveal_type(p2)  # revealed: partial[(c: float) -> bool]
 ```
 
-### Recursive lambda
-
-A lambda can return a container that holds the partial itself. Following that reference preserves
-its callable signature.
-
-```py
-from functools import partial
-
-callback = partial(lambda: [callback])
-callback()[0]()  # no diagnostic
-callback()[0](1)  # error: [too-many-positional-arguments]
-```
-
-### Diagnostics for recursive partials
-
-A partial can return itself. Assigning it to an `int` reports an error that includes its recursive
-signature:
-
-```py
-from functools import partial
-
-callback = partial(lambda: callback)
-number: int = callback  # error: [invalid-assignment]
-```
-
-### Recursive lambda alternatives
-
-The wrapped callable can be selected from a union of lambdas. One alternative can refer to the
-partial that contains it:
-
-```py
-from functools import partial
-
-def build(flag: bool):
-    callback = partial((lambda: [callback]) if flag else (lambda: []))  # no diagnostic
-```
-
-### Recursive lambda with bound arguments
-
-Positional binding removes parameters from the partial. Its `func` attribute still exposes the
-original lambda, including the bound parameter.
-
-```py
-from functools import partial
-
-callback = partial(lambda value: [callback], 1)
-callback.func(1)[0]()  # no diagnostic
-callback.func()  # error: [missing-argument]
-callback()[0](1)  # error: [too-many-positional-arguments]
-```
-
-### Recursive lambda with a keyword default
-
-A parameter bound by keyword remains available as a keyword-only parameter with a default, even when
-the partial is reached through its return value.
-
-```py
-from functools import partial
-
-callback = partial(lambda flag: [callback], flag=True)
-callback(flag=False)[0](flag=True)  # no diagnostic
-callback()[0](False)  # error: [too-many-positional-arguments]
-```
-
-### Nested partials of a recursive lambda
-
-Each application removes the positional arguments it binds. The recursive reference exposes the
-parameters left after both applications.
-
-```py
-from functools import partial
-
-callback = partial(partial(lambda first, second: [callback], 1), 2)
-callback()[0]()  # no diagnostic
-callback()[0](1)  # error: [too-many-positional-arguments]
-```
-
-### Mutually recursive lambdas
-
-Two partials can return each other. Inference preserves their signatures through either reference.
-
-```py
-from functools import partial
-
-first = partial(lambda: [second])
-second = partial(lambda: [first])
-first()[0]()[0]()  # no diagnostic
-first()[0]()[0](1)  # error: [too-many-positional-arguments]
-```
-
 ### Repeated partial application in a function
 
 A loop can repeatedly wrap a callable in `partial`. Inference converges without retaining an
@@ -2112,4 +2022,95 @@ def f() -> None:
 p = partial(f)
 # error: [unresolved-attribute]
 p.__name__ = "renamed"
+```
+
+## Recursive lambdas
+
+### Returning the partial inside a container
+
+A lambda can return a container that holds the partial itself. Following that reference preserves
+its callable signature.
+
+```py
+from functools import partial
+
+callback = partial(lambda: [callback])
+callback()[0]()  # no diagnostic
+callback()[0](1)  # error: [too-many-positional-arguments]
+```
+
+### Assignment diagnostics
+
+Assigning a partial that returns itself to `int` reports an error:
+
+```py
+from functools import partial
+
+callback = partial(lambda: callback)
+number: int = callback  # error: [invalid-assignment]
+```
+
+### A union of lambdas
+
+The wrapped callable can be selected from a union of lambdas. One alternative can refer to the
+partial that contains it:
+
+```py
+from functools import partial
+
+def build(flag: bool):
+    callback = partial((lambda: [callback]) if flag else (lambda: []))  # no diagnostic
+```
+
+### Bound positional arguments
+
+Positional binding removes parameters from the partial. Its `func` attribute still exposes the
+original lambda, including the bound parameter.
+
+```py
+from functools import partial
+
+callback = partial(lambda value: [callback], 1)
+callback.func(1)[0]()  # no diagnostic
+callback.func()  # error: [missing-argument]
+callback()[0](1)  # error: [too-many-positional-arguments]
+```
+
+### Bound keyword arguments
+
+A parameter bound by keyword remains available as a keyword-only parameter with a default, even when
+the partial is reached through its return value.
+
+```py
+from functools import partial
+
+callback = partial(lambda flag: [callback], flag=True)
+callback(flag=False)[0](flag=True)  # no diagnostic
+callback()[0](False)  # error: [too-many-positional-arguments]
+```
+
+### Nested partial application
+
+Each application removes the positional arguments it binds. The recursive reference exposes the
+parameters left after both applications.
+
+```py
+from functools import partial
+
+callback = partial(partial(lambda first, second: [callback], 1), 2)
+callback()[0]()  # no diagnostic
+callback()[0](1)  # error: [too-many-positional-arguments]
+```
+
+### Mutual recursion
+
+Two partials can return each other. Inference preserves their signatures through either reference.
+
+```py
+from functools import partial
+
+first = partial(lambda: [second])
+second = partial(lambda: [first])
+first()[0]()[0]()  # no diagnostic
+first()[0]()[0](1)  # error: [too-many-positional-arguments]
 ```

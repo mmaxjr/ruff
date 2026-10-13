@@ -1129,24 +1129,6 @@ where
         }
     }
 
-    /// Run an operation that cannot provide a value when it recurses. Exact and growing cycles
-    /// both return `None`; completed results are not cached.
-    pub(crate) fn try_visit_active<U>(
-        &self,
-        db: &'db dyn Db,
-        item: T,
-        work: impl FnOnce() -> U,
-    ) -> Option<U> {
-        match self.begin_active_visit(db, item) {
-            CycleDetectorVisit::Ready(_) | CycleDetectorVisit::Cycle(..) => None,
-            CycleDetectorVisit::Pending(item) => {
-                let result = self.with_stack_space(work);
-                self.finish_active_visit(&item);
-                Some(result)
-            }
-        }
-    }
-
     fn begin_visit(&self, db: &'db dyn Db, item: T) -> CycleDetectorVisit<T, R> {
         if let Some(result) = self.cache.borrow().get(&item) {
             return CycleDetectorVisit::Ready(result.clone());
@@ -1245,6 +1227,17 @@ impl<'db, Tag, T, const INLINE_CAPACITY: usize> CycleDetector<'db, Tag, T, (), I
 where
     T: Hash + Eq + Clone + HasIdentity<'db>,
 {
+    /// Run an operation that cannot provide a value when it recurses. Exact and growing cycles
+    /// both return `None`; completed results are not cached.
+    pub(crate) fn try_visit_active<U>(
+        &self,
+        db: &'db dyn Db,
+        item: T,
+        work: impl FnOnce() -> U,
+    ) -> Option<U> {
+        self.visit_active(db, item, |cycle| cycle.is_none().then(work))
+    }
+
     /// Keep a visit active throughout `compute`, without caching its result.
     /// `compute` receives `None` on entry and a cycle kind when revisiting an active item.
     ///
