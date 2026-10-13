@@ -2724,7 +2724,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         // otherwise compare recursive type arguments before this relation can reject the class.
         let source = source.identity_specialization(db);
         let visitor = ApplyTypeMappingVisitor::new(self.env)
-            .with_recursion_context(Some(self.materialization_visitor.recursion_context()));
+            .with_recursion_context(self.materialization_visitor.recursion_context());
         let specialize = |specialization: Specialization<'db>| {
             specializations
                 .0

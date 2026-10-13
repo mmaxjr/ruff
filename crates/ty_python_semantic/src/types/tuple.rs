@@ -269,7 +269,10 @@ impl<'db> TupleType<'db> {
     // from `NominalInstanceType::class()`, which is a very hot method.
     #[salsa::tracked(returns(copy), cycle_initial=to_class_type_cycle_initial, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn to_class_type(self, db: &'db dyn Db) -> ClassType<'db> {
-        self.to_class_type_impl(db, None)
+        let env = ProgramEnvironment::from_program(self.program(db));
+        super::operations::TypeOperations::with_root(db, &env, |ops| {
+            self.to_class_type_impl(db, ops.context())
+        })
     }
 
     /// Return the tuple class without evaluating or comparing this tuple's element types.
@@ -287,13 +290,13 @@ impl<'db> TupleType<'db> {
         db: &'db dyn Db,
         context: &TypeRecursionContext<'db>,
     ) -> ClassType<'db> {
-        self.to_class_type_impl(db, Some(context))
+        self.to_class_type_impl(db, context)
     }
 
     fn to_class_type_impl(
         self,
         db: &'db dyn Db,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> ClassType<'db> {
         let env = &ProgramEnvironment::from_program(self.program(db));
         self.class_literal(db)
@@ -2624,7 +2627,7 @@ impl<'db> Tuple<Type<'db>, VariableSegment<'db>> {
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> Type<'db> {
         let elements = match self {
             Tuple::Fixed(tuple) => Either::Left(tuple.iter_all_elements()),

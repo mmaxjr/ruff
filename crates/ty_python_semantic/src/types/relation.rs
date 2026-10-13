@@ -331,11 +331,8 @@ impl<'db> Type<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         target: Type<'db>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> bool {
-        let Some(context) = context else {
-            return self.is_subtype_of(db, env, target);
-        };
         self.is_related_to_with_recursion(db, env, target, TypeRelation::Subtyping, context)
     }
 
@@ -722,11 +719,8 @@ impl<'db> Type<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         other: Type<'db>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> bool {
-        let Some(context) = context else {
-            return self.is_redundant_with(db, env, other);
-        };
         if self == other {
             return true;
         }
@@ -756,7 +750,7 @@ impl<'db> Type<'db> {
             let disjointness_visitor = IsDisjointVisitor::default(&constraints);
             let signature_relation_visitor = SignatureRelationVisitor::default();
             let materialization_visitor =
-                ApplyTypeMappingVisitor::new(env).with_recursion_context(Some(context));
+                ApplyTypeMappingVisitor::new(env).with_recursion_context(context);
             TypeRelationChecker::new(
                 env,
                 relation,
@@ -1047,18 +1041,15 @@ impl<'db> Type<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         other: Type<'db>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> bool {
-        let Some(context) = context else {
-            return self.is_disjoint_from(db, env, other);
-        };
         context.compare_for_simplification(|| {
             let constraints = ConstraintSetBuilder::new();
             let relation_visitor = HasRelationToVisitor::default(&constraints);
             let disjointness_visitor = IsDisjointVisitor::default(&constraints);
             let signature_relation_visitor = SignatureRelationVisitor::default();
             let materialization_visitor =
-                ApplyTypeMappingVisitor::new(env).with_recursion_context(Some(context));
+                ApplyTypeMappingVisitor::new(env).with_recursion_context(context);
             DisjointnessChecker::new(
                 env,
                 &constraints,

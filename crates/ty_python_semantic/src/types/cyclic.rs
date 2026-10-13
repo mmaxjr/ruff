@@ -1048,6 +1048,10 @@ where
         self.revision.get()
     }
 
+    pub(super) fn is_active(&self) -> bool {
+        !self.seen.borrow().is_empty()
+    }
+
     pub(crate) fn new(fallback: R) -> Self {
         CycleDetector {
             seen: RefCell::new(SmallVec::new()),

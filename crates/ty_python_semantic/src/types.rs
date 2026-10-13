@@ -164,9 +164,11 @@ mod method;
 mod mro;
 pub(crate) mod narrow;
 mod newtype;
+mod operations;
 mod overrides;
 mod protocol_class;
 mod recursive;
+use operations::TypeOperations;
 pub(crate) use recursive::RecursiveMapping;
 pub(crate) use recursive::UnfoldResult;
 pub use recursive::{RecursiveType, RecursiveVar, TypeQuery, TypeQueryContext};
@@ -489,6 +491,25 @@ impl<'db> TypeRecursionContext<'db> {
         &self.0.meta_type
     }
 
+    fn is_active(&self) -> bool {
+        let TypeRecursionState {
+            meta_type,
+            normalization,
+            redundancy,
+            signatures,
+            intersections,
+            materialization_equivalence,
+        } = &*self.0;
+        meta_type.is_active()
+            || !normalization.is_empty()
+            || redundancy.get().is_some_and(|guard| guard.is_active())
+            || signatures.get().is_some_and(|guard| guard.is_active())
+            || intersections.get().is_some_and(|guard| guard.is_active())
+            || materialization_equivalence
+                .get()
+                .is_some_and(|guard| guard.is_active())
+    }
+
     /// Compare two types for simplification. Nested builders retain their members until this
     /// comparison finishes, so signature substitution cannot restart it with new type arguments.
     fn compare_for_simplification(&self, compare: impl FnOnce() -> bool) -> bool {
@@ -660,9 +681,8 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
         }
     }
 
-    fn with_recursion_context(mut self, context: Option<&TypeRecursionContext<'db>>) -> Self {
-        self.recursion_context =
-            context.map_or_else(OnceCell::new, |context| OnceCell::from(context.clone()));
+    fn with_recursion_context(mut self, context: &TypeRecursionContext<'db>) -> Self {
+        self.recursion_context = OnceCell::from(context.clone());
         self
     }
 
@@ -3461,7 +3481,7 @@ impl<'db> Type<'db> {
 
     #[must_use]
     fn negate(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
-        self.negate_with_recursion(db, env, None)
+        TypeOperations::with_root(db, env, |ops| ops.negate(*self))
     }
 
     /// Negate a type without restarting normalization inside an active transformation.
@@ -3469,7 +3489,7 @@ impl<'db> Type<'db> {
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> Type<'db> {
         // Avoid invoking the `IntersectionBuilder` for negations that are trivial.
         //
@@ -10212,7 +10232,7 @@ impl<'db> Type<'db> {
         env: &ProgramEnvironment<'db>,
         target: Type<'db>,
         negated_cache: &mut Option<Type<'db>>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> bool {
         if negated_cache.is_none()
             && let (Type::NominalInstance(source), Type::NominalInstance(target)) = (self, target)
@@ -11292,7 +11312,7 @@ impl<'db> IntersectionType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         target: Type<'db>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
     ) -> bool {
         self.positive(db).iter().all(|positive| {
             positive

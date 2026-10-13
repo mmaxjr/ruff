@@ -427,7 +427,7 @@ impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
         }
         let signatures = Rc::clone(&self.signatures);
         let context = self.recursion.clone();
-        let mapping = ApplyTypeMappingVisitor::new(env).with_recursion_context(Some(&context));
+        let mapping = ApplyTypeMappingVisitor::new(env).with_recursion_context(&context);
         signatures.visit_with_expansion(
             &signature,
             &mapping,

@@ -162,7 +162,7 @@ impl<'db> LambdaTransformation<'db> {
         };
         let visitor = ApplyTypeMappingVisitor {
             materialize_typevar_bounds_and_defaults: self.materialize_typevar_bounds_and_defaults,
-            ..ApplyTypeMappingVisitor::new(env).with_recursion_context(Some(context))
+            ..ApplyTypeMappingVisitor::new(env).with_recursion_context(context)
         };
         match self.mapping.as_type_mapping() {
             Some(mapping) => {
@@ -198,7 +198,7 @@ impl<'db> LambdaTransformation<'db> {
                 let visitor = ApplyTypeMappingVisitor {
                     materialize_typevar_bounds_and_defaults: self
                         .materialize_typevar_bounds_and_defaults,
-                    ..ApplyTypeMappingVisitor::new(env).with_recursion_context(Some(context))
+                    ..ApplyTypeMappingVisitor::new(env).with_recursion_context(context)
                 };
                 match self.mapping.as_type_mapping() {
                     Some(mapping) => {

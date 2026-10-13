@@ -469,7 +469,7 @@ impl<'db> UnionType<'db> {
             self.map_leave_aliases_with_recursion(
                 db,
                 visitor.env,
-                Some(visitor.recursion_context()),
+                visitor.recursion_context(),
                 |element| element.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
             )
         }
@@ -496,14 +496,16 @@ impl<'db> UnionType<'db> {
         env: &ProgramEnvironment<'db>,
         transform_fn: impl FnMut(&Type<'db>) -> Type<'db>,
     ) -> Type<'db> {
-        self.map_leave_aliases_with_recursion(db, env, None, transform_fn)
+        super::operations::TypeOperations::with_root(db, env, |ops| {
+            self.map_leave_aliases_with_recursion(db, env, ops.context(), transform_fn)
+        })
     }
 
     fn map_leave_aliases_with_recursion(
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
-        context: Option<&TypeRecursionContext<'db>>,
+        context: &TypeRecursionContext<'db>,
         mut transform_fn: impl FnMut(&Type<'db>) -> Type<'db>,
     ) -> Type<'db> {
         let elements = self.elements(db);
@@ -1325,7 +1327,7 @@ impl<'db> IntersectionType<'db> {
             Type::Intersection(IntersectionType::new(db, positive, negative))
         } else {
             let mut builder = IntersectionBuilder::new(db, visitor.env)
-                .with_recursion_context(Some(visitor.recursion_context()))
+                .with_recursion_context(visitor.recursion_context())
                 .positive_elements(positive);
             for element in &negative {
                 builder.add_negative_in_place(*element);
@@ -1510,13 +1512,15 @@ impl<'db> IntersectionType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
     ) -> Type<'db> {
-        expand_intersection_typevars_and_newtypes(
-            db,
-            env,
-            self.positive(db),
-            self.negative(db),
-            None,
-        )
+        super::operations::TypeOperations::with_root(db, env, |ops| {
+            expand_intersection_typevars_and_newtypes(
+                db,
+                env,
+                self.positive(db),
+                self.negative(db),
+                ops.context(),
+            )
+        })
     }
 
     pub fn iter_positive(self, db: &'db dyn Db) -> impl Iterator<Item = Type<'db>> {
@@ -1592,7 +1596,7 @@ fn expand_intersection_typevars_and_newtypes<'db>(
     env: &ProgramEnvironment<'db>,
     positive: &FxOrderSet<Type<'db>>,
     negative: &NegativeIntersectionElements<'db>,
-    context: Option<&TypeRecursionContext<'db>>,
+    context: &TypeRecursionContext<'db>,
 ) -> Type<'db> {
     let mut builder = IntersectionBuilder::new(db, env).with_recursion_context(context);
     for &element in positive {

@@ -446,7 +446,7 @@ struct TypeTraversalTag;
 pub(crate) struct TypeTraversal<'env, 'db, O, Mode = SemanticTraversal> {
     operation: O,
     env: &'env ProgramEnvironment<'db>,
-    recursion_context: Option<&'env TypeRecursionContext<'db>>,
+    recursion_context: TypeRecursionContext<'db>,
     mapping: TraversalMapping<'env, 'db>,
     active: CycleDetector<'db, TypeTraversalTag, Type<'db>, (), 3>,
     mode: PhantomData<Mode>,
@@ -457,7 +457,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         Self {
             operation,
             env,
-            recursion_context: None,
+            recursion_context: TypeRecursionContext::default(),
             mapping: TraversalMapping::Owned(OnceCell::new()),
             active: CycleDetector::new(()),
             mode: PhantomData,
@@ -495,7 +495,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         match &self.mapping {
             TraversalMapping::Owned(mapping) => mapping.get_or_init(|| {
                 ApplyTypeMappingVisitor::new(self.env)
-                    .with_recursion_context(self.recursion_context)
+                    .with_recursion_context(&self.recursion_context)
             }),
             TraversalMapping::Borrowed(mapping) => mapping,
         }
@@ -507,7 +507,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         context: &'env TypeRecursionContext<'db>,
     ) -> Self {
         Self {
-            recursion_context: Some(context),
+            recursion_context: context.clone(),
             ..Self::new(env, operation)
         }
     }
@@ -520,7 +520,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         Self {
             operation,
             env: visitor.env,
-            recursion_context: Some(visitor.recursion_context()),
+            recursion_context: visitor.recursion_context().clone(),
             mapping: TraversalMapping::Borrowed(visitor),
             active: CycleDetector::new(()),
             mode: PhantomData,
@@ -575,7 +575,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
                         .visit_alias_like(db, self, ty, state, |state| {
                             self.visit_with(
                                 db,
-                                alias.value_type_with_recursion(db, self.recursion_context),
+                                alias.value_type_with_recursion(db, &self.recursion_context),
                                 state,
                             )
                         })
@@ -773,7 +773,7 @@ where
                 Type::TypeAlias(alias) => query.visit_alias_like(db, self, ty, input, |input| {
                     self.visit_with(
                         db,
-                        alias.value_type_with_recursion(db, self.traversal.recursion_context),
+                        alias.value_type_with_recursion(db, &self.traversal.recursion_context),
                         input,
                     )
                 }),
