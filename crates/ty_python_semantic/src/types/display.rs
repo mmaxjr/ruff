@@ -150,11 +150,6 @@ pub struct DisplaySettings<'db> {
     /// whose type parameters are currently being displayed).
     /// Used to suppress redundant `@{scope}` suffixes for type variables.
     active_scopes: Rc<FxHashSet<Definition<'db>>>,
-    /// Function types that are currently being displayed.
-    /// Used to prevent infinite recursion when displaying self-referential function types.
-    visited_function_types: Rc<FxHashSet<FunctionType<'db>>>,
-    /// Callable signatures can refer back to the same lambda through its lazy return type.
-    visited_callable_types: Rc<FxHashSet<CallableType<'db>>>,
     /// Anonymous recursive types whose bodies are currently being displayed.
     active_recursive_types: Rc<ActiveRecursionDetector<TypeIdentity<'db>>>,
     /// Whether to hide the return type of the outermost signature.
@@ -303,10 +298,39 @@ pub struct TypeDisplayDetails<'db> {
     pub is_valid_syntax: bool,
 }
 
-/// Abstraction over "are we doing normal formatting, or tracking ranges with metadata?"
-enum TypeWriter<'a, 'b, 'db> {
+/// A rendering operation, including recursion shared by its nested and buffered output.
+/// Formatting preferences can change independently without restarting recursive signatures.
+struct TypeWriter<'a, 'b, 'db> {
+    output: TypeOutput<'a, 'b, 'db>,
+    signatures: Rc<RefCell<FxHashSet<DisplayedSignature<'db>>>>,
+}
+
+enum TypeOutput<'a, 'b, 'db> {
     Formatter(&'a mut Formatter<'b>),
-    Details(TypeDetailsWriter<'db>),
+    Text(&'a mut String),
+    Details(&'a mut TypeDetailsWriter<'db>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum DisplayedSignature<'db> {
+    Function(FunctionType<'db>),
+    Callable(CallableType<'db>),
+}
+
+enum SignatureRecursion {
+    Repeated,
+    DepthLimit,
+}
+
+struct SignatureDisplayGuard<'db> {
+    signatures: Rc<RefCell<FxHashSet<DisplayedSignature<'db>>>>,
+    signature: DisplayedSignature<'db>,
+}
+
+impl Drop for SignatureDisplayGuard<'_> {
+    fn drop(&mut self) {
+        self.signatures.borrow_mut().remove(&self.signature);
+    }
 }
 /// Writer that builds a string with range tracking
 struct TypeDetailsWriter<'db> {
@@ -319,12 +343,13 @@ struct TypeDetailsWriter<'db> {
 impl<'db> TypeDetailsWriter<'db> {
     /// Buffer a display once so label comparisons can reuse its text and navigation ranges.
     fn render(value: &impl FmtDetailed<'db>) -> TypeDisplayDetails<'db> {
-        let mut writer = TypeWriter::Details(Self::new());
+        let mut details = Self::new();
+        let mut writer = TypeWriter {
+            output: TypeOutput::Details(&mut details),
+            signatures: Rc::default(),
+        };
         value.fmt_detailed(&mut writer).unwrap();
-        match writer {
-            TypeWriter::Details(details) => details.finish_type_details(),
-            TypeWriter::Formatter(_) => unreachable!("Expected Details variant"),
-        }
+        details.finish_type_details()
     }
 
     fn new() -> Self {
@@ -378,12 +403,65 @@ impl<'db> TypeDetailsWriter<'db> {
 }
 
 impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
-    /// Buffer a display with the metadata required by this output.
-    fn render(&self, value: &(impl Display + FmtDetailed<'db>)) -> BufferedTypeDisplay<'db> {
-        match self {
-            Self::Formatter(_) => BufferedTypeDisplay::Text(value.to_string()),
-            Self::Details(_) => BufferedTypeDisplay::Details(TypeDetailsWriter::render(value)),
+    fn new(formatter: &'a mut Formatter<'b>) -> Self {
+        Self {
+            output: TypeOutput::Formatter(formatter),
+            signatures: Rc::default(),
         }
+    }
+
+    fn signature_recursion(
+        &self,
+        signature: DisplayedSignature<'db>,
+    ) -> Option<SignatureRecursion> {
+        let signatures = self.signatures.borrow();
+        if signatures.contains(&signature) {
+            Some(SignatureRecursion::Repeated)
+        } else if signatures.len() >= MAX_SIGNATURE_DISPLAY_DEPTH {
+            Some(SignatureRecursion::DepthLimit)
+        } else {
+            None
+        }
+    }
+
+    fn enter_signature(
+        &self,
+        signature: DisplayedSignature<'db>,
+    ) -> Result<SignatureDisplayGuard<'db>, SignatureRecursion> {
+        if let Some(recursion) = self.signature_recursion(signature) {
+            return Err(recursion);
+        }
+        self.signatures.borrow_mut().insert(signature);
+        Ok(SignatureDisplayGuard {
+            signatures: Rc::clone(&self.signatures),
+            signature,
+        })
+    }
+
+    /// Buffer a display with the metadata required by this output.
+    fn render(
+        &self,
+        value: &impl FmtDetailed<'db>,
+    ) -> Result<BufferedTypeDisplay<'db>, fmt::Error> {
+        if matches!(self.output, TypeOutput::Details(_)) {
+            let mut details = TypeDetailsWriter::new();
+            value.fmt_detailed(&mut TypeWriter {
+                output: TypeOutput::Details(&mut details),
+                signatures: Rc::clone(&self.signatures),
+            })?;
+            Ok(BufferedTypeDisplay::Details(details.finish_type_details()))
+        } else {
+            self.render_text(value).map(BufferedTypeDisplay::Text)
+        }
+    }
+
+    fn render_text(&self, value: &impl FmtDetailed<'db>) -> Result<String, fmt::Error> {
+        let mut label = String::new();
+        value.fmt_detailed(&mut TypeWriter {
+            output: TypeOutput::Text(&mut label),
+            signatures: Rc::clone(&self.signatures),
+        })?;
+        Ok(label)
     }
 
     /// Indicate the given detail is about to start being written to this Writer
@@ -391,9 +469,9 @@ impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
     /// This creates a scoped guard that when Dropped will record the given detail
     /// as spanning from when it was introduced to when it was dropped.
     fn with_detail<'c>(&'c mut self, detail: TypeDetail<'db>) -> TypeDetailGuard<'a, 'b, 'c, 'db> {
-        let start = match self {
-            TypeWriter::Formatter(_) => None,
-            TypeWriter::Details(details) => Some(details.label.text_len()),
+        let start = match &self.output {
+            TypeOutput::Formatter(_) | TypeOutput::Text(_) => None,
+            TypeOutput::Details(details) => Some(details.label.text_len()),
         };
         TypeDetailGuard {
             start,
@@ -408,9 +486,8 @@ impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
     }
 
     fn set_invalid_type_annotation(&mut self) {
-        match self {
-            TypeWriter::Formatter(_) => {}
-            TypeWriter::Details(details) => details.is_valid_syntax = false,
+        if let TypeOutput::Details(details) = &mut self.output {
+            details.is_valid_syntax = false;
         }
     }
 
@@ -426,9 +503,10 @@ impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
 
 impl Write for TypeWriter<'_, '_, '_> {
     fn write_str(&mut self, val: &str) -> fmt::Result {
-        match self {
-            TypeWriter::Formatter(formatter) => formatter.write_str(val),
-            TypeWriter::Details(formatter) => formatter.write_str(val),
+        match &mut self.output {
+            TypeOutput::Formatter(formatter) => formatter.write_str(val),
+            TypeOutput::Text(text) => text.write_str(val),
+            TypeOutput::Details(formatter) => formatter.write_str(val),
         }
     }
 }
@@ -438,6 +516,8 @@ impl Write for TypeDetailsWriter<'_> {
     }
 }
 
+/// Internal formatters reuse the active writer. Only rendering entry points implement `Display`,
+/// which starts a new operation and must not be used for nested type formatting.
 trait FmtDetailed<'db> {
     fn fmt_detailed(&self, f: &mut TypeWriter<'_, '_, 'db>) -> fmt::Result;
 }
@@ -468,7 +548,7 @@ impl<'db> FmtDetailed<'db> for BufferedTypeDisplay<'db> {
 
 impl<'db> FmtDetailed<'db> for TypeDisplayDetails<'db> {
     fn fmt_detailed(&self, writer: &mut TypeWriter<'_, '_, 'db>) -> fmt::Result {
-        if let TypeWriter::Details(details) = writer {
+        if let TypeOutput::Details(details) = &mut writer.output {
             let offset = details.label.text_len();
             details
                 .targets
@@ -542,9 +622,9 @@ struct TypeDetailGuard<'a, 'b, 'c, 'db> {
 
 impl Drop for TypeDetailGuard<'_, '_, '_, '_> {
     fn drop(&mut self) {
-        // The fallibility here is primarily retrieving `TypeWriter::Details`
+        // The fallibility here is primarily retrieving `TypeOutput::Details`
         // everything else is ideally-never-fails pedantry (yay for pedantry!)
-        if let TypeWriter::Details(details) = &mut *self.inner
+        if let TypeOutput::Details(details) = &mut self.inner.output
             && let Some(start) = self.start
             && let Some(payload) = self.payload.take()
         {
@@ -840,7 +920,7 @@ impl<'db> FmtDetailed<'db> for DisplayType<'_, 'db> {
 
 impl Display for DisplayType<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -964,7 +1044,7 @@ impl<'db> FmtDetailed<'db> for ClassDisplay<'db> {
 
 impl Display for ClassDisplay<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -1113,12 +1193,6 @@ impl<'db> FmtDetailed<'db> for TypeAliasDisplay<'db> {
     }
 }
 
-impl Display for TypeAliasDisplay<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 /// A source-style display of a type alias declaration.
 struct DisplayTypeAliasDeclaration<'env, 'db> {
     db: &'db dyn Db,
@@ -1153,7 +1227,7 @@ impl<'db> FmtDetailed<'db> for DisplayTypeAliasDeclaration<'_, 'db> {
 
 impl Display for DisplayTypeAliasDeclaration<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -1195,12 +1269,6 @@ fn property_display_name<'db>(db: &'db dyn Db, property: PropertyInstanceType<'d
         PropertyInstanceClass::Builtin => "property",
         PropertyInstanceClass::Enum => "enum.property",
         PropertyInstanceClass::Subclass(class) => class.name(db),
-    }
-}
-
-impl Display for DisplayRepresentation<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -1409,14 +1477,12 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'_, 'db> {
             Type::BoundMethod(bound_method) => {
                 let Some(callable) = bound_method.into_callable_type(db) else {
                     f.set_invalid_type_annotation();
-                    write!(
-                        f,
-                        "MethodType[{}]",
-                        bound_method
-                            .func(db)
-                            .display_with(db, self.env, self.settings.clone())
-                    )?;
-                    return Ok(());
+                    f.write_str("MethodType[")?;
+                    bound_method
+                        .func(db)
+                        .display_with(db, self.env, self.settings.clone())
+                        .fmt_detailed(f)?;
+                    return f.write_char(']');
                 };
                 let Some(function) = bound_method.function(db) else {
                     return callable
@@ -2001,12 +2067,6 @@ impl<'db> FmtDetailed<'db> for DisplayTuple<'_, 'db> {
     }
 }
 
-impl Display for DisplayTuple<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 impl<'db> OverloadLiteral<'db> {
     // Not currently used, but useful for debugging.
     #[expect(dead_code)]
@@ -2061,12 +2121,6 @@ impl<'db> FmtDetailed<'db> for DisplayOverloadLiteral<'_, 'db> {
     }
 }
 
-impl Display for DisplayOverloadLiteral<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 impl<'db> FunctionType<'db> {
     fn display_with<'env>(
         self,
@@ -2096,19 +2150,14 @@ impl<'db> FmtDetailed<'db> for DisplayFunctionType<'_, 'db> {
         // and limit display depth for chains of different function types
         // (e.g. multiple redefinitions with `TypeOf[foo]` return types).
         let db = self.db;
-        if self.settings.visited_function_types.contains(&self.ty)
-            || self.settings.visited_function_types.len() >= MAX_SIGNATURE_DISPLAY_DEPTH
-        {
+        let Ok(_guard) = f.enter_signature(DisplayedSignature::Function(self.ty)) else {
             f.set_invalid_type_annotation();
             f.write_str("def ")?;
             write!(f, "{}", self.ty.name(db))?;
             return f.write_str("(...)");
-        }
+        };
 
-        let mut settings = self.settings.clone();
-        let mut visited = (*settings.visited_function_types).clone();
-        visited.insert(self.ty);
-        settings.visited_function_types = Rc::new(visited);
+        let settings = self.settings.clone();
 
         let signature = self.ty.signature(db);
 
@@ -2149,12 +2198,6 @@ impl<'db> FmtDetailed<'db> for DisplayFunctionType<'_, 'db> {
                 Ok(())
             }
         }
-    }
-}
-
-impl Display for DisplayFunctionType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -2230,7 +2273,7 @@ impl<'db> FmtDetailed<'db> for DisplayGenericAlias<'_, 'db> {
 
 impl Display for DisplayGenericAlias<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -2275,12 +2318,6 @@ impl<'db> FmtDetailed<'db> for DisplayOptionalGenericContext<'_, 'db> {
         } else {
             Ok(())
         }
-    }
-}
-
-impl Display for DisplayOptionalGenericContext<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -2355,12 +2392,6 @@ impl<'db> FmtDetailed<'db> for DisplayGenericContext<'_, 'db> {
         } else {
             self.fmt_normal(f)
         }
-    }
-}
-
-impl Display for DisplayGenericContext<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -2506,12 +2537,6 @@ impl<'db> FmtDetailed<'db> for DisplaySpecialization<'_, 'db> {
     }
 }
 
-impl Display for DisplaySpecialization<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TupleSpecialization {
     Yes,
@@ -2558,15 +2583,15 @@ pub(crate) struct DisplayCallableType<'a, 'db> {
 impl<'db> FmtDetailed<'db> for DisplayCallableType<'_, 'db> {
     fn fmt_detailed(&self, f: &mut TypeWriter<'_, '_, 'db>) -> fmt::Result {
         let db = self.db;
-        if self.settings.visited_callable_types.contains(&self.ty) {
-            return f.write_str("Divergent");
-        }
-        if self.settings.visited_callable_types.len() >= MAX_SIGNATURE_DISPLAY_DEPTH {
-            f.set_invalid_type_annotation();
-            return f.write_str("(...) -> ...");
-        }
-        let mut settings = self.settings.clone();
-        Rc::make_mut(&mut settings.visited_callable_types).insert(self.ty);
+        let _guard = match f.enter_signature(DisplayedSignature::Callable(self.ty)) {
+            Ok(guard) => guard,
+            Err(SignatureRecursion::Repeated) => return f.write_str("Divergent"),
+            Err(SignatureRecursion::DepthLimit) => {
+                f.set_invalid_type_annotation();
+                return f.write_str("(...) -> ...");
+            }
+        };
+        let settings = self.settings.clone();
         match self.ty.signatures(db).overloads.as_slice() {
             [signature] => {
                 if matches!(self.ty.kind(db), CallableTypeKind::ParamSpecValue) {
@@ -2607,12 +2632,6 @@ impl<'db> FmtDetailed<'db> for DisplayCallableType<'_, 'db> {
         }
 
         Ok(())
-    }
-}
-
-impl Display for DisplayCallableType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -2703,13 +2722,13 @@ impl DisplaySignature<'_, '_> {
 
     /// Get detailed display information including component ranges
     pub(crate) fn to_string_parts(&self) -> SignatureDisplayDetails {
-        let mut f = TypeWriter::Details(TypeDetailsWriter::new());
+        let mut details = TypeDetailsWriter::new();
+        let mut f = TypeWriter {
+            output: TypeOutput::Details(&mut details),
+            signatures: Rc::default(),
+        };
         self.fmt_detailed(&mut f).unwrap();
-
-        match f {
-            TypeWriter::Details(details) => details.finish_signature_details(),
-            TypeWriter::Formatter(_) => unreachable!("Expected Details variant"),
-        }
+        details.finish_signature_details()
     }
 
     fn should_hide_self_from_display(&self) -> bool {
@@ -2782,7 +2801,7 @@ impl<'db> FmtDetailed<'db> for DisplaySignature<'_, 'db> {
             f.write_str(" -> ")?;
 
             let should_parenthesize_return_type =
-                should_parenthesize_callable_type(db, self.return_ty, &self.settings);
+                should_parenthesize_callable_type(db, self.return_ty, &f);
             if should_parenthesize_return_type {
                 f.write_char('(')?;
             }
@@ -2804,7 +2823,7 @@ impl<'db> FmtDetailed<'db> for DisplaySignature<'_, 'db> {
 
 impl Display for DisplaySignature<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -2982,12 +3001,6 @@ impl<'db> FmtDetailed<'db> for DisplayParameters<'_, 'db> {
     }
 }
 
-impl Display for DisplayParameters<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 impl<'db> Parameter<'db> {
     fn display_with<'a>(
         &'a self,
@@ -3091,12 +3104,6 @@ impl<'db> FmtDetailed<'db> for DisplayParameter<'_, 'db> {
     }
 }
 
-impl Display for DisplayParameter<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 #[derive(Debug, Copy, Clone)]
 struct TruncationPolicy {
     max: usize,
@@ -3133,12 +3140,6 @@ impl<'db> FmtDetailed<'db> for DisplayOmitted {
         };
         f.set_invalid_type_annotation();
         write!(f, "... omitted {} {}", self.count, noun)
-    }
-}
-
-impl Display for DisplayOmitted {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -3261,8 +3262,8 @@ impl<'db> FmtDetailed<'db> for DisplayUnionType<'_, 'db> {
     fn fmt_detailed(&self, f: &mut TypeWriter<'_, '_, 'db>) -> fmt::Result {
         fn duplicate_ambiguous_labels<'a, 'db>(
             displayed: &'a [UnionDisplayEntry<'db>],
-            omitted: impl Iterator<Item = UnionDisplayEntry<'db>>,
-        ) -> FxHashSet<&'a str> {
+            omitted: impl Iterator<Item = Result<UnionDisplayEntry<'db>, fmt::Error>>,
+        ) -> Result<FxHashSet<&'a str>, fmt::Error> {
             let mut counts: FxHashMap<&str, usize> = FxHashMap::default();
             for entry in displayed {
                 if let UnionDisplayEntry::Type(_, display) = entry {
@@ -3270,16 +3271,16 @@ impl<'db> FmtDetailed<'db> for DisplayUnionType<'_, 'db> {
                 }
             }
             for entry in omitted {
-                if let UnionDisplayEntry::Type(_, display) = entry
+                if let UnionDisplayEntry::Type(_, display) = entry?
                     && let Some(count) = counts.get_mut(display.label())
                 {
                     *count += 1;
                 }
             }
-            counts
+            Ok(counts
                 .into_iter()
                 .filter_map(|(label, count)| (count > 1).then_some(label))
-                .collect()
+                .collect())
         }
         let db = self.db;
 
@@ -3341,11 +3342,11 @@ impl<'db> FmtDetailed<'db> for DisplayUnionType<'_, 'db> {
         let mut entry_index = 0;
         let mut entries = elements.iter().copied().filter_map(|element| {
             let entry = if is_numeric_tower_element(element) {
-                UnionDisplayEntry::NumericTower(numeric_tower.take()?)
+                Ok(UnionDisplayEntry::NumericTower(numeric_tower.take()?))
             } else if self.condensable_literals(element).is_some() {
-                UnionDisplayEntry::Literals(condensed_types.take()?)
+                Ok(UnionDisplayEntry::Literals(condensed_types.take()?))
             } else if element.is_subclass_of() {
-                UnionDisplayEntry::Subclasses(subclass_of_types.take()?)
+                Ok(UnionDisplayEntry::Subclasses(subclass_of_types.take()?))
             } else {
                 let display = DisplayMaybeParenthesizedType {
                     ty: element,
@@ -3358,16 +3359,19 @@ impl<'db> FmtDetailed<'db> for DisplayUnionType<'_, 'db> {
                 } else {
                     // Omitted entries still participate in name disambiguation, but their
                     // navigation metadata is never emitted.
-                    BufferedTypeDisplay::Text(display.to_string())
+                    f.render_text(&display).map(BufferedTypeDisplay::Text)
                 };
-                UnionDisplayEntry::Type(element, display)
+                display.map(|display| UnionDisplayEntry::Type(element, display))
             };
             entry_index += 1;
             Some(entry)
         });
-        let displayed: Vec<_> = entries.by_ref().take(display_limit).collect();
+        let displayed = entries
+            .by_ref()
+            .take(display_limit)
+            .collect::<Result<Vec<_>, _>>()?;
         // Only displayed labels need counts; omitted labels can be discarded after comparison.
-        let duplicate_ambiguous_labels = duplicate_ambiguous_labels(&displayed, entries);
+        let duplicate_ambiguous_labels = duplicate_ambiguous_labels(&displayed, entries)?;
         let mut join = f.join(" | ");
 
         for entry in &displayed {
@@ -3450,18 +3454,6 @@ impl<'db> FmtDetailed<'db> for DisplayKnownUnion<'_, 'db> {
             f.with_type(class.to_instance(self.db, self.env))
                 .write_str(class.name(self.env.python_version(self.db)))
         }
-    }
-}
-
-impl Display for DisplayUnionType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
-impl fmt::Debug for DisplayUnionType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Display::fmt(self, f)
     }
 }
 
@@ -3576,12 +3568,6 @@ impl<'db> FmtDetailed<'db> for DisplaySubclassOfGroup<'_, 'db> {
     }
 }
 
-impl Display for DisplaySubclassOfGroup<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 struct DisplayLiteralGroup<'env, 'db> {
     literals: &'env [Type<'db>],
     db: &'db dyn Db,
@@ -3626,12 +3612,6 @@ impl<'db> FmtDetailed<'db> for DisplayLiteralGroup<'_, 'db> {
 
         join.finish()?;
         f.write_str("]")
-    }
-}
-
-impl Display for DisplayLiteralGroup<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -3690,18 +3670,6 @@ impl<'db> FmtDetailed<'db> for DisplayIntersectionType<'_, 'db> {
     }
 }
 
-impl Display for DisplayIntersectionType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
-impl fmt::Debug for DisplayIntersectionType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        Display::fmt(self, f)
-    }
-}
-
 struct DisplayMaybeNegatedType<'env, 'db> {
     ty: Type<'db>,
     db: &'db dyn Db,
@@ -3726,12 +3694,6 @@ impl<'db> FmtDetailed<'db> for DisplayMaybeNegatedType<'_, 'db> {
     }
 }
 
-impl Display for DisplayMaybeNegatedType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 /// Returns `true` if the given type is a callable type that should be parenthesized
 /// when appearing as a parameter annotation or return type of another callable.
 ///
@@ -3742,14 +3704,13 @@ impl Display for DisplayMaybeNegatedType<'_, '_> {
 fn should_parenthesize_callable_type<'db>(
     db: &'db dyn Db,
     ty: Type<'db>,
-    settings: &DisplaySettings<'db>,
+    writer: &TypeWriter<'_, '_, 'db>,
 ) -> bool {
     if let Type::Callable(callable) = ty {
-        if settings.visited_callable_types.contains(&callable) {
-            return false;
-        }
-        if settings.visited_callable_types.len() >= MAX_SIGNATURE_DISPLAY_DEPTH {
-            return true;
+        match writer.signature_recursion(DisplayedSignature::Callable(callable)) {
+            Some(SignatureRecursion::Repeated) => return false,
+            Some(SignatureRecursion::DepthLimit) => return true,
+            None => {}
         }
         let overloads = &callable.signatures(db).overloads;
         overloads.len() == 1 && !overloads[0].parameters().is_top()
@@ -3777,7 +3738,7 @@ impl<'db> FmtDetailed<'db> for DisplayMaybeParenthesizedType<'_, 'db> {
             f.write_char(')')
         };
         match self.ty {
-            ty if should_parenthesize_callable_type(db, ty, &self.settings) => write_parentheses(f),
+            ty if should_parenthesize_callable_type(db, ty, f) => write_parentheses(f),
             Type::KnownBoundMethod(_) | Type::FunctionLiteral(_) | Type::BoundMethod(_) => {
                 write_parentheses(f)
             }
@@ -3797,12 +3758,6 @@ impl<'db> FmtDetailed<'db> for DisplayMaybeParenthesizedType<'_, 'db> {
                 .display_with(db, self.env, self.settings.clone())
                 .fmt_detailed(f),
         }
-    }
-}
-
-impl Display for DisplayMaybeParenthesizedType<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
     }
 }
 
@@ -3883,12 +3838,6 @@ impl<'db> FmtDetailed<'db> for DisplayTypeArray<'_, 'db> {
     }
 }
 
-impl Display for DisplayTypeArray<'_, '_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
-    }
-}
-
 pub(crate) struct DisplayKnownInstanceRepr<'env, 'db> {
     known_instance: KnownInstanceType<'db>,
     db: &'db dyn Db,
@@ -3914,7 +3863,7 @@ impl<'db> KnownInstanceType<'db> {
 
 impl Display for DisplayKnownInstanceRepr<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::Formatter(f))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -3980,7 +3929,9 @@ impl<'db> FmtDetailed<'db> for DisplayKnownInstanceRepr<'_, 'db> {
 
                 if let Some(field_ty) = field_type {
                     f.write_char('[')?;
-                    write!(f.with_type(field_ty), "{}", field_ty.display(db, self.env))?;
+                    field_ty
+                        .display(db, self.env)
+                        .fmt_detailed(&mut f.with_type(field_ty))?;
                     f.write_char(']')?;
                 }
                 Ok(())
@@ -4017,13 +3968,13 @@ impl<'db> FmtDetailed<'db> for DisplayKnownInstanceRepr<'_, 'db> {
             KnownInstanceType::GenericContext(generic_context) => {
                 f.with_type(ty)
                     .write_str("ty_extensions._internal.GenericContext")?;
-                write!(f, "{}", generic_context.display_full(db))
+                generic_context.display_full(db).fmt_detailed(f)
             }
             KnownInstanceType::Specialization(specialization) => {
                 // Normalize for consistent output across CI platforms
                 f.with_type(ty)
                     .write_str("ty_extensions._internal.Specialization")?;
-                write!(f, "{}", specialization.display_full(db, self.env))
+                specialization.display_full(db, self.env).fmt_detailed(f)
             }
             KnownInstanceType::UnionType(union) => {
                 f.set_invalid_type_annotation();
@@ -4123,9 +4074,14 @@ mod tests {
     use ruff_python_ast::name::Name;
 
     use crate::db::tests::{TestDb, setup_db};
+    use crate::types::dedicated::pydantic::ConfigBoolean;
+    use crate::types::known_instance::{
+        FieldInstance, FunctoolsPartialInstance, InternedType, MethodWrapper, MethodWrapperKind,
+    };
+    use crate::types::tuple::TupleType;
     use crate::types::{
-        DisplaySettings, KnownClass, KnownUnion, Parameter, Parameters, Signature, Type,
-        TypeDetail, UnionType,
+        CallableType, DisplaySettings, KnownClass, KnownInstanceType, KnownUnion, Parameter,
+        Parameters, Signature, Type, TypeDetail, UnionType,
     };
 
     #[test]
@@ -4150,6 +4106,110 @@ mod tests {
                 .to_string(),
             r#"Literal['"']"#
         );
+    }
+
+    #[test]
+    fn nested_signature_display_through_wrappers() {
+        #[derive(Clone, Copy, Debug)]
+        enum Wrapper {
+            Partial,
+            PartialCall,
+            Staticmethod,
+            Classmethod,
+            Field,
+            Union,
+            Tuple,
+            Annotated,
+        }
+
+        let db = setup_db();
+        let env = db.program_environment();
+        let int = KnownClass::Int.to_instance(&db, &env);
+
+        for wrapper in [
+            Wrapper::Partial,
+            Wrapper::PartialCall,
+            Wrapper::Staticmethod,
+            Wrapper::Classmethod,
+            Wrapper::Field,
+            Wrapper::Union,
+            Wrapper::Tuple,
+            Wrapper::Annotated,
+        ] {
+            // Each returned callable adds a signature, even when a wrapper chooses different
+            // formatting settings or a union buffers the signature before writing it.
+            let ty = (0..6).fold(int, |return_ty, _| {
+                let callable =
+                    CallableType::single(&db, Signature::new(Parameters::empty(), return_ty));
+                let ty = Type::Callable(callable);
+                match wrapper {
+                    Wrapper::Partial | Wrapper::PartialCall => {
+                        let partial = FunctoolsPartialInstance::new(
+                            &db,
+                            InternedType::new(&db, ty),
+                            callable,
+                        );
+                        Type::KnownInstance(if matches!(wrapper, Wrapper::Partial) {
+                            KnownInstanceType::FunctoolsPartial(partial)
+                        } else {
+                            KnownInstanceType::FunctoolsPartialCall(partial)
+                        })
+                    }
+                    Wrapper::Staticmethod | Wrapper::Classmethod => {
+                        Type::KnownInstance(KnownInstanceType::MethodWrapper(MethodWrapper::new(
+                            &db,
+                            ty,
+                            if matches!(wrapper, Wrapper::Staticmethod) {
+                                MethodWrapperKind::Staticmethod
+                            } else {
+                                MethodWrapperKind::Classmethod
+                            },
+                        )))
+                    }
+                    Wrapper::Field => {
+                        Type::KnownInstance(KnownInstanceType::Field(FieldInstance::new(
+                            &db,
+                            Some(ty),
+                            true,
+                            None,
+                            None,
+                            None,
+                            ConfigBoolean::Unspecified,
+                        )))
+                    }
+                    Wrapper::Union => UnionType::from_elements(&db, &env, [int, ty]),
+                    Wrapper::Tuple => Type::tuple(TupleType::heterogeneous(&db, &env, [ty])),
+                    Wrapper::Annotated => Type::KnownInstance(KnownInstanceType::Annotated(
+                        InternedType::new(&db, ty),
+                    )),
+                }
+            });
+            let display = ty.display(&db, &env);
+            let label = display.to_string();
+            assert!(label.contains("(...) -> ..."), "{wrapper:?}: {label}");
+            let details = display.to_string_parts();
+            assert_eq!(details.label, label, "{wrapper:?}");
+            for range in details.targets {
+                assert!(
+                    range.end().to_usize() <= label.len(),
+                    "{wrapper:?}: {range:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_sibling_signatures_display_in_full() {
+        let db = setup_db();
+        let env = db.program_environment();
+        let callable = Type::Callable(CallableType::single(
+            &db,
+            Signature::new(Parameters::empty(), KnownClass::Int.to_instance(&db, &env)),
+        ));
+        let pair = Type::tuple(TupleType::heterogeneous(&db, &env, [callable, callable]));
+        let display = pair.display(&db, &env);
+        assert_eq!(display.to_string(), "tuple[() -> int, () -> int]");
+        assert_eq!(display.to_string_parts().label, display.to_string());
     }
 
     #[test]
