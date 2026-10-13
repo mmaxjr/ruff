@@ -1055,6 +1055,22 @@ where
             _tag: PhantomData,
         }
     }
+
+    /// Cycle detection does not bound the depth of a finite chain of distinct types.
+    /// Grow the native stack for deep visits without approximating their results.
+    #[inline]
+    fn with_stack_space<U>(&self, compute: impl FnOnce() -> U) -> U {
+        // As in the parser, avoid thread-local stack probes for shallow paths. The red zone
+        // leaves room for the visits before the first probe and for identity analysis.
+        const MAX_UNCHECKED_DEPTH: usize = 20;
+        const STACK_RED_ZONE: usize = 128 * 1024;
+        let depth = self.seen.borrow().len();
+        if depth < MAX_UNCHECKED_DEPTH {
+            compute()
+        } else {
+            stacker::maybe_grow(STACK_RED_ZONE, ruff_db::STACK_SIZE, compute)
+        }
+    }
 }
 
 impl<'db, Tag, T, R: Clone, const INLINE_CAPACITY: usize>
@@ -1068,7 +1084,7 @@ where
             CycleDetectorVisit::Ready(result) => result,
             CycleDetectorVisit::Cycle(..) => self.fallback.clone(),
             CycleDetectorVisit::Pending(item) => {
-                let result = compute();
+                let result = self.with_stack_space(compute);
                 self.finish_visit(item, result)
             }
         }
@@ -1102,7 +1118,7 @@ where
             CycleDetectorVisit::Ready(result) => Ok(result),
             CycleDetectorVisit::Cycle(item, previous) => Err((item, previous)),
             CycleDetectorVisit::Pending(item) => {
-                let result = compute();
+                let result = self.with_stack_space(compute);
                 if was_cached {
                     self.finish_active_visit(&item);
                     Ok(result)
@@ -1124,7 +1140,7 @@ where
         match self.begin_active_visit(db, item) {
             CycleDetectorVisit::Ready(_) | CycleDetectorVisit::Cycle(..) => None,
             CycleDetectorVisit::Pending(item) => {
-                let result = work();
+                let result = self.with_stack_space(work);
                 self.finish_active_visit(&item);
                 Some(result)
             }
@@ -1249,7 +1265,7 @@ where
                     revision: &self.revision,
                     item,
                 };
-                compute(None)
+                self.with_stack_space(|| compute(None))
             }
         }
     }
