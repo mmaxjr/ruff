@@ -2093,7 +2093,7 @@ impl<'db> OverloadLiteral<'db> {
     }
 }
 
-pub(crate) struct DisplayOverloadLiteral<'env, 'db> {
+struct DisplayOverloadLiteral<'env, 'db> {
     literal: OverloadLiteral<'db>,
     db: &'db dyn Db,
     env: &'env ProgramEnvironment<'db>,
@@ -2573,7 +2573,7 @@ impl<'db> CallableType<'db> {
     }
 }
 
-pub(crate) struct DisplayCallableType<'a, 'db> {
+struct DisplayCallableType<'a, 'db> {
     ty: CallableType<'db>,
     db: &'db dyn Db,
     env: &'a ProgramEnvironment<'db>,
