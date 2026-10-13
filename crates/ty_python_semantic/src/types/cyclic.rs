@@ -37,9 +37,9 @@ use crate::types::function::FunctionLiteral;
 use crate::types::generics::{GenericContext, Specialization};
 use crate::types::visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard};
 use crate::types::{
-    BoundTypeVarIdentity, BoundTypeVarInstance, KnownClass,
-    MaterializationKind, ProtocolInstanceType, RecursiveType, StaticClassLiteral, Type,
-    TypeAliasType, TypedDictType, walk_signature,
+    BoundTypeVarIdentity, BoundTypeVarInstance, KnownClass, MaterializationKind,
+    ProtocolInstanceType, RecursiveType, StaticClassLiteral, Type, TypeAliasType, TypedDictType,
+    walk_signature,
 };
 use crate::{Db, ProgramEnvironment};
 

@@ -1432,7 +1432,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         source: CallableType<'db>,
         target: CallableType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        self.with_recursion_guard(db, Type::Callable(source), Type::Callable(target), || {
+        self.with_recursion_guard(db, Type::Callable(source), Type::Callable(target), |_| {
             self.check_callable_pair_inner(db, source, target)
         })
     }

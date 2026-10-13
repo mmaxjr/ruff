@@ -148,6 +148,7 @@ fn lambda_body_uses_its_parameter_context() -> anyhow::Result<()> {
                 Signature::new(
                     Parameters::from_annotation(
                         &db,
+                        &env,
                         [Parameter::positional_only(None).with_annotated_type(parameter)],
                     ),
                     Type::unknown(),

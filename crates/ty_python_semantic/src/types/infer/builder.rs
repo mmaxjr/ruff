@@ -127,7 +127,7 @@ use crate::types::unpacker::{
     tuple_literal_needs_promotion,
 };
 use crate::types::{
-    ApplyTypeMappingVisitor, BindingContext, BoundTypeVarInstance, CallDunderError, CallableBinding, CallableType,
+    BindingContext, BoundTypeVarInstance, CallDunderError, CallableBinding, CallableType,
     ClassType, CycleKind, DynamicType, GeneratorTypeMode, InferenceFlags, InternedConstraintSet,
     InternedType, IntersectionBuilder, IntersectionType, KnownBoundMethodType, KnownClass,
     KnownInstanceType, KnownUnion, LiteralValueType, LiteralValueTypeKind, MemberLookupPolicy,

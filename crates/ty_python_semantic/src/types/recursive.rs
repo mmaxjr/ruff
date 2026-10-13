@@ -225,7 +225,7 @@ where
         mapping: &ApplyTypeMappingVisitor<'_, 'db>,
         reuse_cached: impl FnOnce(&R) -> bool,
         compute: impl FnOnce(&TypeExpansionContext<'_, '_, 'db>) -> R,
-    ) -> Result<R, T> {
+    ) -> Result<R, (T, T)> {
         self.try_visit(db, item, reuse_cached, || {
             compute(&TypeExpansionContext::new(mapping))
         })

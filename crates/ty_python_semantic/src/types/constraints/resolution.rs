@@ -147,6 +147,7 @@ pub(in crate::types) fn type_dependencies<'db>(
     };
     let visitor = Dependencies {
         env,
+        mapping: ApplyTypeMappingVisitor::new(env),
         query: &query,
         satisfied: Cell::new(true),
         visited: CycleDetector::new(()),
