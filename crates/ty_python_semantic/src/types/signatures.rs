@@ -4721,17 +4721,24 @@ impl<'db> Parameters<'db> {
 
     /// Compare parameter types and calling conventions, retaining default presence but not values.
     pub(super) fn equals_ignoring_default_types(&self, other: &Self) -> bool {
-        let without_default_types = |parameter: &Parameter<'db>| {
-            parameter
-                .clone()
-                .with_optional_default_type(parameter.has_default().then(Type::unknown))
-        };
-        self.kind() == other.kind()
-            && self.len() == other.len()
-            && self
-                .iter()
-                .zip(other)
-                .all(|(left, right)| without_default_types(left) == without_default_types(right))
+        self.without_default_types() == other.without_default_types()
+    }
+
+    /// Retain the information used to compare signatures, including whether defaults exist.
+    pub(super) fn without_default_types(&self) -> Self {
+        if !self.iter().any(Parameter::has_default) {
+            return self.clone();
+        }
+        Self::new(
+            self.iter()
+                .map(|parameter| {
+                    parameter
+                        .clone()
+                        .with_optional_default_type(parameter.has_default().then(Type::unknown))
+                })
+                .collect::<Box<[_]>>(),
+            self.kind(),
+        )
     }
 
     /// Create a parameter list with an explicit kind.

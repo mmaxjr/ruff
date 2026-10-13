@@ -27,6 +27,7 @@ use ty_python_core::definition::Definition;
 use ty_python_core::{ExpressionNodeKey, scope::ScopeId};
 
 mod lambda;
+pub(in crate::types) use lambda::LambdaSignatureKey;
 use lambda::{LambdaMapping, LambdaSignatureMapping};
 
 impl<'db> Type<'db> {
@@ -926,6 +927,20 @@ impl<'db> CallableType<'db> {
                 context.expand_signature(db, self, || lambda.signature_with_recursion(db, context))
             }
         }
+    }
+
+    /// Obtain a comparison key while preserving the caller's active signature expansions.
+    pub(super) fn signature_comparison_key(
+        self,
+        db: &'db dyn Db,
+        context: &TypeRecursionContext<'db>,
+    ) -> Option<&'db LambdaSignatureKey<'db>> {
+        let SignatureSource::Lambda(lambda) = self.signature_source(db) else {
+            return None;
+        };
+        context
+            .expand_signature(db, self, || lambda.comparison_key(db).as_ref())
+            .flatten()
     }
 
     /// Refer to a lambda's variance equation instead of expanding its recursive signature.

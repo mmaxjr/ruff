@@ -3700,6 +3700,91 @@ def compare(integer_factory: TypeOf[integers], object_factory: TypeOf[objects], 
     string_factory = integer_factory  # error: [invalid-assignment]
 ```
 
+## Branching callbacks with equivalent signatures
+
+Each callback returns two specializations of the preceding callback. The type argument does not
+affect their eventual integer result, so both branches have the same signature. The repeated levels
+check that comparing these callbacks does not require expanding every combination of type arguments.
+
+```py
+from collections.abc import Callable
+
+type Callback = Callable[[], int | tuple[Callback, Callback]]
+
+class Branch[T]:
+    f0 = lambda: 0
+    f1 = lambda: (Branch[tuple[T]].f0, Branch[list[T]].f0)
+    f2 = lambda: (Branch[tuple[T]].f1, Branch[list[T]].f1)
+    f3 = lambda: (Branch[tuple[T]].f2, Branch[list[T]].f2)
+    f4 = lambda: (Branch[tuple[T]].f3, Branch[list[T]].f3)
+    f5 = lambda: (Branch[tuple[T]].f4, Branch[list[T]].f4)
+    f6 = lambda: (Branch[tuple[T]].f5, Branch[list[T]].f5)
+    f7 = lambda: (Branch[tuple[T]].f6, Branch[list[T]].f6)
+    f8 = lambda: (Branch[tuple[T]].f7, Branch[list[T]].f7)
+    f9 = lambda: (Branch[tuple[T]].f8, Branch[list[T]].f8)
+    f10 = lambda: (Branch[tuple[T]].f9, Branch[list[T]].f9)
+    f11 = lambda: (Branch[tuple[T]].f10, Branch[list[T]].f10)
+    f12 = lambda: (Branch[tuple[T]].f11, Branch[list[T]].f11)
+    f13 = lambda: (Branch[tuple[T]].f12, Branch[list[T]].f12)
+    f14 = lambda: (Branch[tuple[T]].f13, Branch[list[T]].f13)
+    f15 = lambda: (Branch[tuple[T]].f14, Branch[list[T]].f14)
+    f16 = lambda: (Branch[tuple[T]].f15, Branch[list[T]].f15)
+    f17 = lambda: (Branch[tuple[T]].f16, Branch[list[T]].f16)
+    f18 = lambda: (Branch[tuple[T]].f17, Branch[list[T]].f17)
+    f19 = lambda: (Branch[tuple[T]].f18, Branch[list[T]].f18)
+    f20 = lambda: (Branch[tuple[T]].f19, Branch[list[T]].f19)
+
+callback: Callback = Branch[int].f20  # no diagnostic
+```
+
+## Specialized lambda parameter types
+
+These lambdas have the same return type, but their parameter types determine whether they accept an
+integer. Checking the first callback does not establish that the second is compatible.
+
+```py
+from collections.abc import Callable
+
+class Consumer[T]:
+    callback: Callable[[T], None] = lambda value: None
+    consume = staticmethod(callback)
+
+valid: tuple[Callable[[int], None], Callable[[int], None]] = (
+    Consumer[object].consume,
+    Consumer[int].consume,
+)  # no diagnostic
+
+# error: [invalid-assignment]
+invalid: tuple[Callable[[int], None], Callable[[int], None]] = (
+    Consumer[object].consume,
+    Consumer[str].consume,
+)
+```
+
+## Specialized lambda return types
+
+Here the type argument determines the callback's result. An integer and a boolean callback are both
+compatible with `Callable[[], int]`; a string callback is not.
+
+```py
+from collections.abc import Callable
+from typing import cast
+
+class Producer[T]:
+    produce = lambda: cast(T, None)
+
+valid: tuple[Callable[[], int], Callable[[], int]] = (
+    Producer[int].produce,
+    Producer[bool].produce,
+)  # no diagnostic
+
+# error: [invalid-assignment]
+invalid: tuple[Callable[[], int], Callable[[], int]] = (
+    Producer[int].produce,
+    Producer[str].produce,
+)
+```
+
 ## Recursive lambdas with swapped type arguments
 
 Each recursive return applies the new type arguments, even when it reaches the same lambda again:

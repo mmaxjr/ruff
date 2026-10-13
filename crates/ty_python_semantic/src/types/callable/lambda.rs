@@ -129,6 +129,16 @@ pub struct LambdaSignatureMapping<'db> {
     steps: Box<[LambdaTransformation<'db>]>,
 }
 
+/// Inputs that distinguish completed signatures of one source lambda during comparison.
+/// Inference still uses the original lambda and all of its captured inputs.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
+pub(in crate::types) struct LambdaSignatureKey<'db> {
+    source: LambdaSignature<'db>,
+    parameters: Parameters<'db>,
+    promotions: Box<[LambdaTransformation<'db>]>,
+    arguments: Box<[(BoundTypeVarInstance<'db>, [Type<'db>; 2])]>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 struct LambdaTransformation<'db> {
     mapping: LambdaMapping<'db>,
@@ -461,6 +471,64 @@ impl<'db> CallableType<'db> {
 
 #[salsa::tracked]
 impl<'db> LambdaSignature<'db> {
+    /// Share comparisons of specialized views when the differing captures cannot affect their
+    /// signatures. Computing this during construction would re-enter inference of the source.
+    #[salsa::tracked(
+        returns(ref),
+        cycle_initial=|_, _, _| None,
+        heap_size=ruff_memory_usage::heap_size,
+    )]
+    pub(super) fn comparison_key(self, db: &'db dyn Db) -> Option<LambdaSignatureKey<'db>> {
+        // An untransformed lambda already has a single exact identity.
+        let source = self.mapping(db).as_ref()?.source;
+        let promotions = self.signature_promotions(db)?;
+        if source.infer_body(db).is_provisional() {
+            return None;
+        }
+        let dependencies = source.return_type_dependencies(db);
+        if !dependencies.iter(db).all(|variable| {
+            source
+                .captured_typevars(db)
+                .variables(db)
+                .any(|captured| captured == variable)
+        }) {
+            return None;
+        }
+        let arguments = if dependencies == TypeVarSet::None {
+            Box::default()
+        } else {
+            self.captured_arguments(db)
+                .filter(|(variable, _)| variable.is_inferable(db, dependencies))
+                .collect()
+        };
+        Some(LambdaSignatureKey {
+            source,
+            parameters: self.parameters(db).without_default_types(),
+            promotions,
+            arguments,
+        })
+    }
+
+    /// Separate promotions from substitutions whose effects are captured by the argument types.
+    /// Other transformations retain their exact identity until their effects can be compared.
+    fn signature_promotions(self, db: &'db dyn Db) -> Option<Box<[LambdaTransformation<'db>]>> {
+        let mut promotions = Vec::new();
+        if let Some(plan) = self.mapping(db) {
+            for step in &plan.steps {
+                match step.mapping {
+                    LambdaMapping::Promote(..) => promotions.push(step.clone()),
+                    LambdaMapping::Specialize {
+                        materialization: None,
+                        ..
+                    }
+                    | LambdaMapping::BindParameters(_) => {}
+                    _ => return None,
+                }
+            }
+        }
+        Some(promotions.into_boxed_slice())
+    }
+
     /// Prove that two views of the same lambda have equivalent signatures.
     ///
     /// Promotion affects both the source signature and its substituted arguments. Compare the
@@ -487,27 +555,11 @@ impl<'db> LambdaSignature<'db> {
         }
 
         let transformations = |lambda: Self| {
-            let mut promotions = FxHashSet::default();
-            if let Some(plan) = lambda.mapping(db) {
-                for step in &plan.steps {
-                    match step.mapping {
-                        LambdaMapping::Promote(mode, kind) => {
-                            promotions.insert((
-                                mode,
-                                kind,
-                                step.context,
-                                step.materialize_typevar_bounds_and_defaults,
-                            ));
-                        }
-                        LambdaMapping::Specialize {
-                            materialization: None,
-                            ..
-                        }
-                        | LambdaMapping::BindParameters(_) => {}
-                        _ => return None,
-                    }
-                }
-            }
+            let promotions: FxHashSet<_> = lambda
+                .signature_promotions(db)?
+                .into_vec()
+                .into_iter()
+                .collect();
             Some((lambda.source(db), promotions))
         };
         let Some((source, promotions)) = transformations(self) else {

@@ -1,11 +1,12 @@
 use crate::ProgramEnvironment;
 use std::borrow::Cow;
+use std::cell::RefCell;
 
 use itertools::Itertools;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::place::{DefinedPlace, Place};
-use crate::types::callable::CallableTypeKind;
+use crate::types::callable::{CallableTypeKind, LambdaSignatureKey};
 use crate::types::constraints::{
     ConstraintProvenance, ConstraintSetBuilder, IteratorConstraintsExtension,
     OptionConstraintsExtension, OwnedConstraintSet,
@@ -1128,14 +1129,45 @@ impl<'db> Type<'db> {
     }
 }
 
-/// A [`CycleDetector`] that is used in `has_relation_to` methods.
-pub(crate) type HasRelationToVisitor<'db, 'c> = CycleDetector<
-    'db,
-    TypeRelation,
-    (Type<'db>, Type<'db>, TypeRelation, TypeVarEvaluation),
-    ConstraintSet<'db, 'c>,
-    1,
->;
+/// Active comparisons retain their original types; completed lambda comparisons can also be
+/// reused across substitutions that do not affect the signature.
+#[derive(Debug)]
+pub(crate) struct HasRelationToVisitor<'db, 'c> {
+    cycles: CycleDetector<
+        'db,
+        TypeRelation,
+        (Type<'db>, Type<'db>, TypeRelation, TypeVarEvaluation),
+        ConstraintSet<'db, 'c>,
+        1,
+    >,
+    signatures: RefCell<FxHashMap<SignatureComparison<'db>, ConstraintSet<'db, 'c>>>,
+}
+
+impl<'db, 'c> HasRelationToVisitor<'db, 'c> {
+    pub(crate) fn default(constraints: &'c ConstraintSetBuilder<'db>) -> Self {
+        Self {
+            cycles: CycleDetector::new(ConstraintSet::from_bool(constraints, true)),
+            signatures: RefCell::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ComparisonType<'db> {
+    Exact(Type<'db>),
+    Lambda(&'db LambdaSignatureKey<'db>, Option<KnownClass>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SignatureComparison<'db> {
+    source: ComparisonType<'db>,
+    target: ComparisonType<'db>,
+    relation: TypeRelation,
+    typevar_evaluation: TypeVarEvaluation,
+    inferable: TypeVarSet<'db>,
+    provenance: ConstraintProvenance,
+    perform_expensive_checks: bool,
+}
 
 impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>, TypeRelation, TypeVarEvaluation) {
     type Id = (
@@ -1159,12 +1191,6 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>, TypeRelation, TypeVarEvalu
             self.2,
             self.3,
         )
-    }
-}
-
-impl<'db, 'c> HasRelationToVisitor<'db, 'c> {
-    pub(crate) fn default(constraints: &'c ConstraintSetBuilder<'db>) -> Self {
-        HasRelationToVisitor::new(ConstraintSet::from_bool(constraints, true))
     }
 }
 
@@ -1719,6 +1745,38 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         )
     }
 
+    fn signature_comparison_key(
+        &self,
+        db: &'db dyn Db,
+        source: Type<'db>,
+        target: Type<'db>,
+    ) -> Option<SignatureComparison<'db>> {
+        let key = |ty| {
+            if let Type::Callable(callable) = ty
+                && let Some(key) = callable
+                    .signature_comparison_key(db, self.materialization_visitor.recursion_context())
+            {
+                ComparisonType::Lambda(key, callable.runtime_class(db))
+            } else {
+                ComparisonType::Exact(ty)
+            }
+        };
+        let (source, target) = (key(source), key(target));
+        if matches!(source, ComparisonType::Exact(_)) && matches!(target, ComparisonType::Exact(_))
+        {
+            return None;
+        }
+        Some(SignatureComparison {
+            source,
+            target,
+            relation: self.relation,
+            typevar_evaluation: self.typevar_evaluation,
+            inferable: self.inferable,
+            provenance: self.provenance,
+            perform_expensive_checks: self.perform_expensive_checks,
+        })
+    }
+
     pub(super) fn with_recursion_guard(
         &self,
         db: &'db dyn Db,
@@ -1728,6 +1786,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     ) -> ConstraintSet<'db, 'c> {
         let collect_context = self.is_context_collection_enabled();
         self.relation_visitor
+            .cycles
             .try_visit_with_expansion(
                 db,
                 (source, target, self.relation, self.typevar_evaluation),
@@ -1739,7 +1798,24 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 |result| {
                     !collect_context || !result.is_never_satisfied(db, self.env, self.inferable)
                 },
-                work,
+                |expansion| {
+                    let Some(key) = self.signature_comparison_key(db, source, target) else {
+                        return work(expansion);
+                    };
+                    let cached = self.relation_visitor.signatures.borrow().get(&key).copied();
+                    if let Some(result) = cached
+                        && (!collect_context
+                            || !result.is_never_satisfied(db, self.env, self.inferable))
+                    {
+                        return result;
+                    }
+                    let result = work(expansion);
+                    self.relation_visitor
+                        .signatures
+                        .borrow_mut()
+                        .insert(key, result);
+                    result
+                },
             )
             .unwrap_or_else(|(item, previous)| {
                 self.recursive_type_pair_fallback(db, item.0, item.1, previous.0, previous.1)

@@ -1398,6 +1398,11 @@ impl<'db> ScopeInference<'db> {
         self.extra.as_ref().and_then(|extra| extra.cycle_recovery)
     }
 
+    /// Whether this result still depends on provisional types from cycle recovery.
+    pub(super) fn is_provisional(&self) -> bool {
+        self.fallback_type().is_some()
+    }
+
     /// Returns whether the given expression is a string annotation
     /// (the string in `x: "int | None"`).
     pub(crate) fn is_string_annotation(&self, expression: impl Into<ExpressionNodeKey>) -> bool {
