@@ -342,14 +342,14 @@ struct TypeDetailsWriter<'db> {
 
 impl<'db> TypeDetailsWriter<'db> {
     /// Buffer a display once so label comparisons can reuse its text and navigation ranges.
-    fn render(value: &impl FmtDetailed<'db>) -> TypeDisplayDetails<'db> {
+    fn render(value: &impl FmtDetailed<'db>) -> Self {
         let mut details = Self::new();
         let mut writer = TypeWriter {
             output: TypeOutput::Details(&mut details),
             signatures: Rc::default(),
         };
         value.fmt_detailed(&mut writer).unwrap();
-        details.finish_type_details()
+        details
     }
 
     fn new() -> Self {
@@ -891,7 +891,7 @@ impl<'db> DisplayType<'_, 'db> {
     }
 
     pub fn to_string_parts(&self) -> TypeDisplayDetails<'db> {
-        TypeDetailsWriter::render(self)
+        TypeDetailsWriter::render(self).finish_type_details()
     }
 }
 
@@ -2722,13 +2722,7 @@ impl DisplaySignature<'_, '_> {
 
     /// Get detailed display information including component ranges
     pub(crate) fn to_string_parts(&self) -> SignatureDisplayDetails {
-        let mut details = TypeDetailsWriter::new();
-        let mut f = TypeWriter {
-            output: TypeOutput::Details(&mut details),
-            signatures: Rc::default(),
-        };
-        self.fmt_detailed(&mut f).unwrap();
-        details.finish_signature_details()
+        TypeDetailsWriter::render(self).finish_signature_details()
     }
 
     fn should_hide_self_from_display(&self) -> bool {
