@@ -547,7 +547,7 @@ trait DisplayNode<'db> {
     fn fmt_body(&self, f: &mut TypeWriter<'db>) -> fmt::Result;
 }
 
-trait FmtDetailed<'db> {
+trait FmtDetailed<'db>: DisplayNode<'db> {
     fn fmt_detailed(&self, f: &mut TypeWriter<'db>) -> fmt::Result;
 }
 
