@@ -483,7 +483,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         Self {
             operation,
             env: visitor.env,
-            recursion_context: visitor.recursion_context,
+            recursion_context: Some(visitor.recursion_context()),
             mapping: TraversalMapping::Borrowed(visitor),
             active: CycleDetector::new(()),
             mode: PhantomData,
@@ -643,7 +643,7 @@ where
 {
     traversal: TypeTraversal<'env, 'db, Q>,
     cache: RefCell<TypeQueryCache<'db, Input, Q::Output>>,
-    recursion_revision: Cell<Option<[u64; 3]>>,
+    recursion_revision: Cell<Option<[u64; 8]>>,
     dependencies: RefCell<Vec<Type<'db>>>,
     depth: Cell<usize>,
 }
@@ -768,10 +768,7 @@ where
     }
 
     fn validate_recursion_context(&self) {
-        let revision = self
-            .traversal
-            .recursion_context
-            .map(TypeRecursionContext::revision);
+        let revision = Some(self.mapping_visitor().recursion_context().revision());
         if self.recursion_revision.replace(revision) != revision {
             // Shared guards can change in a nested projection or specialization without entering
             // this query's local traversal. Discard answers computed under the previous context.

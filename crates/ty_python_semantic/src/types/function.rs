@@ -1171,7 +1171,7 @@ pub(super) fn walk_function_type<'db, V: super::visitor::TypeVisitor<'db> + ?Siz
     }
     if let Some(callables) = function.updated_implementation_callables(db) {
         for callable in callables {
-            visitor.visit_callable_type(db, *callable);
+            visitor.visit_type(db, Type::Callable(*callable));
         }
     }
 }

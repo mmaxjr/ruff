@@ -4,12 +4,18 @@ use ruff_python_ast::name::Name;
 use crate::{
     Db, Program, ProgramEnvironment,
     types::{
-        ApplyTypeMappingVisitor, CallableType, CallableTypes, InternedType, KnownClass,
-        LiteralValueType, LiteralValueTypeKind, Parameter, Parameters, PropertyInstanceType,
-        Signature, StringLiteralType, Type, TypeContext, TypeFormType, TypeMapping, UnionType,
-        callable::CallableTypeKind, constraints::ConstraintSet, function::FunctionType,
-        known_instance::InternedConstraintSet, relation::TypeRelationChecker,
-        signatures::CallableSignature, visitor,
+        ApplyTypeMappingVisitor, BoundTypeVarIdentity, CallableType, CallableTypes, InternedType,
+        KnownClass, LiteralValueType, LiteralValueTypeKind, Parameter, Parameters,
+        PropertyInstanceType, Signature, StringLiteralType, Type, TypeContext, TypeFormType,
+        TypeMapping, UnionType,
+        callable::CallableTypeKind,
+        constraints::ConstraintSet,
+        function::FunctionType,
+        known_instance::InternedConstraintSet,
+        relation::TypeRelationChecker,
+        signatures::CallableSignature,
+        variance::{VarianceInferable, VarianceOrigin, VarianceTerm},
+        visitor,
     },
 };
 
@@ -120,6 +126,39 @@ pub(super) fn walk_bound_method_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>
 
 #[salsa::tracked]
 impl<'db> BoundMethodType<'db> {
+    /// Refer to the bound signature's equation without expanding recursive return types.
+    pub(super) fn variance_of(
+        self,
+        db: &'db dyn Db,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        VarianceTerm::variable(db, VarianceOrigin::BoundMethod(self), typevar)
+    }
+
+    /// Preserve receiver substitution and overload selection while building a variance equation.
+    pub(in crate::types) fn variance_equation(
+        self,
+        db: &'db dyn Db,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        let env = ProgramEnvironment::from_program(self.program(db));
+        if matches!(self.func(db), Type::FunctionLiteral(_) | Type::Callable(_))
+            && let Some(signatures) = self.bound_signatures(db)
+        {
+            signatures.variance_of(db, &env, typevar)
+        } else {
+            // Callable instances also expose their attributes through `__func__` and retain the
+            // additional receiver bound by classmethod through `__self__`.
+            VarianceTerm::join(
+                db,
+                [
+                    self.func(db).variance_of(db, &env, typevar),
+                    self.self_instance(db).variance_of(db, &env, typevar),
+                ],
+            )
+        }
+    }
+
     pub(crate) fn from_callable(
         db: &'db dyn Db,
         func: Type<'db>,
@@ -414,14 +453,10 @@ pub(super) fn walk_method_wrapper_type<'db, V: visitor::TypeVisitor<'db> + ?Size
         KnownBoundMethodType::MethodTypeDunderGet(method) => {
             visitor.visit_type(db, Type::BoundMethod(method));
         }
-        KnownBoundMethodType::PropertyDunderGet(property) => {
-            visitor.visit_property_instance_type(db, property);
-        }
-        KnownBoundMethodType::PropertyDunderSet(property) => {
-            visitor.visit_property_instance_type(db, property);
-        }
-        KnownBoundMethodType::PropertyDunderDelete(property) => {
-            visitor.visit_property_instance_type(db, property);
+        KnownBoundMethodType::PropertyDunderGet(property)
+        | KnownBoundMethodType::PropertyDunderSet(property)
+        | KnownBoundMethodType::PropertyDunderDelete(property) => {
+            visitor.visit_type(db, Type::PropertyInstance(property));
         }
         KnownBoundMethodType::StrStartswith(string_literal) => {
             visitor.visit_type(

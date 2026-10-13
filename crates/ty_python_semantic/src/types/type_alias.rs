@@ -561,7 +561,7 @@ impl<'db> TypeAliasType<'db> {
         db: &'db dyn Db,
         context: Option<&TypeRecursionContext<'db>>,
     ) -> Type<'db> {
-        let Some(context) = context.filter(|context| context.meta_type.is_active()) else {
+        let Some(context) = context.filter(|context| context.meta_type().is_active()) else {
             return self.value_type(db);
         };
 
@@ -711,7 +711,7 @@ impl<'db> TypeAliasType<'db> {
             }
             TypeMapping::Materialize(_) if self.materialization_kind(db).is_some() => ty,
             TypeMapping::EagerExpansion if self.materialization_kind(db).is_some() => self
-                .value_type_with_recursion(db, visitor.recursion_context)
+                .value_type_with_recursion(db, Some(visitor.recursion_context()))
                 .expand_eagerly(db, visitor.env),
             // For EagerExpansion, expand the raw value type. This path relies on Salsa's cycle
             // detection rather than the visitor's cycle detection, because the visitor tracks
@@ -747,7 +747,7 @@ impl<'db> TypeAliasType<'db> {
                 // this same TypeAlias again (e.g., in `type RecursiveT = int | tuple[RecursiveT, ...]`), the visitor
                 // will detect the cycle and return the fallback value.
                 let mapped = visitor.visit(db, ty, type_mapping, || {
-                    self.value_type_with_recursion(db, visitor.recursion_context)
+                    self.value_type_with_recursion(db, Some(visitor.recursion_context()))
                         .apply_type_mapping_impl(db, type_mapping, tcx, visitor)
                 });
 
@@ -755,7 +755,8 @@ impl<'db> TypeAliasType<'db> {
                 // alias node instead of eagerly expanding it. A recursive backedge also returns
                 // the alias itself, and fully static aliases must retain their original identity.
                 if mapped == ty
-                    || self.value_type_with_recursion(db, visitor.recursion_context) == mapped
+                    || self.value_type_with_recursion(db, Some(visitor.recursion_context()))
+                        == mapped
                 {
                     ty
                 } else if let TypeMapping::Materialize(materialization_kind) = type_mapping

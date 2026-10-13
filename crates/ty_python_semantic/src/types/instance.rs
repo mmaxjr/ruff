@@ -35,8 +35,8 @@ use crate::types::visitor::{
 };
 use crate::types::{
     ApplyTypeMappingVisitor, CallableType, ClassBase, ClassLiteral, ErrorContext,
-    FindLegacyTypeVarsVisitor, LiteralValueTypeKind, TypeContext, TypeMapping, VarianceInferable,
-    VarianceTerm,
+    FindLegacyTypeVarsVisitor, LiteralValueTypeKind, TypeContext, TypeMapping,
+    TypeRecursionContext, VarianceInferable, VarianceTerm,
 };
 use crate::{Db, FxOrderSet};
 pub(super) use synthesized_protocol::SynthesizedProtocolType;
@@ -256,13 +256,31 @@ impl<'db> NominalInstanceType<'db> {
         }
     }
 
-    /// Returns the class literal for this instance.
+    /// Retain active comparisons when constructing a tuple's nominal specialization.
+    pub(super) fn class_with_recursion(
+        &self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        context: &TypeRecursionContext<'db>,
+    ) -> ClassType<'db> {
+        match self.0 {
+            NominalInstanceInner::ExactTuple(tuple) => {
+                tuple.to_class_type_with_recursion(db, context)
+            }
+            _ => self.class(db, env),
+        }
+    }
+
+    /// Returns the class literal without evaluating this instance's type arguments.
     pub(super) fn class_literal(
         &self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
     ) -> ClassLiteral<'db> {
-        self.class(db, env).class_literal(db)
+        match self.0 {
+            NominalInstanceInner::ExactTuple(tuple) => tuple.class_literal(db).into(),
+            _ => self.class(db, env).class_literal(db),
+        }
     }
 
     /// Returns the [`KnownClass`] that this is a nominal instance of, or `None` if it is not an
@@ -966,8 +984,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             let can_use_nominal_redundancy = can_use_nominal_result_directly
                 && matches!(self.relation, TypeRelation::Redundancy { pure: false })
                 && source_protocol_as_nominal.is_some_and(|source_instance| {
-                    source_instance.class(db, env).class_literal(db)
-                        == nominal_instance.class(db, env).class_literal(db)
+                    source_instance.class_literal(db, env)
+                        == nominal_instance.class_literal(db, env)
                 });
 
             // Even when the nominal result cannot be accepted on its own, it can help prove
@@ -1091,7 +1109,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
 
         let env = self.env;
         let source = ty.as_nominal_instance()?;
-        let source_class = source.class(db, env);
+        let source_class = self.project_nominal_class(db, source);
         let source_alias = source_class.into_generic_alias()?;
 
         let source_arguments = source_alias.specialization(db).types(db);
@@ -1213,8 +1231,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         let source_instance = source_protocol_as_nominal?;
         let env = self.env;
         let (ClassType::Generic(source_alias), ClassType::Generic(target_alias)) = (
-            source_instance.class(db, env),
-            nominal_instance.class(db, env),
+            self.project_nominal_class(db, source_instance),
+            self.project_nominal_class(db, nominal_instance),
         ) else {
             return None;
         };
@@ -1389,7 +1407,21 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             ) => self.check_tuple_type_pair(db, source_tuple, target_tuple),
             _ => {
                 let env = self.env;
-                self.check_class_pair(db, source.class(db, env), target.class(db, env))
+                self.check_class_pair_with_specializations(
+                    db,
+                    source.class_literal(db, env),
+                    target.class_literal(db, env),
+                    || {
+                        (
+                            self.project_nominal_class(db, source)
+                                .class_literal_and_specialization(db)
+                                .1,
+                            self.project_nominal_class(db, target)
+                                .class_literal_and_specialization(db)
+                                .1,
+                        )
+                    },
+                )
             }
         }
     }
@@ -1558,12 +1590,12 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
         result.or(db, self.constraints, || {
             ConstraintSet::from_bool(
                 self.constraints,
-                !left
-                    .class(db, env)
+                !self
+                    .project_nominal_class(db, left)
                     .could_coexist_in_mro_with_disjointness_checker(
                         db,
                         env,
-                        right.class(db, env),
+                        self.project_nominal_class(db, right),
                         self,
                     ),
             )

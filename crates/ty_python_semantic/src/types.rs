@@ -6,7 +6,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
-use std::iter;
 use std::ops::ControlFlow;
 use std::rc::Rc;
 use std::time::Duration;
@@ -29,7 +28,7 @@ use ty_module_resolver::{
 pub(crate) use self::callable::UpcastPolicy;
 use self::class::ClassInstanceFlags;
 pub(crate) use self::cyclic::TypeTransformer;
-use self::cyclic::{ActiveRecursionDetector, HasIdentity, TypeIdentity};
+use self::cyclic::{ActiveRecursionDetector, TypeIdentity};
 pub use self::cyclic::{CycleDetector, CycleKind};
 pub use self::dedicated::pytest::{
     FixtureBinding, FixtureExposure, FixtureNameSource, PytestTest, fixture_bindings_for_parameter,
@@ -41,7 +40,7 @@ pub use self::diagnostic::{UNDEFINED_REVEAL, UNRESOLVED_REFERENCE};
 pub(crate) use self::infer::{
     InferredDeclaration, TruthinessAnalyzer, TypeContext, infer_complete_scope_types,
     infer_deferred_types, infer_definition_types, infer_expression_type, infer_expression_types,
-    infer_same_file_expression_type, infer_scope_types, is_discarded_dict_key_assignment,
+    infer_same_file_expression_type, is_discarded_dict_key_assignment,
 };
 use self::infer::{
     implicit_alias_parameters, infer_function_default_types, infer_implicit_alias_type,
@@ -56,6 +55,7 @@ pub(crate) use self::match_pattern::{
 };
 pub(crate) use self::relation_error::{ErrorContext, ErrorContextTree, ParameterDescription};
 use self::set_theoretic::NegativeIntersectionElements;
+use self::set_theoretic::builder::IntersectionPolarity;
 pub(crate) use self::set_theoretic::builder::{
     IntersectionBuilder, UnionAccumulator, UnionBuilder,
 };
@@ -209,13 +209,12 @@ pub fn check_types(db: &dyn Db, file: ProgramFile<'_>) -> Vec<Diagnostic> {
     let mut implicit_aliases = Vec::new();
 
     for scope_id in index.scope_ids() {
-        // Scopes that may require type context are inferred during the inference of
-        // their outer scope.
+        // Scopes with a type context are inferred and checked with their enclosing expression.
         if scope_id.accepts_type_context(db) {
             continue;
         }
 
-        let result = infer_scope_types(db, scope_id, TypeContext::default());
+        let result = infer_complete_scope_types(db, scope_id);
 
         if let Some(scope_diagnostics) = result.diagnostics() {
             diagnostics.extend(scope_diagnostics);
@@ -479,34 +478,100 @@ fn definition_expression_annotation<'db>(
 /// Active recursion state shared across nested type operations.
 ///
 /// A transformation cache belongs to one mapping, but recursion can span specialization,
-/// materialization, and meta-type projection. Preserve this context when starting a new mapping
-/// visitor. Each operation keeps its own guards because its recursion keys and cycle fallbacks
-/// differ.
-#[derive(Default)]
-struct TypeRecursionContext<'db> {
-    meta_type: MetaTypeRecursion<'db>,
+/// materialization, union and intersection simplification, and meta-type projection. Clones share
+/// the active guards; transformation caches remain local to each mapping. Each operation keeps
+/// its own guards because its recursion keys and cycle fallbacks differ.
+#[derive(Clone, Default)]
+struct TypeRecursionContext<'db>(Rc<TypeRecursionState<'db>>);
+
+impl<'db> TypeRecursionContext<'db> {
+    fn meta_type(&self) -> &MetaTypeRecursion<'db> {
+        &self.0.meta_type
+    }
+
+    /// Compare two types for simplification. Nested builders retain their members until this
+    /// comparison finishes, so signature substitution cannot restart it with new type arguments.
+    fn compare_for_simplification(&self, compare: impl FnOnce() -> bool) -> bool {
+        self.0.normalization.visit(&(), || false, compare)
+    }
+
+    /// Return `None` if obtaining a signature would reopen an active type expansion.
+    fn expand_signature<T>(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        expand: impl FnOnce() -> T,
+    ) -> Option<T> {
+        self.0
+            .signatures
+            .get_or_init(|| Box::new(CycleDetector::new(())))
+            .try_visit_active(db, Type::Callable(callable), expand)
+    }
+
+    /// Set simplification can recurse through a signature's specialization before its caller
+    /// receives the signature. Keep these comparisons in the same active recursion context.
+    fn check_redundancy(
+        &self,
+        db: &'db dyn Db,
+        program: Program<'db>,
+        source: Type<'db>,
+        target: Type<'db>,
+        check: impl FnOnce() -> bool,
+    ) -> bool {
+        if !self.0.normalization.is_empty() {
+            return false;
+        }
+        self.0
+            .redundancy
+            .get_or_init(|| Box::new(CycleDetector::new(true)))
+            .try_visit(db, (source, program, target), |_| true, check)
+            .unwrap_or(false)
+    }
 }
 
 impl TypeRecursionContext<'_> {
-    /// Identify the shared guard state under which a query result can be reused.
-    fn revision(&self) -> [u64; 3] {
-        // Keep the pattern exhaustive: adding a guard also changes the context of cached queries.
-        let Self {
-            meta_type:
-                MetaTypeRecursion {
-                    aliases,
-                    growing_aliases,
-                    typevars,
-                },
-        } = self;
+    /// Identify every shared guard that can affect a cached query.
+    fn revision(&self) -> [u64; 8] {
+        let TypeRecursionState {
+            meta_type: MetaTypeRecursion { aliases, growing_aliases, typevars },
+            normalization, redundancy, signatures, intersections, materialization_equivalence,
+        } = &*self.0;
         [
-            aliases.revision(),
-            growing_aliases.revision(),
-            typevars.revision(),
+            aliases.revision(), growing_aliases.revision(), typevars.revision(),
+            normalization.revision(),
+            redundancy.get().map_or(0, |guard| guard.revision()),
+            signatures.get().map_or(0, |guard| guard.revision()),
+            intersections.get().map_or(0, |guard| guard.revision()),
+            materialization_equivalence.get().map_or(0, |guard| guard.revision()),
         ]
     }
 }
 
+#[derive(Default)]
+struct TypeRecursionState<'db> {
+    meta_type: MetaTypeRecursion<'db>,
+    normalization: ActiveRecursionDetector<()>,
+    redundancy: OnceCell<Box<RedundancyRecursion<'db>>>,
+    signatures: OnceCell<Box<SignatureExpansionRecursion<'db>>>,
+    intersections: OnceCell<Box<IntersectionSimplificationRecursion<'db>>>,
+    materialization_equivalence: OnceCell<Box<MaterializationEquivalenceVisitor<'db>>>,
+}
+
+struct SignatureExpansionTag;
+type SignatureExpansionRecursion<'db> = CycleDetector<'db, SignatureExpansionTag, Type<'db>, (), 2>;
+
+struct RedundancyRecursionTag;
+type RedundancyRecursion<'db> =
+    CycleDetector<'db, RedundancyRecursionTag, (Type<'db>, Program<'db>, Type<'db>), bool, 2>;
+
+struct IntersectionSimplificationTag;
+type IntersectionSimplificationRecursion<'db> = CycleDetector<
+    'db,
+    IntersectionSimplificationTag,
+    (Type<'db>, (Program<'db>, IntersectionPolarity), Type<'db>),
+    (),
+    2,
+>;
 /// Guards shared by meta-type projections and the specializations they trigger.
 ///
 /// Each projection also tracks direct alias recursion locally: those cycles add no new classes,
@@ -528,7 +593,7 @@ struct ApplyTypeMappingTag;
 struct ApplyMaterializationEquivalence;
 
 type MaterializationEquivalenceVisitor<'db> =
-    Rc<CycleDetector<'db, ApplyMaterializationEquivalence, (Type<'db>, Type<'db>), bool, 1>>;
+    CycleDetector<'db, ApplyMaterializationEquivalence, (Type<'db>, Type<'db>), bool, 1>;
 
 /// Recursion guards and caches shared by nested type transformations and recursive unfolding.
 ///
@@ -537,7 +602,7 @@ type MaterializationEquivalenceVisitor<'db> =
 /// reuse the result of another.
 pub(crate) struct ApplyTypeMappingVisitor<'env, 'db> {
     env: &'env ProgramEnvironment<'db>,
-    recursion_context: Option<&'env TypeRecursionContext<'db>>,
+    recursion_context: OnceCell<TypeRecursionContext<'db>>,
     /// Whether transformed unions can compare their alternatives for redundancy.
     normalize_unions: bool,
     /// Whether materialization also transforms type-variable bounds and defaults.
@@ -549,7 +614,6 @@ pub(crate) struct ApplyTypeMappingVisitor<'env, 'db> {
     bottom_specialization_materialization: OnceCell<Box<TypeTransformer<'db, ApplyTypeMappingTag>>>,
     promotion: OnceCell<Box<TypeTransformer<'db, ApplyTypeMappingTag>>>,
     skip_promotion: OnceCell<Box<TypeTransformer<'db, ApplyTypeMappingTag>>>,
-    materialization_equivalence: OnceCell<MaterializationEquivalenceVisitor<'db>>,
     /// Expanding an alias can materialize a recursive body, so its result belongs to this root.
     expanded_unions: RefCell<FxHashMap<UnionType<'db>, Type<'db>>>,
 }
@@ -560,7 +624,7 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
     fn new(env: &'env ProgramEnvironment<'db>) -> Self {
         Self {
             env,
-            recursion_context: None,
+            recursion_context: OnceCell::new(),
             normalize_unions: true,
             materialize_typevar_bounds_and_defaults: true,
             default: OnceCell::default(),
@@ -570,7 +634,6 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
             bottom_specialization_materialization: OnceCell::default(),
             promotion: OnceCell::default(),
             skip_promotion: OnceCell::default(),
-            materialization_equivalence: OnceCell::default(),
             expanded_unions: RefCell::default(),
         }
     }
@@ -583,21 +646,28 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
         }
     }
 
-    fn with_recursion_context(mut self, context: Option<&'env TypeRecursionContext<'db>>) -> Self {
-        self.recursion_context = context;
+    fn with_recursion_context(mut self, context: Option<&TypeRecursionContext<'db>>) -> Self {
+        self.recursion_context =
+            context.map_or_else(OnceCell::new, |context| OnceCell::from(context.clone()));
         self
     }
 
+    /// Every root operation owns a context. Nested transformations inherit it, including those
+    /// started by a relation check before any lambda signature has been expanded.
+    fn recursion_context(&self) -> &TypeRecursionContext<'db> {
+        self.recursion_context
+            .get_or_init(TypeRecursionContext::default)
+    }
+
     fn project_meta_type(&self, db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
-        match self.recursion_context {
-            Some(context) => ty.to_meta_type_with_recursion(db, self.env, context),
-            None => ty.to_meta_type(db, self.env),
-        }
+        ty.to_meta_type_with_recursion(db, self.env, self.recursion_context())
     }
 
     fn materialization_equivalence(&self) -> &MaterializationEquivalenceVisitor<'db> {
-        self.materialization_equivalence
-            .get_or_init(|| Rc::new(CycleDetector::new(true)))
+        self.recursion_context()
+            .0
+            .materialization_equivalence
+            .get_or_init(|| Box::new(CycleDetector::new(true)))
     }
 
     fn visit(
@@ -607,6 +677,23 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         func: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
+        self.transformer(type_mapping).visit_type(db, ty, func)
+    }
+
+    /// Transform a stored type without expanding its definition to identify recursive visits.
+    fn visit_stored(
+        &self,
+        ty: Type<'db>,
+        type_mapping: &TypeMapping<'_, 'db>,
+        func: impl FnOnce() -> Type<'db>,
+    ) -> Type<'db> {
+        self.transformer(type_mapping).visit_stored_type(ty, func)
+    }
+
+    fn transformer(
+        &self,
+        type_mapping: &TypeMapping<'_, 'db>,
+    ) -> &TypeTransformer<'db, ApplyTypeMappingTag> {
         let type_transformer = match type_mapping {
             TypeMapping::Materialize(MaterializationKind::Top) => &self.top_materialization,
             TypeMapping::Materialize(MaterializationKind::Bottom) => &self.bottom_materialization,
@@ -622,9 +709,7 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
             TypeMapping::Promote(PromotionMode::Off, _) => &self.skip_promotion,
             _ => &self.default,
         };
-        type_transformer
-            .get_or_init(Box::default)
-            .visit_type(db, ty, func)
+        type_transformer.get_or_init(Box::default)
     }
 
     fn is_equivalent_to_materialization(
@@ -640,14 +725,8 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
     }
 
     fn for_new_materialization_root(&self) -> Self {
-        let materialization_equivalence = OnceCell::new();
-        let was_empty =
-            materialization_equivalence.set(Rc::clone(self.materialization_equivalence()));
-        debug_assert!(was_empty.is_ok());
-
         Self {
-            materialization_equivalence,
-            recursion_context: self.recursion_context,
+            recursion_context: OnceCell::from(self.recursion_context().clone()),
             materialize_typevar_bounds_and_defaults: self.materialize_typevar_bounds_and_defaults,
             ..Self::new(self.env)
         }
@@ -660,26 +739,6 @@ pub(crate) type FindLegacyTypeVarsVisitor<'env, 'db> =
 
 #[derive(Debug)]
 pub(crate) struct FindLegacyTypeVars;
-
-/// A [`CycleDetector`] that is used in `visit_specialization` methods.
-type SpecializationVisitor<'env, 'db> =
-    TypeVisitorState<'env, 'db, VisitSpecialization, (Type<'db>, TypeVarVariance), (), 3>;
-struct VisitSpecialization;
-
-impl<'db> HasIdentity<'db> for (Type<'db>, TypeVarVariance) {
-    type Id = (TypeIdentity<'db>, TypeVarVariance);
-
-    fn may_share_identity(&self, db: &'db dyn Db, other: &Self) -> bool {
-        let (self_ty, self_variance) = self;
-        let (other_ty, other_variance) = other;
-        self_variance == other_variance && self_ty.may_share_type_identity(db, *other_ty)
-    }
-
-    fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
-        let (ty, variance) = self;
-        (ty.to_type_identity(db), *variance)
-    }
-}
 
 /// The standard-library `typing` module or its `typing_extensions` backport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, get_size2::GetSize)]
@@ -3388,6 +3447,16 @@ impl<'db> Type<'db> {
 
     #[must_use]
     fn negate(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+        self.negate_with_recursion(db, env, None)
+    }
+
+    /// Negate a type without restarting normalization inside an active transformation.
+    fn negate_with_recursion(
+        &self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        context: Option<&TypeRecursionContext<'db>>,
+    ) -> Type<'db> {
         // Avoid invoking the `IntersectionBuilder` for negations that are trivial.
         //
         // We verify that this always produces the same result as
@@ -3444,6 +3513,7 @@ impl<'db> Type<'db> {
             | Type::Intersection(_)
             | Type::EnumComplement(_)
             | Type::Recursive(_) => IntersectionBuilder::new(db, env)
+                .with_recursion_context(context)
                 .add_negative(*self)
                 .build(),
         }
@@ -3995,93 +4065,6 @@ impl<'db> Type<'db> {
             | Type::SpecialForm(_)
             | Type::LiteralValue(_) => Some(self),
         }
-    }
-
-    /// Recursively visit a type and its specializations.
-    ///
-    /// The provided closure will be called on the type itself and its nested types, along with
-    /// their variance with respect to the outermost type. Repeated types with the same variance
-    /// may be skipped.
-    fn visit_specialization<F>(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>, mut f: F)
-    where
-        F: FnMut(Type<'db>, TypeVarVariance),
-    {
-        self.visit_specialization_impl(
-            db,
-            env,
-            TypeVarVariance::Covariant,
-            &mut f,
-            &SpecializationVisitor::new(env, ()),
-        );
-    }
-
-    fn visit_specialization_impl(
-        self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        polarity: TypeVarVariance,
-        f: &mut dyn FnMut(Type<'db>, TypeVarVariance),
-        visitor: &SpecializationVisitor<'_, 'db>,
-    ) {
-        f(self, polarity);
-
-        visitor.visit_structure(db, (self, polarity), |expansion| {
-            let Some((_, specialization)) = self.class_specialization(db, env) else {
-                match self {
-                    Type::Union(union) => {
-                        for element in union.elements(db) {
-                            element.visit_specialization_impl(db, env, polarity, f, visitor);
-                        }
-                    }
-                    Type::Intersection(intersection) => {
-                        for element in intersection.positive(db) {
-                            element.visit_specialization_impl(db, env, polarity, f, visitor);
-                        }
-                        for element in intersection.negative(db) {
-                            element.visit_specialization_impl(db, env, polarity.flip(), f, visitor);
-                        }
-                    }
-                    Type::TypeAlias(alias) => alias
-                        .value_type(db)
-                        .visit_specialization_impl(db, env, polarity, f, visitor),
-                    Type::Recursive(recursive) => {
-                        if let UnfoldResult::Unfolded(unfolded) =
-                            expansion.recursive_body(db, recursive)
-                        {
-                            unfolded.visit_specialization_impl(db, env, polarity, f, visitor);
-                        }
-                    }
-                    Type::Callable(callable) => {
-                        for signature in callable.signatures(db) {
-                            for parameter in signature.parameters() {
-                                parameter.annotated_type().visit_specialization_impl(
-                                    db,
-                                    env,
-                                    polarity.flip(),
-                                    f,
-                                    visitor,
-                                );
-                            }
-
-                            signature
-                                .return_ty
-                                .visit_specialization_impl(db, env, polarity, f, visitor);
-                        }
-                    }
-                    _ => {}
-                }
-
-                return;
-            };
-
-            for (typevar, ty) in iter::zip(
-                specialization.generic_context(db).variables(db),
-                specialization.types(db),
-            ) {
-                let variance = typevar.variance_with_polarity(db, polarity);
-                ty.visit_specialization_impl(db, env, variance, f, visitor);
-            }
-        });
     }
 
     /// Return true if there is just a single inhabitant for this type.
@@ -9020,6 +9003,20 @@ impl<'db> Type<'db> {
         | TypeMapping::ApplySpecializationWithMaterialization { specialization, .. } =
             type_mapping
         {
+            // A lambda's parameters are available without evaluating its return query.
+            // Inspecting that query here would expand recursive signatures before the
+            // specialization can create a stable reference to the transformed lambda.
+            let callable_parameters = match self {
+                Type::Callable(callable) => callable.single_parameters(db),
+                Type::BoundMethod(method)
+                | Type::KnownBoundMethod(KnownBoundMethodType::MethodTypeDunderGet(method)) => {
+                    method
+                        .func(db)
+                        .as_callable()
+                        .and_then(|callable| callable.single_parameters(db))
+                }
+                _ => None,
+            };
             let function_signatures = |function: FunctionType<'db>| {
                 if specialization.preserves_lazy_signatures() {
                     function.updated_signature(db)
@@ -9029,6 +9026,7 @@ impl<'db> Type<'db> {
             };
 
             let signatures = match self {
+                _ if callable_parameters.is_some() => None,
                 Type::FunctionLiteral(function) => function_signatures(function),
                 Type::BoundMethod(method)
                 | Type::KnownBoundMethod(KnownBoundMethodType::MethodTypeDunderGet(method)) => {
@@ -9045,11 +9043,15 @@ impl<'db> Type<'db> {
             };
 
             let mut seen = FxHashSet::default();
-            let union_paramspecs = signatures
+            let union_paramspecs = callable_parameters
                 .into_iter()
-                .flat_map(|signatures| signatures.iter())
-                .filter_map(|signature| {
-                    let (_, typevar) = signature.parameters().as_paramspec_with_prefix()?;
+                .chain(
+                    signatures
+                        .into_iter()
+                        .flat_map(|signatures| signatures.iter().map(Signature::parameters)),
+                )
+                .filter_map(|parameters| {
+                    let (_, typevar) = parameters.as_paramspec_with_prefix()?;
                     let Type::Union(union) = specialization.get(db, typevar)? else {
                         return None;
                     };
@@ -9243,7 +9245,7 @@ impl<'db> Type<'db> {
                 ))
             }
 
-            Type::Callable(callable) => visitor.visit(db, self, type_mapping, || {
+            Type::Callable(callable) => visitor.visit_stored(self, type_mapping, || {
                 Type::Callable(callable.apply_type_mapping_impl(db, type_mapping, tcx, visitor))
             }),
 
@@ -9278,11 +9280,11 @@ impl<'db> Type<'db> {
                 complement.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
             }
 
-            Type::TypeIs(type_is) => visitor.visit(db, self, type_mapping, || {
+            Type::TypeIs(type_is) => visitor.visit_stored(self, type_mapping, || {
                 type_is.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
             }),
 
-            Type::TypeGuard(type_guard) => visitor.visit(db, self, type_mapping, || {
+            Type::TypeGuard(type_guard) => visitor.visit_stored(self, type_mapping, || {
                 type_guard.with_type(
                     db,
                     type_guard.return_type(db).apply_type_mapping_impl(
@@ -9294,7 +9296,7 @@ impl<'db> Type<'db> {
                 )
             }),
 
-            Type::TypeForm(typeform) => visitor.visit(db, self, type_mapping, || {
+            Type::TypeForm(typeform) => visitor.visit_stored(self, type_mapping, || {
                 TypeFormType::from_type_expression(
                     db,
                     typeform.type_argument(db).apply_type_mapping_impl(
@@ -10174,6 +10176,7 @@ impl<'db> Type<'db> {
         env: &ProgramEnvironment<'db>,
         target: Type<'db>,
         negated_cache: &mut Option<Type<'db>>,
+        context: Option<&TypeRecursionContext<'db>>,
     ) -> bool {
         if negated_cache.is_none()
             && let (Type::NominalInstance(source), Type::NominalInstance(target)) = (self, target)
@@ -10185,11 +10188,12 @@ impl<'db> Type<'db> {
 
         match self {
             Type::Intersection(intersection) => {
-                intersection.negation_is_subtype_of(db, env, target)
+                intersection.negation_is_subtype_of(db, env, target, context)
             }
             _ => {
-                let negated = negated_cache.get_or_insert_with(|| self.negate(db, env));
-                negated.is_subtype_of(db, env, target)
+                let negated = negated_cache
+                    .get_or_insert_with(|| self.negate_with_recursion(db, env, context));
+                negated.is_subtype_of_with_recursion(db, env, target, context)
             }
         }
     }
@@ -10692,7 +10696,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
         // Direct recursive references add no new classes; the traversal handles those cycles.
         // Re-entering through another projection can introduce metaclasses, so retain the guards
         // shared with specialization and materialization as well.
-        context.meta_type.aliases.visit(
+        context.meta_type().aliases.visit(
             &(env.program(db), alias),
             || KnownClass::Type.to_instance(db, env),
             || {
@@ -10700,7 +10704,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
                 if let TypeIdentity::GrowingTypeAlias(definition) =
                     Type::TypeAlias(alias).to_type_identity(db)
                 {
-                    context.meta_type.growing_aliases.visit(
+                    context.meta_type().growing_aliases.visit(
                         &(env.program(db), definition),
                         || KnownClass::Type.to_instance(db, env),
                         project,
@@ -10772,7 +10776,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
             {
                 // Transposition changes a type variable's bounds but preserves its bound
                 // identity. Guard by that identity so newly transposed instances still match.
-                context.meta_type.typevars.visit(
+                context.meta_type().typevars.visit(
                     &(env.program(db), typevar.identity(db)),
                     || KnownClass::Type.to_instance(db, env),
                     || subclass_of_ty.to_meta_type_with_recursion(db, env, context),
@@ -11252,14 +11256,16 @@ impl<'db> IntersectionType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
         target: Type<'db>,
+        context: Option<&TypeRecursionContext<'db>>,
     ) -> bool {
-        self.positive(db)
+        self.positive(db).iter().all(|positive| {
+            positive
+                .negate_with_recursion(db, env, context)
+                .is_subtype_of_with_recursion(db, env, target, context)
+        }) && self
+            .negative(db)
             .iter()
-            .all(|positive| positive.negate(db, env).is_subtype_of(db, env, target))
-            && self
-                .negative(db)
-                .iter()
-                .all(|negative| negative.is_subtype_of(db, env, target))
+            .all(|negative| negative.is_subtype_of_with_recursion(db, env, target, context))
     }
 
     // Calls the dunder on each element separately before combining the results.
@@ -11458,35 +11464,13 @@ impl<'db> VarianceInferable<'db> for Type<'db> {
                 function_type.variance_of(db, typevar)
             }
 
-            Type::BoundMethod(method_type) => {
-                // Function-backed methods contribute their bound signatures. Callable instances
-                // also expose attributes through `__func__`, so preserve their full variance.
-                if matches!(
-                    method_type.func(db),
-                    Type::FunctionLiteral(_) | Type::Callable(_)
-                ) && let Some(signatures) = method_type.bound_signatures(db)
-                {
-                    signatures.variance_of(db, env, typevar)
-                } else {
-                    // A callable object's type does not include the additional receiver bound
-                    // by classmethod, which is also exposed through `__self__`.
-                    VarianceTerm::join(
-                        db,
-                        [
-                            method_type.func(db).variance_of(db, env, typevar),
-                            method_type.self_instance(db).variance_of(db, env, typevar),
-                        ],
-                    )
-                }
-            }
+            Type::BoundMethod(method_type) => method_type.variance_of(db, typevar),
 
             Type::NominalInstance(nominal_instance_type) => {
                 nominal_instance_type.variance_of(db, env, typevar)
             }
             Type::GenericAlias(generic_alias) => generic_alias.variance_of(db, env, typevar),
-            Type::Callable(callable_type) => {
-                callable_type.signatures(db).variance_of(db, env, typevar)
-            }
+            Type::Callable(callable_type) => callable_type.variance_of(db, env, typevar),
             // A type variable is always covariant in itself.
             Type::TypeVar(other_typevar) if other_typevar.identity(db) == typevar => {
                 // type variables are covariant in themselves
@@ -11594,7 +11578,7 @@ impl PromotionMode {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, get_size2::GetSize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, get_size2::GetSize)]
 pub enum PromotionKind {
     /// Default promotion behaviour: recurse into nested types
     Regular,
@@ -11634,7 +11618,7 @@ fn class_mro_literals<'db>(
 ///
 /// Uses MRO-based matching: a `Self` typevar is bound only if its owner class
 /// is in the MRO of the self type's class.
-#[derive(Clone, Debug, Eq, PartialEq, get_size2::GetSize)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub struct SelfBinding<'db> {
     ty: Type<'db>,
     class_literal: Option<ClassLiteral<'db>>,

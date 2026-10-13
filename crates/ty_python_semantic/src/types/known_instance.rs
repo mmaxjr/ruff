@@ -364,7 +364,8 @@ pub(super) fn walk_known_instance_type<'db, V: visitor::TypeVisitor<'db> + ?Size
         }
         KnownInstanceType::FunctoolsPartial(partial)
         | KnownInstanceType::FunctoolsPartialCall(partial) => {
-            visitor.visit_callable_type(db, partial.partial(db));
+            visitor.visit_type(db, partial.wrapped(db).inner(db));
+            visitor.visit_type(db, Type::Callable(partial.partial(db)));
         }
         KnownInstanceType::MethodWrapper(wrapper) => {
             visitor.visit_type(db, wrapper.wrapped(db));

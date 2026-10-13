@@ -16,8 +16,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use salsa::plumbing::AsId;
 
 use crate::types::{
-    BoundTypeVarIdentity, ClassType, FunctionType, GenericAlias, RecursiveType, StaticClassLiteral,
-    TypeAliasType, TypeVarVariance, TypedDictType,
+    BoundMethodType, BoundTypeVarIdentity, ClassType, FunctionType, GenericAlias, RecursiveType,
+    StaticClassLiteral, TypeAliasType, TypeVarVariance, TypedDictType, callable::LambdaSignature,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -157,6 +157,8 @@ pub(crate) enum VarianceOrigin<'db> {
     TypeAlias(TypeAliasType<'db>),
     Recursive(RecursiveType<'db>),
     Function(FunctionType<'db>),
+    BoundMethod(BoundMethodType<'db>),
+    Lambda(LambdaSignature<'db>),
     TypedDict(ClassType<'db>),
 }
 
@@ -208,6 +210,8 @@ impl<'db> VarianceVariable<'db> {
             VarianceOrigin::TypeAlias(alias) => alias.variance_equation(db, typevar),
             VarianceOrigin::Recursive(recursive) => recursive.variance_equation(db, typevar),
             VarianceOrigin::Function(function) => function.variance_equation(db, typevar),
+            VarianceOrigin::BoundMethod(method) => method.variance_equation(db, typevar),
+            VarianceOrigin::Lambda(lambda) => lambda.variance_equation(db, typevar),
             VarianceOrigin::TypedDict(class) => {
                 let env = ProgramEnvironment::from_file(class.class_literal(db).program_file(db));
                 TypedDictType::new(class).variance_of_items(db, &env, typevar)

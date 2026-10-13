@@ -32,7 +32,8 @@ use crate::types::set_theoretic::RecursivelyDefined;
 use crate::types::visitor::any_over_type_expanding_aliases;
 use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarInstance, ErrorContext, FindLegacyTypeVarsVisitor,
-    IntersectionType, Type, TypeContext, TypeMapping, UnionType,
+    IntersectionType, StaticClassLiteral, Type, TypeContext, TypeMapping, TypeRecursionContext,
+    UnionBuilder, UnionType,
 };
 use crate::{Db, FxOrderSet};
 use ty_python_core::Truthiness;
@@ -268,19 +269,42 @@ impl<'db> TupleType<'db> {
     // from `NominalInstanceType::class()`, which is a very hot method.
     #[salsa::tracked(returns(copy), cycle_initial=to_class_type_cycle_initial, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn to_class_type(self, db: &'db dyn Db) -> ClassType<'db> {
-        let env = &ProgramEnvironment::from_program(self.program(db));
-        let tuple_class = KnownClass::Tuple
-            .try_to_class_literal(db, env)
-            .expect("Typeshed should always have a `tuple` class in `builtins.pyi`");
+        self.to_class_type_impl(db, None)
+    }
 
-        tuple_class.apply_specialization(db, |generic_context| {
-            if generic_context.variables(db).len() == 1 {
-                let element_type = self.tuple(db).tuple_class_type(db, env);
-                generic_context.specialize_tuple(db, element_type, self)
-            } else {
-                generic_context.default_specialization(db, Some(KnownClass::Tuple))
-            }
-        })
+    /// Return the tuple class without evaluating or comparing this tuple's element types.
+    pub(super) fn class_literal(self, db: &'db dyn Db) -> StaticClassLiteral<'db> {
+        let env = &ProgramEnvironment::from_program(self.program(db));
+        KnownClass::Tuple
+            .try_to_class_literal(db, env)
+            .expect("Typeshed should always have a `tuple` class in `builtins.pyi`")
+    }
+
+    /// Project a tuple's element types while retaining the enclosing comparison's active guards.
+    /// The result can depend on those guards, so it must not enter the tracked conversion's cache.
+    pub(super) fn to_class_type_with_recursion(
+        self,
+        db: &'db dyn Db,
+        context: &TypeRecursionContext<'db>,
+    ) -> ClassType<'db> {
+        self.to_class_type_impl(db, Some(context))
+    }
+
+    fn to_class_type_impl(
+        self,
+        db: &'db dyn Db,
+        context: Option<&TypeRecursionContext<'db>>,
+    ) -> ClassType<'db> {
+        let env = &ProgramEnvironment::from_program(self.program(db));
+        self.class_literal(db)
+            .apply_specialization(db, |generic_context| {
+                if generic_context.variables(db).len() == 1 {
+                    let element_type = self.tuple(db).tuple_class_type(db, env, context);
+                    generic_context.specialize_tuple(db, element_type, self)
+                } else {
+                    generic_context.default_specialization(db, Some(KnownClass::Tuple))
+                }
+            })
     }
 
     pub(super) fn recursive_type_normalized_impl(
@@ -890,18 +914,15 @@ fn to_class_type_cycle_initial<'db>(
     id: salsa::Id,
     self_: TupleType<'db>,
 ) -> ClassType<'db> {
-    let env = &ProgramEnvironment::from_program(self_.program(db));
-    let tuple_class = KnownClass::Tuple
-        .try_to_class_literal(db, env)
-        .expect("Typeshed should always have a `tuple` class in `builtins.pyi`");
-
-    tuple_class.apply_specialization(db, |generic_context| {
-        if generic_context.variables(db).len() == 1 {
-            generic_context.specialize_tuple(db, Type::divergent(id), self_)
-        } else {
-            generic_context.default_specialization(db, Some(KnownClass::Tuple))
-        }
-    })
+    self_
+        .class_literal(db)
+        .apply_specialization(db, |generic_context| {
+            if generic_context.variables(db).len() == 1 {
+                generic_context.specialize_tuple(db, Type::divergent(id), self_)
+            } else {
+                generic_context.default_specialization(db, Some(KnownClass::Tuple))
+            }
+        })
 }
 
 /// A tuple spec describes the contents of a tuple type, which might be fixed- or variable-length.
@@ -2599,20 +2620,28 @@ impl<'db> Tuple<Type<'db>, VariableSegment<'db>> {
         }
     }
 
-    fn tuple_class_type(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
-        match self {
-            Tuple::Fixed(tuple) => {
-                UnionType::from_elements_leave_aliases(db, env, tuple.iter_all_elements())
-            }
-            Tuple::Variable(tuple) => UnionType::from_elements_leave_aliases(
-                db,
-                env,
+    fn tuple_class_type(
+        &self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        context: Option<&TypeRecursionContext<'db>>,
+    ) -> Type<'db> {
+        let elements = match self {
+            Tuple::Fixed(tuple) => Either::Left(tuple.iter_all_elements()),
+            Tuple::Variable(tuple) => Either::Right(
                 tuple
                     .iter_prefix_elements()
                     .chain(std::iter::once(tuple.variable().tuple_class_type()))
                     .chain(tuple.iter_suffix_elements()),
             ),
+        };
+        let mut builder = UnionBuilder::new(db, env)
+            .unpack_aliases(false)
+            .with_recursion_context(context);
+        for element in elements {
+            builder.add_in_place(element);
         }
+        builder.build()
     }
 
     pub(crate) fn variable_element_type(&self, db: &'db dyn Db) -> Option<Type<'db>> {

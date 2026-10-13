@@ -450,6 +450,8 @@ impl<'db> CallableItem<'db> {
         match self {
             CallableItem::Regular(binding) => CallableType::partially_apply(
                 db,
+                env,
+                binding.signature_type,
                 binding.partial_signature_applications(
                     db,
                     env,
@@ -6360,17 +6362,10 @@ impl<'db> CallInference<'_, 'db> {
                 return None;
             }
 
-            let mut variance_in_return = TypeVarVariance::Bivariant;
-
-            // Find all occurrences of the type variable in the return type.
-            self.return_ty
-                .visit_specialization(db, self.env, |ty, variance| {
-                    if ty != Type::TypeVar(typevar) {
-                        return;
-                    }
-
-                    variance_in_return = variance_in_return.join(variance);
-                });
+            let variance_in_return = self
+                .return_ty
+                .variance_of(db, self.env, typevar.identity(db))
+                .evaluate(db);
 
             // Promotion is only useful if the type variable is in non-covariant position
             // in the return type.
@@ -6383,6 +6378,16 @@ impl<'db> CallInference<'_, 'db> {
                 CandidateSolutions::default_solve(db, self.env, constraints, bounds).map(
                     |solution| {
                         let promoted = solution.promote(db, self.env);
+                        // Widening a solution must preserve the argument evidence that selected it.
+                        // Inferred upper bounds are checked separately, so an incompatible callback
+                        // cannot prevent a value argument's ordinary literal promotion.
+                        if promoted != solution
+                            && bounds.inference_lower(db, self.env).is_some_and(|lower| {
+                                !lower.is_assignable_to(db, self.env, promoted)
+                            })
+                        {
+                            return solution;
+                        }
 
                         // If the TypeVar has an upper bound, only use the promoted type if it
                         // still satisfies the bound.
@@ -8106,7 +8111,31 @@ impl<'db> Binding<'db> {
                 ));
             }
 
-            parameter_type = parameter_type.apply_optional_specialization(db, specialization());
+            let specialization = specialization().map(|specialization| {
+                let Some(argument) = arguments_types.get(argument_index).and_then(|argument| {
+                    argument.matched_type(original_parameter_type, matched_parameter.argument_type)
+                }) else {
+                    return specialization;
+                };
+                let sources = argument.lambda_inference_sources(db, env);
+                if sources.is_empty() {
+                    return specialization;
+                }
+                // An inferred bound can depend on a lambda inside a union, tuple, or wrapper.
+                // Keep independent evidence while excluding bounds that would feed a lambda's
+                // own output back into its inference inputs.
+                specialization.generic_context(db).specialize_recursive(
+                    db,
+                    specialization.types(db).iter().map(|ty| {
+                        Some(if ty.depends_on_lambda_inference(db, env, sources) {
+                            Type::Dynamic(DynamicType::UnspecializedTypeVar)
+                        } else {
+                            *ty
+                        })
+                    }),
+                )
+            });
+            parameter_type = parameter_type.apply_optional_specialization(db, specialization);
             if let Some(expected_return_ty) = call_expression_tcx.annotation
                 && let Some(expected) = self.typevartuple_argument_context(
                     db,
@@ -10475,7 +10504,7 @@ impl<'db> ClassInfoValidator<'_, 'db> {
                 |_| true,
                 |expansion| self.validate_impl(db, ty, expansion, |ty| self.validate(db, ty)),
             )
-            .unwrap_or_else(|ty| self.validate_constructor(db, ty))
+            .unwrap_or_else(|(ty, _)| self.validate_constructor(db, ty))
     }
 
     fn validate_constructor(&self, db: &'db dyn Db, ty: Type<'db>) -> bool {

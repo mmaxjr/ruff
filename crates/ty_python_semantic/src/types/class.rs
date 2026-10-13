@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use std::cell::LazyCell;
 use std::fmt::Write;
 
 pub(crate) use self::dynamic_literal::{
@@ -2679,34 +2680,67 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         source: ClassType<'db>,
         target: ClassType<'db>,
     ) -> ConstraintSet<'db, 'c> {
+        let (source, source_specialization) = source.class_literal_and_specialization(db);
+        let (target, target_specialization) = target.class_literal_and_specialization(db);
+        self.check_class_pair_with_specializations(db, source, target, || {
+            (source_specialization, target_specialization)
+        })
+    }
+
+    /// Compare class identities before requesting their specializations. Constructing a tuple's
+    /// specialization combines its element types, which can recursively compare other callables.
+    pub(super) fn check_class_pair_with_specializations(
+        &self,
+        db: &'db dyn Db,
+        source: ClassLiteral<'db>,
+        target: ClassLiteral<'db>,
+        specializations: impl FnOnce() -> (Option<Specialization<'db>>, Option<Specialization<'db>>),
+    ) -> ConstraintSet<'db, 'c> {
+        let specializations = LazyCell::new(specializations);
         // Fast path: if source and target are the same class (possibly with different
         // specializations), we can compare them directly without walking the MRO.
-        match (source, target) {
-            (ClassType::NonGeneric(source), ClassType::NonGeneric(target)) if source == target => {
-                return self.always();
+        if source == target {
+            match *specializations {
+                (None, None) => return self.always(),
+                (Some(source), Some(target)) => {
+                    return self.check_specialization_pair(db, source, target);
+                }
+                _ => {}
             }
-            (ClassType::Generic(source_alias), ClassType::Generic(target_alias))
-                if source_alias.origin(db) == target_alias.origin(db) =>
-            {
-                return self.check_specialization_pair(
-                    db,
-                    source_alias.specialization(db),
-                    target_alias.specialization(db),
-                );
-            }
-            _ => {}
         }
+
+        // The MRO's class identities do not depend on type arguments. Resolve them first and
+        // specialize only an ancestor that matches the target. Specializing the entire MRO can
+        // otherwise compare recursive type arguments before this relation can reject the class.
+        let source = source.identity_specialization(db);
+        let visitor = ApplyTypeMappingVisitor::new(self.env)
+            .with_recursion_context(Some(self.materialization_visitor.recursion_context()));
+        let specialize = |specialization: Specialization<'db>| {
+            specializations
+                .0
+                .map_or(specialization, |source_specialization| {
+                    specialization.apply_specialization_impl(
+                        db,
+                        source_specialization.tuple_runtime_element_specialization(db),
+                        false,
+                        &visitor,
+                    )
+                })
+        };
 
         let mut generic_target = None;
         let result = source.iter_mro(db).when_any(db, self.constraints, |base| {
             match base {
                 ClassBase::Any => ConstraintSet::from_bool(
                     self.constraints,
-                    self.relation.is_assignability() || target.is_object(db),
+                    self.relation.is_assignability() || target.is_known(db, KnownClass::Object),
                 ),
                 ClassBase::Dynamic(_) | ClassBase::Divergent(_) => match self.relation {
                     TypeRelation::Subtyping | TypeRelation::Redundancy { .. } => {
-                        ConstraintSet::from_bool(self.constraints, target.is_object(db))
+                        ConstraintSet::from_bool(
+                            self.constraints,
+                            target.is_known(db, KnownClass::Object),
+                        )
                     }
                     TypeRelation::Assignability => {
                         ConstraintSet::from_bool(self.constraints, !target.is_final(db))
@@ -2716,35 +2750,31 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 // Protocol, Generic, and TypedDict are special bases that don't match ClassType.
                 ClassBase::Protocol | ClassBase::Generic | ClassBase::TypedDict(_) => self.never(),
 
-                ClassBase::Class(source) => match (source, target) {
+                ClassBase::Class(source) if source.class_literal(db) != target => self.never(),
+
+                ClassBase::Class(source) => match (source, specializations.1) {
                     // Two non-generic classes match if they have the same class literal.
-                    (
-                        ClassType::NonGeneric(source_literal),
-                        ClassType::NonGeneric(target_literal),
-                    ) => {
-                        ConstraintSet::from_bool(self.constraints, source_literal == target_literal)
-                    }
+                    (ClassType::NonGeneric(_), None) => self.always(),
 
                     // Two generic classes match if they have the same origin and compatible specializations.
-                    (ClassType::Generic(source), ClassType::Generic(target))
-                        if source.origin(db) == target.origin(db) =>
-                    {
+                    (ClassType::Generic(source), Some(target)) => {
                         generic_target = Some(target);
                         self.check_specialization_pair(
                             db,
-                            source.specialization(db),
-                            target.specialization(db),
+                            specialize(source.specialization(db)),
+                            target,
                         )
                     }
 
-                    // Different generic origins, or generic and non-generic classes, don't match.
-                    (ClassType::Generic(_), ClassType::Generic(_) | ClassType::NonGeneric(_))
-                    | (ClassType::NonGeneric(_), ClassType::Generic(_)) => self.never(),
+                    // Generic and non-generic classes don't match.
+                    (ClassType::Generic(_), None) | (ClassType::NonGeneric(_), Some(_)) => {
+                        self.never()
+                    }
                 },
             }
         });
 
-        let Some(target) = generic_target else {
+        let Some(target_specialization) = generic_target else {
             return result;
         };
 
@@ -2755,12 +2785,12 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             source
                 .iter_explicit_ancestors(db, self.env)
                 .filter_map(ClassType::into_generic_alias)
-                .filter(|ancestor| ancestor.origin(db) == target.origin(db))
+                .filter(|ancestor| ClassLiteral::Static(ancestor.origin(db)) == target)
                 .when_any(db, self.constraints, |ancestor| {
                     self.check_specialization_pair(
                         db,
-                        ancestor.specialization(db),
-                        target.specialization(db),
+                        specialize(ancestor.specialization(db)),
+                        target_specialization,
                     )
                 })
         })

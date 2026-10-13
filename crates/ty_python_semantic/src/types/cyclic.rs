@@ -32,12 +32,14 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use ty_python_core::definition::Definition;
 
+use crate::types::callable::{LambdaSignature, SignatureSource, infer_lambda_signature};
 use crate::types::function::FunctionLiteral;
 use crate::types::generics::{GenericContext, Specialization};
 use crate::types::visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard};
 use crate::types::{
-    BoundTypeVarIdentity, BoundTypeVarInstance, MaterializationKind, ProtocolInstanceType,
-    RecursiveType, StaticClassLiteral, Type, TypeAliasType, TypedDictType,
+    BoundTypeVarIdentity, BoundTypeVarInstance, KnownClass,
+    MaterializationKind, ProtocolInstanceType, RecursiveType, StaticClassLiteral, Type,
+    TypeAliasType, TypedDictType, walk_signature,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -54,6 +56,8 @@ pub enum TypeIdentity<'db> {
         materialization: Option<MaterializationKind>,
         argument_materialization: Option<MaterializationKind>,
     },
+    /// The source and the runtime class required by this callable view.
+    GrowingLambda(LambdaSignature<'db>, Option<KnownClass>),
     Other(Type<'db>),
 }
 
@@ -89,6 +93,14 @@ impl<'db> Type<'db> {
                         == b.arguments(db)
                             .and_then(|args| args.materialization_kind(db))
             }
+            (Type::Callable(a), Type::Callable(b)) => {
+                a.runtime_class(db) == b.runtime_class(db)
+                    && matches!(
+                        (a.signature_source(db), b.signature_source(db)),
+                        (SignatureSource::Lambda(a), SignatureSource::Lambda(b))
+                            if a.source(db) == b.source(db)
+                    )
+            }
             _ => false,
         }
     }
@@ -96,12 +108,6 @@ impl<'db> Type<'db> {
     #[allow(clippy::inline_always)]
     #[inline(always)]
     fn recursive_identity(self, db: &'db dyn Db) -> Option<TypeIdentity<'db>> {
-        let growing_definition = || {
-            let target = RecursiveDefinition::from_type(db, self)?.target;
-            target
-                .may_have_unbounded_specialization(db)
-                .then(|| target.definition(db))
-        };
         match self {
             // We can create a self-referential function type: e.g. `def f(x: "TypeOf[f]"): reveal_type(x)`
             // To avoid the difficulty of equality checking for function types containing this, we simply use `literal` for equality checking.
@@ -112,23 +118,45 @@ impl<'db> Type<'db> {
             Type::NewTypeInstance(newtype) => {
                 Some(TypeIdentity::NewTypeInstance(newtype.definition(db)))
             }
-            // Recursive aliases, protocols, and TypedDicts whose specialization can keep changing
-            // (e.g. `type Growing[T] = T | Growing[list[T]]`) are collapsed to their definition so
+            // Recursive types whose arguments can grow without bound
+            // (e.g. `type Growing[T] = T | Growing[list[T]]`) use their source as an identity so
             // that visits stop even though no exact type repeats. Recursion that revisits one
             // exact specialization (e.g. `type RecursiveT = int | tuple[RecursiveT, ...]`) needs
-            // no definition-level identity: the detectors stop on the repeated type itself.
-            Type::TypeAlias(_) => growing_definition().map(TypeIdentity::GrowingTypeAlias),
-            Type::ProtocolInstance(_) => growing_definition().map(TypeIdentity::GrowingProtocol),
-            Type::TypedDict(_) => growing_definition().map(TypeIdentity::GrowingTypedDict),
-            Type::Recursive(recursive) => {
-                // Materialization can change the outer shape, such as `Any` becoming `object`.
-                // Inspect that shape before treating further argument growth as a repeated visit.
-                Some(TypeIdentity::GrowingRecursive {
-                    definition: growing_definition()?,
-                    materialization: recursive.materialization_kind(db),
-                    argument_materialization: recursive
-                        .arguments(db)
-                        .and_then(|args| args.materialization_kind(db)),
+            // no coarser identity: the detectors stop on the repeated type itself.
+            Type::TypeAlias(_)
+            | Type::ProtocolInstance(_)
+            | Type::TypedDict(_)
+            | Type::Recursive(_)
+            | Type::Callable(_) => {
+                let target = RecursiveDefinition::from_type(db, self)?.target(db);
+                if !target.may_have_unbounded_specialization(db) {
+                    return None;
+                }
+                Some(match target {
+                    RecursiveDefinition::TypeAlias(alias) => {
+                        TypeIdentity::GrowingTypeAlias(alias.definition(db))
+                    }
+                    RecursiveDefinition::Protocol(class) => {
+                        TypeIdentity::GrowingProtocol(class.definition(db))
+                    }
+                    RecursiveDefinition::TypedDict(class) => {
+                        TypeIdentity::GrowingTypedDict(class.definition(db))
+                    }
+                    RecursiveDefinition::Structural(_) => {
+                        let Type::Recursive(recursive) = self else {
+                            return None;
+                        };
+                        TypeIdentity::GrowingRecursive {
+                            definition: recursive.definition(db),
+                            materialization: recursive.materialization_kind(db),
+                            argument_materialization: recursive
+                                .arguments(db)
+                                .and_then(|args| args.materialization_kind(db)),
+                        }
+                    }
+                    RecursiveDefinition::Lambda(lambda) => {
+                        TypeIdentity::GrowingLambda(lambda, self.as_callable()?.runtime_class(db))
+                    }
                 })
             }
             _ => None,
@@ -146,13 +174,31 @@ impl<'db> RecursiveType<'db> {
     }
 }
 
-/// A definition whose formal parameters can flow through recursive type references.
+/// A source whose type parameters can flow through recursive references.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
 enum RecursiveDefinition<'db> {
     TypeAlias(TypeAliasType<'db>),
     Protocol(StaticClassLiteral<'db>),
     TypedDict(StaticClassLiteral<'db>),
     Structural(RecursiveType<'db>),
+    Lambda(LambdaSignature<'db>),
+}
+
+/// The source before specialization. Lambdas retain their original inference inputs.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum RecursiveOrigin<'db> {
+    Definition(Definition<'db>),
+    Lambda(LambdaSignature<'db>),
+}
+
+/// A type parameter in one recursive source.
+///
+/// Two lambdas can capture the same outer variable. Keeping their parameters separate prevents
+/// a single reference between them from appearing to be a cycle.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct FlowParameter<'db> {
+    origin: RecursiveOrigin<'db>,
+    identity: BoundTypeVarIdentity<'db>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -163,11 +209,7 @@ enum FlowKind {
     Nested,
 }
 
-/// Formal parameters are identified by their [`BoundTypeVarIdentity`], which is unique across
-/// definitions, so parameter identities can serve directly as the flow graph's nodes.
-/// e.g.
-///
-/// definition:
+/// Flow from a source parameter to the argument of a referenced type. For example:
 /// ```py
 /// type A[A1, A2] = B[A2, A1]
 /// type B[B1, B2] = None
@@ -187,15 +229,15 @@ enum FlowKind {
 /// ```
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct FlowEdge<'db> {
-    from: BoundTypeVarIdentity<'db>,
-    to: BoundTypeVarIdentity<'db>,
+    from: FlowParameter<'db>,
+    to: FlowParameter<'db>,
     kind: FlowKind,
 }
 
 #[derive(Clone, Copy)]
-struct DefinitionUse<'db> {
-    target: RecursiveDefinition<'db>,
-    specialization: Option<Specialization<'db>>,
+enum DefinitionUse<'db> {
+    Specialized(RecursiveDefinition<'db>, Option<Specialization<'db>>),
+    Lambda(LambdaSignature<'db>),
 }
 
 /// Parameter flow between all recursive definitions reachable from one root.
@@ -229,9 +271,9 @@ struct DefinitionUse<'db> {
 struct SpecializationFlowGraph<'db> {
     edges: FxHashSet<FlowEdge<'db>>,
     /// Definition references used to decide whether an unresolved flow can return to the root.
-    definition_edges: Vec<(Definition<'db>, Definition<'db>)>,
+    definition_edges: Vec<(RecursiveOrigin<'db>, RecursiveOrigin<'db>)>,
     /// Definitions whose captured outer parameters cannot be mapped to their parent specialization.
-    inconclusive_definitions: FxHashSet<Definition<'db>>,
+    inconclusive_definitions: FxHashSet<RecursiveOrigin<'db>>,
     /// Whether a definition body or its formal parameters could not be inspected.
     inconclusive: bool,
 }
@@ -240,6 +282,7 @@ struct SpecializationFlowGraph<'db> {
 ///
 /// Referenced definitions are queued for a separate walk instead of being expanded here.
 struct SpecializationFlowVisitor<'db> {
+    source_origin: RecursiveOrigin<'db>,
     source_parameters: FxHashSet<BoundTypeVarIdentity<'db>>,
     env: ProgramEnvironment<'db>,
     visited_types: TypeCollector<'db>,
@@ -282,6 +325,12 @@ impl<'db> RecursiveDefinition<'db> {
                     typed_dict.defining_class()?.static_class_literal(db)?;
                 (Self::TypedDict(origin), specialization)
             }
+            Type::Callable(callable) => {
+                let SignatureSource::Lambda(lambda) = callable.signature_source(db) else {
+                    return None;
+                };
+                return Some(DefinitionUse::Lambda(*lambda));
+            }
             _ => return None,
         };
 
@@ -292,17 +341,26 @@ impl<'db> RecursiveDefinition<'db> {
             ),
             None => specialization,
         };
-        Some(DefinitionUse {
-            target,
-            specialization,
-        })
+        Some(DefinitionUse::Specialized(target, specialization))
     }
 
-    fn definition(self, db: &'db dyn Db) -> Definition<'db> {
+    fn origin(self, db: &'db dyn Db) -> RecursiveOrigin<'db> {
         match self {
-            Self::TypeAlias(alias) => alias.definition(db),
-            Self::Structural(recursive) => recursive.definition(db),
-            Self::Protocol(origin) | Self::TypedDict(origin) => origin.definition(db),
+            Self::TypeAlias(alias) => RecursiveOrigin::Definition(alias.definition(db)),
+            Self::Structural(recursive) => RecursiveOrigin::Definition(recursive.definition(db)),
+            Self::Protocol(origin) | Self::TypedDict(origin) => {
+                RecursiveOrigin::Definition(origin.definition(db))
+            }
+            Self::Lambda(lambda) => RecursiveOrigin::Lambda(lambda),
+        }
+    }
+
+    fn environment(self, db: &'db dyn Db) -> ProgramEnvironment<'db> {
+        match self.origin(db) {
+            RecursiveOrigin::Definition(definition) => {
+                ProgramEnvironment::from_definition(definition)
+            }
+            RecursiveOrigin::Lambda(lambda) => ProgramEnvironment::from_scope(lambda.scope(db)),
         }
     }
 
@@ -311,6 +369,7 @@ impl<'db> RecursiveDefinition<'db> {
             Self::TypeAlias(alias) => alias.generic_context(db),
             Self::Structural(recursive) => recursive.parameters(db),
             Self::Protocol(origin) | Self::TypedDict(origin) => origin.generic_context(db),
+            Self::Lambda(lambda) => Some(lambda.captured_typevars(db)),
         }
     }
 
@@ -320,7 +379,7 @@ impl<'db> RecursiveDefinition<'db> {
         generic_context: GenericContext<'db>,
     ) -> Specialization<'db> {
         let known_class = match self {
-            Self::TypeAlias(_) | Self::Structural(_) => None,
+            Self::TypeAlias(_) | Self::Structural(_) | Self::Lambda(_) => None,
             Self::Protocol(origin) | Self::TypedDict(origin) => origin.known(db),
         };
         generic_context.default_specialization(db, known_class)
@@ -339,49 +398,114 @@ impl<'db> RecursiveDefinition<'db> {
     }
 
     /// The identities of this definition's formal parameters, in declaration order.
-    fn parameters(self, db: &'db dyn Db) -> impl Iterator<Item = BoundTypeVarIdentity<'db>> {
+    fn parameters(self, db: &'db dyn Db) -> impl Iterator<Item = FlowParameter<'db>> {
         self.generic_context(db)
             .into_iter()
             .flat_map(|context| context.variables(db))
-            .map(move |parameter| Self::parameter_identity(db, parameter))
+            .map(move |parameter| FlowParameter {
+                origin: self.origin(db),
+                identity: Self::parameter_identity(db, parameter),
+            })
     }
 
     /// Returns `None` if two formal parameters share an identity, since their flows could not be
     /// distinguished.
     fn source_parameters(self, db: &'db dyn Db) -> Option<FxHashSet<BoundTypeVarIdentity<'db>>> {
         let mut parameters = FxHashSet::default();
-        for identity in self.parameters(db) {
-            if !parameters.insert(identity) {
+        for parameter in self.parameters(db) {
+            if !parameters.insert(parameter.identity) {
                 return None;
             }
         }
         Some(parameters)
     }
 
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "The tracked query uses None as its initial cycle value"
+    )]
     fn may_have_unbounded_specialization(self, db: &'db dyn Db) -> bool {
+        // An unfinished definition cannot prove that specialization is finite. Once an
+        // iteration finds growth, retain that evidence even if another body approximation
+        // temporarily hides the recursive edge.
         #[salsa::tracked(
             returns(copy),
-            cycle_initial=|_, _, _, ()| true,
+            cycle_initial=|_, _, _, ()| None,
+            cycle_fn=|_, _, previous: &Option<bool>, current: Option<bool>, _, ()| {
+                Some(previous.unwrap_or(false) || current.unwrap_or(false))
+            },
             heap_size=ruff_memory_usage::heap_size,
         )]
         fn may_have_unbounded_specialization_inner<'db>(
             db: &'db dyn Db,
             root: RecursiveDefinition<'db>,
             _: (),
-        ) -> bool {
+        ) -> Option<bool> {
             let graph = SpecializationFlowGraph::build(db, root);
-            graph.root_may_have_unbounded_specialization(db, root)
+            Some(graph.root_may_have_unbounded_specialization(db, root))
         }
 
-        may_have_unbounded_specialization_inner(db, self, ())
+        may_have_unbounded_specialization_inner(db, self, ()).unwrap_or(true)
     }
 }
 
 impl<'db> DefinitionUse<'db> {
+    fn target(self, db: &'db dyn Db) -> RecursiveDefinition<'db> {
+        match self {
+            Self::Specialized(target, _) => target,
+            Self::Lambda(lambda) => RecursiveDefinition::Lambda(lambda.source(db)),
+        }
+    }
+
+    /// Read actual arguments without expanding the referenced definition's body.
+    fn arguments(self, db: &'db dyn Db) -> Option<Vec<(BoundTypeVarIdentity<'db>, Type<'db>)>> {
+        let (target, specialization) = match self {
+            Self::Specialized(target, specialization) => (target, specialization),
+            Self::Lambda(lambda) => {
+                return Some(
+                    lambda
+                        .captured_arguments(db)
+                        .flat_map(|(parameter, arguments)| {
+                            let identity = RecursiveDefinition::parameter_identity(db, parameter);
+                            arguments
+                                .into_iter()
+                                .map(move |argument| (identity, argument))
+                        })
+                        .collect(),
+                );
+            }
+        };
+        let Some(context) = target.generic_context(db) else {
+            return specialization.is_none().then(Vec::new);
+        };
+        let specialization = specialization?;
+        if specialization.generic_context(db) != context {
+            return None;
+        }
+        let parameters = context
+            .variables(db)
+            .map(|parameter| RecursiveDefinition::parameter_identity(db, parameter));
+        let arguments = specialization.types(db);
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+        Some(parameters.zip(arguments.iter().copied()).collect())
+    }
+
     fn walk_arguments(self, db: &'db dyn Db, visitor: &impl TypeVisitor<'db>) {
-        if let Some(specialization) = self.specialization {
-            for argument in specialization.types(db) {
-                visitor.visit_type(db, *argument);
+        match self {
+            Self::Specialized(_, Some(specialization)) => {
+                for argument in specialization.types(db) {
+                    visitor.visit_type(db, *argument);
+                }
+            }
+            Self::Specialized(_, None) => {}
+            Self::Lambda(lambda) => {
+                for (_, arguments) in lambda.captured_arguments(db) {
+                    for argument in arguments {
+                        visitor.visit_type(db, argument);
+                    }
+                }
             }
         }
     }
@@ -394,7 +518,7 @@ impl<'db> SpecializationFlowGraph<'db> {
         let mut visited = FxHashSet::default();
 
         while let Some(source) = pending.pop() {
-            let source_definition = source.definition(db);
+            let source_definition = source.origin(db);
             if !visited.insert(source_definition) {
                 continue;
             }
@@ -413,7 +537,7 @@ impl<'db> SpecializationFlowGraph<'db> {
             graph.definition_edges.extend(
                 referenced_definitions
                     .iter()
-                    .map(|target| (source_definition, target.definition(db))),
+                    .map(|target| (source_definition, target.origin(db))),
             );
             pending.extend(referenced_definitions);
         }
@@ -429,7 +553,7 @@ impl<'db> SpecializationFlowGraph<'db> {
             return true;
         }
 
-        let root_definition = root.definition(db);
+        let root_definition = root.origin(db);
         if self.inconclusive_definition_reaches(root_definition) {
             return true;
         }
@@ -468,8 +592,8 @@ impl<'db> SpecializationFlowGraph<'db> {
     /// This means that typevars with the same index belong to the same SCC.
     fn strongly_connected_parameter_components(
         &self,
-        additional_parameters: impl IntoIterator<Item = BoundTypeVarIdentity<'db>>,
-    ) -> FxHashMap<BoundTypeVarIdentity<'db>, usize> {
+        additional_parameters: impl IntoIterator<Item = FlowParameter<'db>>,
+    ) -> FxHashMap<FlowParameter<'db>, usize> {
         let mut parameters = additional_parameters.into_iter().collect::<FxHashSet<_>>();
         let mut outgoing = FxHashMap::<_, SmallVec<[_; 2]>>::default();
         let mut incoming = FxHashMap::<_, SmallVec<[_; 2]>>::default();
@@ -535,7 +659,7 @@ impl<'db> SpecializationFlowGraph<'db> {
         components
     }
 
-    fn inconclusive_definition_reaches(&self, target: Definition<'db>) -> bool {
+    fn inconclusive_definition_reaches(&self, target: RecursiveOrigin<'db>) -> bool {
         if self.inconclusive_definitions.is_empty() {
             return false;
         }
@@ -546,12 +670,16 @@ impl<'db> SpecializationFlowGraph<'db> {
             .is_disjoint(&definitions_reaching_target)
     }
 
-    fn definition_reaches(&self, from: Definition<'db>, to: Definition<'db>) -> bool {
+    fn definition_reaches(&self, from: RecursiveOrigin<'db>, to: RecursiveOrigin<'db>) -> bool {
         self.definitions_reaching(to).contains(&from)
     }
 
-    fn definitions_reaching(&self, target: Definition<'db>) -> FxHashSet<Definition<'db>> {
-        let mut incoming = FxHashMap::<Definition, SmallVec<[Definition; 2]>>::default();
+    fn definitions_reaching(
+        &self,
+        target: RecursiveOrigin<'db>,
+    ) -> FxHashSet<RecursiveOrigin<'db>> {
+        let mut incoming =
+            FxHashMap::<RecursiveOrigin<'db>, SmallVec<[RecursiveOrigin<'db>; 2]>>::default();
         for &(source, target) in &self.definition_edges {
             incoming.entry(target).or_default().push(source);
         }
@@ -579,8 +707,9 @@ impl<'db> SpecializationFlowGraph<'db> {
 impl<'db> SpecializationFlowVisitor<'db> {
     fn new(db: &'db dyn Db, source: RecursiveDefinition<'db>) -> Option<Self> {
         Some(Self {
+            source_origin: source.origin(db),
             source_parameters: source.source_parameters(db)?,
-            env: ProgramEnvironment::from_definition(source.definition(db)),
+            env: source.environment(db),
             visited_types: TypeCollector::default(),
             edges: RefCell::default(),
             referenced_definitions: RefCell::default(),
@@ -631,44 +760,37 @@ impl<'db> SpecializationFlowVisitor<'db> {
                     self.visit_type(db, extra_items.declared_ty);
                 }
             }
+            RecursiveDefinition::Lambda(lambda) => {
+                for signature in infer_lambda_signature(db, lambda) {
+                    walk_signature(db, signature, self);
+                }
+            }
         }
         !self.has_unresolved_type.get()
     }
 
     fn record_reference(&self, db: &'db dyn Db, reference: DefinitionUse<'db>) {
-        self.referenced_definitions
-            .borrow_mut()
-            .push(reference.target);
+        let target = reference.target(db);
+        self.referenced_definitions.borrow_mut().push(target);
 
-        let Some(target_context) = reference.target.generic_context(db) else {
-            if reference.specialization.is_some() {
-                self.inconclusive.set(true);
-            }
-            return;
-        };
-        let Some(specialization) = reference.specialization else {
+        let Some(arguments) = reference.arguments(db) else {
             self.inconclusive.set(true);
             return;
         };
-        if specialization.generic_context(db) != target_context {
-            self.inconclusive.set(true);
-            return;
-        }
 
-        let target_parameters = reference.target.parameters(db).collect::<Vec<_>>();
-        let arguments = specialization.types(db);
-        if target_parameters.len() != arguments.len() {
-            self.inconclusive.set(true);
-            return;
-        }
-
-        for (target, argument) in target_parameters.into_iter().zip(arguments.iter().copied()) {
+        for (parameter, argument) in arguments {
             for (from, kind) in
                 SourceParameterCollector::classify(db, &self.env, &self.source_parameters, argument)
             {
                 self.edges.borrow_mut().push(FlowEdge {
-                    from,
-                    to: target,
+                    from: FlowParameter {
+                        origin: self.source_origin,
+                        identity: from,
+                    },
+                    to: FlowParameter {
+                        origin: target.origin(db),
+                        identity: parameter,
+                    },
                     kind,
                 });
             }
@@ -823,7 +945,7 @@ impl<'db> TypeAliasType<'db> {
     /// Returns whether this alias can refer back to its own definition.
     pub(crate) fn is_recursive(self, db: &'db dyn Db) -> bool {
         let root = RecursiveDefinition::TypeAlias(self.unspecialized(db));
-        let root_definition = root.definition(db);
+        let root_definition = root.origin(db);
         SpecializationFlowGraph::build(db, root)
             .definition_reaches(root_definition, root_definition)
     }
@@ -906,6 +1028,7 @@ pub struct CycleDetector<'db, Tag, T: HasIdentity<'db>, R, const INLINE_CAPACITY
     /// The active recursion stack and the lazily-computed identity of each item.
     /// Completed visits are removed from the end of the stack.
     seen: RefCell<SmallVec<[ActiveCycleDetectorVisit<'db, T>; INLINE_CAPACITY]>>,
+    revision: Cell<u64>,
 
     /// Memoized results from earlier visits in the current recursive operation.
     cache: RefCell<CycleDetectorCache<T, R>>,
@@ -919,9 +1042,14 @@ impl<'db, Tag, T, R, const INLINE_CAPACITY: usize> CycleDetector<'db, Tag, T, R,
 where
     T: HasIdentity<'db>,
 {
+    pub(super) fn revision(&self) -> u64 {
+        self.revision.get()
+    }
+
     pub(crate) fn new(fallback: R) -> Self {
         CycleDetector {
             seen: RefCell::new(SmallVec::new()),
+            revision: Cell::new(0),
             cache: RefCell::new(CycleDetectorCache::new()),
             fallback,
             _tag: PhantomData,
@@ -938,7 +1066,7 @@ where
     pub(crate) fn visit(&self, db: &'db dyn Db, item: T, compute: impl FnOnce() -> R) -> R {
         match self.begin_visit(db, item) {
             CycleDetectorVisit::Ready(result) => result,
-            CycleDetectorVisit::Cycle(_) => self.fallback.clone(),
+            CycleDetectorVisit::Cycle(..) => self.fallback.clone(),
             CycleDetectorVisit::Pending(item) => {
                 let result = compute();
                 self.finish_visit(item, result)
@@ -946,9 +1074,9 @@ where
         }
     }
 
-    /// Visits `item`, returning it in `Err` if another active item has the same identity.
+    /// Visits `item`, returning it and the previous active item in `Err` if their identities match.
     ///
-    /// The caller must convert `Err(item)` into an operation-specific conservative result. An
+    /// The caller must convert `Err((item, previous))` into an operation-specific result. An
     /// exact recursive reentry uses the detector's configured fallback and is returned as `Ok`.
     ///
     /// Completed results are reused only when `reuse_cached` accepts them. Otherwise, the visit
@@ -961,7 +1089,7 @@ where
         item: T,
         reuse_cached: impl FnOnce(&R) -> bool,
         compute: impl FnOnce() -> R,
-    ) -> Result<R, T> {
+    ) -> Result<R, (T, T)> {
         let cached_result = self.cache.borrow().get(&item).cloned();
         let was_cached = cached_result.is_some();
         if let Some(result) = cached_result
@@ -972,7 +1100,7 @@ where
 
         match self.begin_active_visit(db, item) {
             CycleDetectorVisit::Ready(result) => Ok(result),
-            CycleDetectorVisit::Cycle(item) => Err(item),
+            CycleDetectorVisit::Cycle(item, previous) => Err((item, previous)),
             CycleDetectorVisit::Pending(item) => {
                 let result = compute();
                 if was_cached {
@@ -981,6 +1109,24 @@ where
                 } else {
                     Ok(self.finish_visit(item, result))
                 }
+            }
+        }
+    }
+
+    /// Run an operation that cannot provide a value when it recurses. Exact and growing cycles
+    /// both return `None`; completed results are not cached.
+    pub(crate) fn try_visit_active<U>(
+        &self,
+        db: &'db dyn Db,
+        item: T,
+        work: impl FnOnce() -> U,
+    ) -> Option<U> {
+        match self.begin_active_visit(db, item) {
+            CycleDetectorVisit::Ready(_) | CycleDetectorVisit::Cycle(..) => None,
+            CycleDetectorVisit::Pending(item) => {
+                let result = work();
+                self.finish_active_visit(&item);
+                Some(result)
             }
         }
     }
@@ -994,47 +1140,73 @@ where
     }
 
     fn begin_active_visit(&self, db: &'db dyn Db, item: T) -> CycleDetectorVisit<T, R> {
-        let (cycle, identity) = self.check_cycle(db, &item);
-        match cycle {
-            Some(CycleKind::Exact) => return CycleDetectorVisit::Ready(self.fallback.clone()),
-            Some(CycleKind::MatchingIdentity) => return CycleDetectorVisit::Cycle(item),
-            None => {}
+        let seen = self.seen.borrow();
+        if seen.iter().any(|active| active.item == item) {
+            return CycleDetectorVisit::Ready(self.fallback.clone());
         }
 
+        let candidates: SmallVec<[usize; INLINE_CAPACITY]> = seen
+            .iter()
+            .enumerate()
+            .filter_map(|(index, active)| {
+                item.may_share_identity(db, &active.item).then_some(index)
+            })
+            .collect();
+        let index = seen.len();
+        drop(seen);
+
+        // Identity analysis may inspect a definition. Guard the exact input before starting
+        // that work, and do not borrow the active stack across a query that can re-enter it.
+        self.revision.set(self.revision.get().wrapping_add(1));
         self.seen.borrow_mut().push(ActiveCycleDetectorVisit {
             item: item.clone(),
-            identity,
+            identity: OnceCell::new(),
         });
+        if !candidates.is_empty() {
+            self.resolve_active_identity(db, index);
+            for previous in candidates {
+                self.resolve_active_identity(db, previous);
+                let previous = {
+                    let seen = self.seen.borrow();
+                    (seen[previous].identity.get() == seen[index].identity.get())
+                        .then(|| seen[previous].item.clone())
+                };
+                if let Some(previous) = previous {
+                    self.finish_active_visit(&item);
+                    return CycleDetectorVisit::Cycle(item, previous);
+                }
+            }
+        }
         CycleDetectorVisit::Pending(item)
     }
 
-    /// Check how the current recursion stack would handle `item`, without entering it.
-    pub(super) fn cycle_kind(&self, db: &'db dyn Db, item: &T) -> Option<CycleKind> {
-        self.check_cycle(db, item).0
+    fn resolve_active_identity(&self, db: &'db dyn Db, index: usize) {
+        let item = {
+            let seen = self.seen.borrow();
+            seen[index]
+                .identity
+                .get()
+                .is_none()
+                .then(|| seen[index].item.clone())
+        };
+        if let Some(item) = item {
+            let identity = item.to_identity(db);
+            // A nested analysis can complete the same identity first.
+            let _ = self.seen.borrow()[index].identity.set(identity);
+        }
     }
 
-    fn check_cycle(&self, db: &'db dyn Db, item: &T) -> (Option<CycleKind>, OnceCell<T::Id>) {
-        let seen = self.seen.borrow();
-        if seen.iter().any(|active| active.item == *item) {
-            return (Some(CycleKind::Exact), OnceCell::new());
-        }
-
-        let mut candidates = seen
-            .iter()
-            .filter(|active| item.may_share_identity(db, &active.item))
-            .peekable();
-        if candidates.peek().is_some() {
-            // Deriving an identity can require a structural definition walk. Defer it until a
-            // cheap candidate match shows that another active item could form a cycle.
-            let identity = item.to_identity(db);
-            if candidates.any(|active| {
-                active.identity.get_or_init(|| active.item.to_identity(db)) == &identity
-            }) {
-                return (Some(CycleKind::MatchingIdentity), OnceCell::from(identity));
+    /// Check the cycle policy without visiting the body. Identity analysis still registers
+    /// the exact input, since computing an abstract identity can itself enter a type query.
+    pub(super) fn cycle_kind(&self, db: &'db dyn Db, item: &T) -> Option<CycleKind> {
+        match self.begin_active_visit(db, item.clone()) {
+            CycleDetectorVisit::Ready(_) => Some(CycleKind::Exact),
+            CycleDetectorVisit::Cycle(..) => Some(CycleKind::MatchingIdentity),
+            CycleDetectorVisit::Pending(item) => {
+                self.finish_active_visit(&item);
+                None
             }
-            return (None, OnceCell::from(identity));
         }
-        (None, OnceCell::new())
     }
 
     /// Finish a [`CycleDetectorVisit::Pending`] visit and cache its result.
@@ -1047,6 +1219,7 @@ where
     }
 
     fn finish_active_visit(&self, item: &T) {
+        self.revision.set(self.revision.get().wrapping_add(1));
         let active = self.seen.borrow_mut().pop();
         debug_assert!(active.as_ref().is_some_and(|active| active.item == *item));
     }
@@ -1069,10 +1242,11 @@ where
     ) -> R {
         match self.begin_active_visit(db, item) {
             CycleDetectorVisit::Ready(()) => compute(Some(CycleKind::Exact)),
-            CycleDetectorVisit::Cycle(_) => compute(Some(CycleKind::MatchingIdentity)),
+            CycleDetectorVisit::Cycle(..) => compute(Some(CycleKind::MatchingIdentity)),
             CycleDetectorVisit::Pending(item) => {
                 let _guard = ActiveTypeVisit {
                     seen: &self.seen,
+                    revision: &self.revision,
                     item,
                 };
                 compute(None)
@@ -1091,6 +1265,7 @@ pub enum CycleKind {
 
 struct ActiveTypeVisit<'a, 'db, T: HasIdentity<'db> + PartialEq, const INLINE_CAPACITY: usize> {
     seen: &'a RefCell<SmallVec<[ActiveCycleDetectorVisit<'db, T>; INLINE_CAPACITY]>>,
+    revision: &'a Cell<u64>,
     item: T,
 }
 
@@ -1098,6 +1273,7 @@ impl<'db, T: HasIdentity<'db> + PartialEq, const INLINE_CAPACITY: usize> Drop
     for ActiveTypeVisit<'_, 'db, T, INLINE_CAPACITY>
 {
     fn drop(&mut self) {
+        self.revision.set(self.revision.get().wrapping_add(1));
         let active = self.seen.borrow_mut().pop();
         debug_assert!(
             active
@@ -1123,7 +1299,7 @@ pub(super) enum CycleDetectorVisit<T, R> {
     /// The item already has a completed result or hit an exact recursive edge.
     Ready(R),
     /// A different item with the same abstract identity is already pending.
-    Cycle(T),
+    Cycle(T, T),
     /// The caller should compute the result and finish the pending visit.
     Pending(T),
 }
@@ -1158,7 +1334,25 @@ impl<'db, Tag> TypeTransformer<'db, Tag> {
         ty: Type<'db>,
         compute: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
-        match self.begin_visit(db, ty) {
+        self.visit_with_identity(ty, || ty.to_type_identity(db), compute)
+    }
+
+    /// Rewrite stored type data without inspecting the definition it refers to.
+    pub(crate) fn visit_stored_type(
+        &self,
+        ty: Type<'db>,
+        compute: impl FnOnce() -> Type<'db>,
+    ) -> Type<'db> {
+        self.visit_with_identity(ty, || TypeIdentity::Other(ty), compute)
+    }
+
+    fn visit_with_identity(
+        &self,
+        ty: Type<'db>,
+        identity: impl FnOnce() -> TypeIdentity<'db>,
+        compute: impl FnOnce() -> Type<'db>,
+    ) -> Type<'db> {
+        match self.begin_visit(ty, identity) {
             TypeTransformerVisit::Ready(result) => result,
             TypeTransformerVisit::Pending(ty) => {
                 let result = compute();
@@ -1167,24 +1361,34 @@ impl<'db, Tag> TypeTransformer<'db, Tag> {
         }
     }
 
-    fn begin_visit(&self, db: &'db dyn Db, ty: Type<'db>) -> TypeTransformerVisit<'db> {
+    fn begin_visit(
+        &self,
+        ty: Type<'db>,
+        identity: impl FnOnce() -> TypeIdentity<'db>,
+    ) -> TypeTransformerVisit<'db> {
         if let Some(result) = self.cache.borrow().get(&ty) {
             return TypeTransformerVisit::Ready(*result);
         }
 
-        let identity = ty.to_type_identity(db);
-        let seen = self.seen.borrow();
-        if seen
-            .iter()
-            .any(|active| active.ty == ty || active.identity == identity)
-        {
+        if self.seen.borrow().iter().any(|active| active.ty == ty) {
             return TypeTransformerVisit::Ready(ty);
         }
-        drop(seen);
-
+        // Identity analysis can infer a definition. Register the exact input before that work
+        // so a nested operation cannot restart the same transformation while setting up its guard.
+        let index = self.seen.borrow().len();
         self.seen
             .borrow_mut()
-            .push(ActiveTypeTransformation { ty, identity });
+            .push(ActiveTypeTransformation { ty, identity: None });
+        let identity = identity();
+        let mut seen = self.seen.borrow_mut();
+        if seen[..index]
+            .iter()
+            .any(|active| active.identity == Some(identity))
+        {
+            seen.pop();
+            return TypeTransformerVisit::Ready(ty);
+        }
+        seen[index].identity = Some(identity);
         TypeTransformerVisit::Pending(ty)
     }
 
@@ -1199,7 +1403,7 @@ impl<'db, Tag> TypeTransformer<'db, Tag> {
 #[derive(Debug, Clone, Copy)]
 struct ActiveTypeTransformation<'db> {
     ty: Type<'db>,
-    identity: TypeIdentity<'db>,
+    identity: Option<TypeIdentity<'db>>,
 }
 
 enum TypeTransformerVisit<'db> {
@@ -1377,7 +1581,7 @@ mod tests {
 
     use super::{
         CycleDetector, CycleDetectorVisit, CycleKind, Db, FlowEdge, FlowKind, HasIdentity,
-        RecursiveDefinition, SpecializationFlowGraph, TypeIdentity,
+        RecursiveDefinition, SpecializationFlowGraph, TypeIdentity, TypeTransformer,
     };
     use crate::ProgramEnvironment;
     use crate::db::tests::setup_db;
@@ -1391,6 +1595,21 @@ mod tests {
     use ty_python_core::ProgramFile;
 
     struct TestVisit;
+
+    #[test]
+    fn guards_transformations_before_resolving_identity() {
+        let transformer = TypeTransformer::<TestVisit>::default();
+        let ty = Type::unknown();
+        let result = transformer.visit_with_identity(
+            ty,
+            || {
+                assert_eq!(transformer.visit_stored_type(ty, || Type::Never), ty);
+                TypeIdentity::Other(ty)
+            },
+            || Type::Never,
+        );
+        assert_eq!(result, Type::Never);
+    }
 
     type Detector<'db> = CycleDetector<'db, TestVisit, u8, u8, 1>;
 
@@ -1480,6 +1699,40 @@ mod tests {
             panic!("expected `{name}` to be a type alias");
         };
         alias
+    }
+
+    #[test]
+    fn lambda_identities_preserve_runtime_classes() -> anyhow::Result<()> {
+        let mut db = setup_db();
+        db.write_dedented(
+            "/src/a.py",
+            r#"
+class Node[T]:
+    def __init__(self, value: T):
+        self.callback = lambda: (value, Node([value]).callback)
+
+callback = Node(0).callback
+"#,
+        )?;
+        let env = db.program_environment();
+        let file = system_path_to_file(&db, "/src/a.py")?;
+        let file = ProgramFile::new(&db, file, env.program(&db));
+        let Type::Callable(callback) = global_symbol(&db, file, "callback").place.expect_type()
+        else {
+            panic!("expected a callable");
+        };
+        let function = Type::Callable(callback);
+        let regular = Type::Callable(callback.into_regular(&db));
+        assert_matches!(
+            function.to_type_identity(&db),
+            TypeIdentity::GrowingLambda(..)
+        );
+        assert!(!function.may_share_type_identity(&db, regular));
+        assert_ne!(
+            function.to_type_identity(&db),
+            regular.to_type_identity(&db)
+        );
+        Ok(())
     }
 
     #[test]
@@ -1881,7 +2134,7 @@ class RecursivePropertySetter[T](Protocol):
                 || {
                     assert_eq!(
                         detector.try_visit(db, ConstantIdentityItem(2), |_| true, || 20),
-                        Err(ConstantIdentityItem(2))
+                        Err((ConstantIdentityItem(2), ConstantIdentityItem(1)))
                     );
                     10
                 }
@@ -1896,7 +2149,7 @@ class RecursivePropertySetter[T](Protocol):
                 || {
                     assert_eq!(
                         detector.try_visit(db, ConstantIdentityItem(4), |_| false, || 20),
-                        Err(ConstantIdentityItem(4))
+                        Err((ConstantIdentityItem(4), ConstantIdentityItem(3)))
                     );
                     10
                 }
@@ -1966,11 +2219,13 @@ class RecursivePropertySetter[T](Protocol):
         else {
             panic!("the first identity should be pending");
         };
-        let CycleDetectorVisit::Cycle(item) = detector.begin_visit(db, ConstantIdentityItem(2))
+        let CycleDetectorVisit::Cycle(item, previous) =
+            detector.begin_visit(db, ConstantIdentityItem(2))
         else {
             panic!("a different item with the same identity should form a cycle");
         };
         assert_eq!(item.0, 2);
+        assert_eq!(previous.0, 1);
         detector.finish_visit(pending, 1);
 
         let CycleDetectorVisit::Ready(seen) = detector.begin_visit(db, ConstantIdentityItem(1))

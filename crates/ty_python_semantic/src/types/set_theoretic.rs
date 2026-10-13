@@ -14,7 +14,7 @@ use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use crate::types::{
     ApplyTypeMappingVisitor, CycleKind, InstanceProjection, ProjectInstance, PromotionKind,
     PromotionMode, Type, TypeContext, TypeMapping, TypePair, TypeQualifiers, TypeQueryContext,
-    TypeWalk,
+    TypeRecursionContext, TypeTraversal, TypeWalk,
 };
 use crate::types::{TypeVarBoundOrConstraints, visitor};
 use crate::{Db, FxOrderSet};
@@ -466,9 +466,12 @@ impl<'db> UnionType<'db> {
                 self.recursively_defined(db),
             )
         } else {
-            self.map_leave_aliases(db, visitor.env, |element| {
-                element.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
-            })
+            self.map_leave_aliases_with_recursion(
+                db,
+                visitor.env,
+                Some(visitor.recursion_context()),
+                |element| element.apply_type_mapping_impl(db, type_mapping, tcx, visitor),
+            )
         }
     }
 
@@ -491,6 +494,16 @@ impl<'db> UnionType<'db> {
         self,
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
+        transform_fn: impl FnMut(&Type<'db>) -> Type<'db>,
+    ) -> Type<'db> {
+        self.map_leave_aliases_with_recursion(db, env, None, transform_fn)
+    }
+
+    fn map_leave_aliases_with_recursion(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        context: Option<&TypeRecursionContext<'db>>,
         mut transform_fn: impl FnMut(&Type<'db>) -> Type<'db>,
     ) -> Type<'db> {
         let elements = self.elements(db);
@@ -498,7 +511,9 @@ impl<'db> UnionType<'db> {
         while let Some((i, ty)) = iter.next() {
             let new_ty = transform_fn(ty);
             if &new_ty != ty {
-                let mut builder = UnionBuilder::new(db, env).unpack_aliases(false);
+                let mut builder = UnionBuilder::new(db, env)
+                    .unpack_aliases(false)
+                    .with_recursion_context(context);
                 for prev in &elements[..i] {
                     builder.add_in_place(*prev);
                 }
@@ -1309,7 +1324,9 @@ impl<'db> IntersectionType<'db> {
         if type_mapping.is_structural() {
             Type::Intersection(IntersectionType::new(db, positive, negative))
         } else {
-            let mut builder = IntersectionBuilder::new(db, visitor.env).positive_elements(positive);
+            let mut builder = IntersectionBuilder::new(db, visitor.env)
+                .with_recursion_context(Some(visitor.recursion_context()))
+                .positive_elements(positive);
             for element in &negative {
                 builder.add_negative_in_place(*element);
             }
@@ -1493,7 +1510,13 @@ impl<'db> IntersectionType<'db> {
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
     ) -> Type<'db> {
-        expand_intersection_typevars_and_newtypes(db, env, self.positive(db), self.negative(db))
+        expand_intersection_typevars_and_newtypes(
+            db,
+            env,
+            self.positive(db),
+            self.negative(db),
+            None,
+        )
     }
 
     pub fn iter_positive(self, db: &'db dyn Db) -> impl Iterator<Item = Type<'db>> {
@@ -1569,8 +1592,9 @@ fn expand_intersection_typevars_and_newtypes<'db>(
     env: &ProgramEnvironment<'db>,
     positive: &FxOrderSet<Type<'db>>,
     negative: &NegativeIntersectionElements<'db>,
+    context: Option<&TypeRecursionContext<'db>>,
 ) -> Type<'db> {
-    let mut builder = IntersectionBuilder::new(db, env);
+    let mut builder = IntersectionBuilder::new(db, env).with_recursion_context(context);
     for &element in positive {
         match element {
             Type::TypeVar(tvar) => match tvar.require_bound_or_constraints(db, env) {

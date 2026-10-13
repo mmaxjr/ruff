@@ -22,8 +22,9 @@ use crate::types::typevar::TypeVarDomain;
 use crate::types::{
     ApplyTypeMappingVisitor, CallableType, ClassBase, ClassLiteral, ClassType, CycleDetector,
     IntersectionType, KnownBoundMethodType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
-    MemberLookupPolicy, PropertyInstanceType, ProtocolInstanceType, SubclassOfInner,
-    SubclassOfType, TypeVarBoundOrConstraints, UnionType, UpcastPolicy,
+    MemberLookupPolicy, NominalInstanceType, PropertyInstanceType, ProtocolInstanceType,
+    SubclassOfInner, SubclassOfType, TypeRecursionContext, TypeVarBoundOrConstraints, UnionType,
+    UpcastPolicy,
 };
 use crate::{
     Db,
@@ -321,6 +322,20 @@ impl<'db> Type<'db> {
             inferable,
             TypeRelation::Subtyping,
         )
+    }
+
+    /// Continue a normalization check without losing its active signature expansions.
+    pub(super) fn is_subtype_of_with_recursion(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        target: Type<'db>,
+        context: Option<&TypeRecursionContext<'db>>,
+    ) -> bool {
+        let Some(context) = context else {
+            return self.is_subtype_of(db, env, target);
+        };
+        self.is_related_to_with_recursion(db, env, target, TypeRelation::Subtyping, context)
     }
 
     pub(super) fn when_constraint_set_subtype_of<'c>(
@@ -699,6 +714,63 @@ impl<'db> Type<'db> {
         is_redundant_with_impl(db, TypePair::new(db, program, self, other))
     }
 
+    /// Preserve active comparisons across normalization and signature expansion. Results from
+    /// this context remain local to the operation instead of entering the global query cache.
+    pub(super) fn is_redundant_with_recursion(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        other: Type<'db>,
+        context: Option<&TypeRecursionContext<'db>>,
+    ) -> bool {
+        let Some(context) = context else {
+            return self.is_redundant_with(db, env, other);
+        };
+        if self == other {
+            return true;
+        }
+        context.check_redundancy(db, env.program(db), self, other, || {
+            self.is_related_to_with_recursion(
+                db,
+                env,
+                other,
+                TypeRelation::Redundancy { pure: false },
+                context,
+            )
+        })
+    }
+
+    /// Compare types locally when the result depends on an enclosing normalization operation.
+    fn is_related_to_with_recursion(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        other: Type<'db>,
+        relation: TypeRelation,
+        context: &TypeRecursionContext<'db>,
+    ) -> bool {
+        context.compare_for_simplification(|| {
+            let constraints = ConstraintSetBuilder::new();
+            let relation_visitor = HasRelationToVisitor::default(&constraints);
+            let disjointness_visitor = IsDisjointVisitor::default(&constraints);
+            let signature_relation_visitor = SignatureRelationVisitor::default();
+            let materialization_visitor =
+                ApplyTypeMappingVisitor::new(env).with_recursion_context(Some(context));
+            TypeRelationChecker::new(
+                env,
+                relation,
+                &constraints,
+                TypeVarSet::None,
+                &relation_visitor,
+                &disjointness_visitor,
+                &signature_relation_visitor,
+                &materialization_visitor,
+            )
+            .check_type_pair(db, self, other)
+            .is_always_satisfied(db, env, TypeVarSet::None)
+        })
+    }
+
     /// Return `true` if `self` is redundant with `other` under the pure redundancy relation.
     ///
     /// Unlike [`Self::is_redundant_with`], this does not apply shortcuts intended for simplifying
@@ -968,6 +1040,38 @@ impl<'db> Type<'db> {
         checker.check_type_pair(db, self, other)
     }
 
+    /// Preserve the normalization context when proving that an intersection is empty.
+    pub(super) fn is_disjoint_from_with_recursion(
+        self,
+        db: &'db dyn Db,
+        env: &ProgramEnvironment<'db>,
+        other: Type<'db>,
+        context: Option<&TypeRecursionContext<'db>>,
+    ) -> bool {
+        let Some(context) = context else {
+            return self.is_disjoint_from(db, env, other);
+        };
+        context.compare_for_simplification(|| {
+            let constraints = ConstraintSetBuilder::new();
+            let relation_visitor = HasRelationToVisitor::default(&constraints);
+            let disjointness_visitor = IsDisjointVisitor::default(&constraints);
+            let signature_relation_visitor = SignatureRelationVisitor::default();
+            let materialization_visitor =
+                ApplyTypeMappingVisitor::new(env).with_recursion_context(Some(context));
+            DisjointnessChecker::new(
+                env,
+                &constraints,
+                TypeVarSet::None,
+                &relation_visitor,
+                &disjointness_visitor,
+                &signature_relation_visitor,
+                &materialization_visitor,
+            )
+            .check_type_pair(db, self, other)
+            .is_always_satisfied(db, env, TypeVarSet::None)
+        })
+    }
+
     /// Re-run a successful disjointness check with diagnostic context collection enabled.
     pub(crate) fn disjointness_error_context(
         self,
@@ -1100,6 +1204,19 @@ pub(super) struct TypeRelationChecker<'a, 'c, 'db> {
 }
 
 impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
+    /// Keep tuple element normalization inside this comparison's recursion context.
+    pub(super) fn project_nominal_class(
+        &self,
+        db: &'db dyn Db,
+        instance: NominalInstanceType<'db>,
+    ) -> ClassType<'db> {
+        instance.class_with_recursion(
+            db,
+            self.env,
+            self.materialization_visitor.recursion_context(),
+        )
+    }
+
     /// Create a relation checker that eagerly evaluates type variables.
     #[expect(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -1602,7 +1719,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         )
     }
 
-    fn with_recursion_guard(
+    pub(super) fn with_recursion_guard(
         &self,
         db: &'db dyn Db,
         source: Type<'db>,
@@ -1624,7 +1741,9 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 },
                 work,
             )
-            .unwrap_or_else(|item| self.recursive_type_pair_fallback(db, item.0, item.1))
+            .unwrap_or_else(|(item, previous)| {
+                self.recursive_type_pair_fallback(db, item.0, item.1, previous.0, previous.1)
+            })
     }
 
     fn recursive_type_pair_fallback(
@@ -1632,7 +1751,26 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         db: &'db dyn Db,
         source: Type<'db>,
         target: Type<'db>,
+        previous_source: Type<'db>,
+        previous_target: Type<'db>,
     ) -> ConstraintSet<'db, 'c> {
+        // An abstract cycle can still repeat the same obligation. Changes to a lambda's
+        // unused captures or default values do not change its callable signature.
+        let same_type = |current, previous| {
+            current == previous
+                || matches!((current, previous), (Type::Callable(current), Type::Callable(previous))
+                    if self.equivalent_lambda_inputs(db, current, previous))
+        };
+        if same_type(source, previous_source) && same_type(target, previous_target) {
+            return self.always();
+        }
+        // Growing captured arguments need not change the signature. In particular, a lambda
+        // can return another specialization of itself without ever returning a captured value.
+        if let (Type::Callable(source), Type::Callable(target)) = (source, target)
+            && self.equivalent_lambda_inputs(db, source, target)
+        {
+            return self.always();
+        }
         if let Some(nominally_satisfied) = self.try_check_nominal_protocol_cycle(db, source, target)
         {
             return nominally_satisfied;
@@ -1667,11 +1805,10 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             KnownClass::Type
                 .try_to_class_literal(db, env)
                 .is_some_and(|type_class| {
-                    instance.class(db, env).is_subclass_of(
-                        db,
-                        env,
-                        ClassType::NonGeneric(ClassLiteral::Static(type_class)),
-                    )
+                    instance.class_literal(db, env).iter_mro(db).any(|base| {
+                        matches!(base, ClassBase::Class(class)
+                            if class.class_literal(db) == ClassLiteral::Static(type_class))
+                    })
                 })
         })
     }
@@ -2107,11 +2244,8 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (
                 Type::KnownInstance(KnownInstanceType::MethodWrapper(wrapper)),
                 Type::NominalInstance(target_instance),
-            ) if target_instance
-                .class(db, env)
-                .is_known(db, wrapper.class(db)) =>
-            {
-                self.with_recursion_guard(db, source, target, |_| {
+            ) if target_instance.has_known_class(db, wrapper.class(db)) => self
+                .with_recursion_guard(db, source, target, |_| {
                     let Some(target_function) = target
                         .member_lookup_with_policy(
                             db,
@@ -2125,18 +2259,14 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                         return self.never();
                     };
                     self.check_type_pair(db, wrapper.wrapped(db), target_function)
-                })
-            }
+                }),
 
             // When checking `FunctoolsPartial <: functools.partial[T]`, we need to specialize
             // the nominal instance with the partial's return type so the check is precise.
             (
                 Type::KnownInstance(KnownInstanceType::FunctoolsPartial(partial)),
                 Type::NominalInstance(target_instance),
-            ) if target_instance
-                .class(db, env)
-                .is_known(db, KnownClass::FunctoolsPartial) =>
-            {
+            ) if target_instance.has_known_class(db, KnownClass::FunctoolsPartial) => {
                 let specialized = partial.partial(db).into_functools_partial_instance(db, env);
                 self.check_type_pair(db, specialized, target)
             }
@@ -2504,18 +2634,15 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 | Type::ModuleLiteral(_),
             ) => self.never(),
 
-            (Type::Callable(source_callable), Type::Callable(target_callable)) => self
-                .with_recursion_guard(db, source, target, |_| {
-                    self.check_callable_pair(db, source_callable, target_callable)
-                }),
+            (Type::Callable(source_callable), Type::Callable(target_callable)) => {
+                self.check_callable_pair(db, source_callable, target_callable)
+            }
 
             (
                 Type::Callable(source_callable),
                 Type::KnownInstance(KnownInstanceType::FunctoolsPartialCall(target_partial)),
             ) if self.relation.is_assignability() => {
-                self.with_recursion_guard(db, source, target, |_| {
-                    self.check_callable_pair(db, source_callable, target_partial.partial(db))
-                })
+                self.check_callable_pair(db, source_callable, target_partial.partial(db))
             }
 
             (_, Type::Callable(target_callable)) => {
@@ -2530,6 +2657,27 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                     } else {
                         target_callable
                     };
+                    // Function-like callables require a particular runtime class, independently
+                    // of their signatures. Check the class before looking up `__call__`: that
+                    // lookup can specialize an MRO containing the types being compared.
+                    if let (Type::NominalInstance(instance), Some(runtime_class)) =
+                        (source, target_callable.runtime_class(db))
+                        && !instance
+                            .class_literal(db, env)
+                            .iter_mro(db)
+                            .any(|base| match base {
+                                ClassBase::Class(class) => class.known(db) == Some(runtime_class),
+                                // An unknown base can supply the runtime class.
+                                ClassBase::Any
+                                | ClassBase::Dynamic(_)
+                                | ClassBase::Divergent(_) => true,
+                                ClassBase::Generic
+                                | ClassBase::Protocol
+                                | ClassBase::TypedDict(_) => false,
+                            })
+                    {
+                        return self.never();
+                    }
                     let Some(callables) = source.try_upcast_to_callable_with_policy(
                         db,
                         env,
@@ -2629,7 +2777,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                         && result.is_never_satisfied(db, env, self.inferable)
                         && let Type::NominalInstance(instance) = target
                     {
-                        match instance.class(db, env).known(db) {
+                        match instance.known_class(db) {
                             Some(KnownClass::Dict) => {
                                 context
                                     .push(ErrorContext::TypedDictNotAssignableToDict(typed_dict));
@@ -2675,7 +2823,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (Type::LiteralValue(literal), Type::NominalInstance(instance))
                 if let Some(value) = literal.as_string() =>
             {
-                let target_class = instance.class(db, env);
+                let target_class = instance.class_literal(db, env);
 
                 if target_class.is_known(db, KnownClass::Str) {
                     return self.always();
@@ -2686,7 +2834,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                         .iter_mro(db, None)
                         .filter_map(ClassBase::into_class)
                         .map(|class| class.class_literal(db))
-                        .contains(&target_class.class_literal(db))
+                        .contains(&target_class)
                 {
                     return self.never();
                 }
@@ -2711,7 +2859,11 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 KnownClass::Sequence
                     .to_specialized_class_type(db, env, &[spec])
                     .when_some_and(db, self.constraints, |sequence| {
-                        self.check_class_pair(db, sequence, target_class)
+                        self.check_class_pair(
+                            db,
+                            sequence,
+                            self.project_nominal_class(db, instance),
+                        )
                     })
             }
 
@@ -2722,7 +2874,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (Type::LiteralValue(literal), Type::NominalInstance(instance))
                 if let Some(value) = literal.as_bytes() =>
             {
-                let target_class = instance.class(db, env);
+                let target_class = instance.class_literal(db, env);
 
                 if target_class.is_known(db, KnownClass::Bytes) {
                     return self.always();
@@ -2733,7 +2885,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                         .iter_mro(db, None)
                         .filter_map(ClassBase::into_class)
                         .map(|class| class.class_literal(db))
-                        .contains(&target_class.class_literal(db))
+                        .contains(&target_class)
                 {
                     return self.never();
                 }
@@ -2757,7 +2909,11 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 KnownClass::Sequence
                     .to_specialized_class_type(db, env, &[spec])
                     .when_some_and(db, self.constraints, |sequence| {
-                        self.check_class_pair(db, sequence, target_class)
+                        self.check_class_pair(
+                            db,
+                            sequence,
+                            self.project_nominal_class(db, instance),
+                        )
                     })
             }
 
@@ -3191,6 +3347,19 @@ pub(super) struct DisjointnessChecker<'a, 'c, 'db> {
 }
 
 impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
+    /// Keep tuple element normalization inside this comparison's recursion context.
+    pub(super) fn project_nominal_class(
+        &self,
+        db: &'db dyn Db,
+        instance: NominalInstanceType<'db>,
+    ) -> ClassType<'db> {
+        instance.class_with_recursion(
+            db,
+            self.env,
+            self.materialization_visitor.recursion_context(),
+        )
+    }
+
     pub(super) fn new(
         env: &'a ProgramEnvironment<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
@@ -3314,7 +3483,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                             ty: other,
                         });
                         if let Type::NominalInstance(nominal) = other
-                            && nominal.class(db, env).is_final(db)
+                            && nominal.class_literal(db, env).is_final(db)
                         {
                             context.push(ErrorContext::FinalTypeMissingProtocolMembers {
                                 final_type: other,
@@ -3931,7 +4100,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             // (<https://github.com/rust-lang/rust/issues/129967>)
             (Type::ProtocolInstance(protocol), Type::NominalInstance(nominal))
             | (Type::NominalInstance(nominal), Type::ProtocolInstance(protocol))
-                if self.perform_expensive_checks && nominal.class(db, env).is_final(db) =>
+                if self.perform_expensive_checks && nominal.class_literal(db, env).is_final(db) =>
             {
                 nontrivial_check(self, || {
                     self.with_recursion_guard(db, left, right, |_| {
@@ -4074,7 +4243,11 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 nontrivial_check(self, || {
                     ConstraintSet::from_bool(
                         self.constraints,
-                        !special_form.is_instance_of(db, env, instance.class(db, env)),
+                        !special_form.is_instance_of(
+                            db,
+                            env,
+                            self.project_nominal_class(db, instance),
+                        ),
                     )
                 })
             }
@@ -4084,7 +4257,11 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 nontrivial_check(self, || {
                     ConstraintSet::from_bool(
                         self.constraints,
-                        !known_instance.is_instance_of(db, env, instance.class(db, env)),
+                        !known_instance.is_instance_of(
+                            db,
+                            env,
+                            self.project_nominal_class(db, instance),
+                        ),
                     )
                 })
             }
@@ -4096,27 +4273,27 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                         LiteralValueTypeKind::Int(_) => KnownClass::Int.when_subclass_of(
                             db,
                             env,
-                            instance.class(db, env),
+                            self.project_nominal_class(db, instance),
                             self.constraints,
                         ),
                         LiteralValueTypeKind::Bool(_) => KnownClass::Bool.when_subclass_of(
                             db,
                             env,
-                            instance.class(db, env),
+                            self.project_nominal_class(db, instance),
                             self.constraints,
                         ),
                         LiteralValueTypeKind::LiteralString | LiteralValueTypeKind::String(_) => {
                             KnownClass::Str.when_subclass_of(
                                 db,
                                 env,
-                                instance.class(db, env),
+                                self.project_nominal_class(db, instance),
                                 self.constraints,
                             )
                         }
                         LiteralValueTypeKind::Bytes(_) => KnownClass::Bytes.when_subclass_of(
                             db,
                             env,
-                            instance.class(db, env),
+                            self.project_nominal_class(db, instance),
                             self.constraints,
                         ),
                         LiteralValueTypeKind::Enum(enum_literal) => self
@@ -4148,7 +4325,12 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 // (it cannot be an instance of a `bool` subclass)
                 nontrivial_check(self, || {
                     KnownClass::Bool
-                        .when_subclass_of(db, env, instance.class(db, env), self.constraints)
+                        .when_subclass_of(
+                            db,
+                            env,
+                            self.project_nominal_class(db, instance),
+                            self.constraints,
+                        )
                         .negate(db, self.constraints)
                 })
             }
@@ -4210,7 +4392,12 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 nontrivial_check(self, || {
                     function
                         .runtime_class(db)
-                        .when_subclass_of(db, env, instance.class(db, env), self.constraints)
+                        .when_subclass_of(
+                            db,
+                            env,
+                            self.project_nominal_class(db, instance),
+                            self.constraints,
+                        )
                         .negate(db, self.constraints)
                 })
             }
@@ -4341,7 +4528,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             | (
                 Type::NominalInstance(nominal),
                 Type::Callable(_) | Type::DataclassDecorator(_) | Type::DataclassTransformer(_),
-            ) if self.perform_expensive_checks && nominal.class(db, env).is_final(db) => {
+            ) if self.perform_expensive_checks && nominal.class_literal(db, env).is_final(db) => {
                 nontrivial_check(self, || {
                     Type::NominalInstance(nominal)
                         .member_lookup_with_policy(
