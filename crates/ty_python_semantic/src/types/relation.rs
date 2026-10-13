@@ -15,7 +15,6 @@ use crate::types::constraints::{
 use crate::types::cyclic::{HasIdentity, PairVisitor, TypeIdentity};
 use crate::types::enums::is_single_member_enum;
 use crate::types::function::FunctionDecorators;
-use crate::types::recursive::TypeExpansionContext;
 use crate::types::relation_error::ErrorRelation;
 use crate::types::set_theoretic::RecursivelyDefined;
 use crate::types::signatures::{CallableSignature, ParametersKind, SignatureRelationVisitor};
@@ -35,6 +34,11 @@ use crate::{
         typevar::TypeVarSet,
     },
 };
+
+mod expansion;
+
+use expansion::GuardedDisjointness;
+pub(super) use expansion::GuardedRelation;
 
 /// A non-exhaustive enumeration of relations that can exist between types.
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -1771,7 +1775,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         db: &'db dyn Db,
         source: Type<'db>,
         target: Type<'db>,
-        work: impl FnOnce(&TypeExpansionContext<'_, '_, 'db>) -> ConstraintSet<'db, 'c>,
+        work: impl FnOnce(&GuardedRelation<'_, '_, '_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c> {
         let collect_context = self.is_context_collection_enabled();
         self.relation_visitor
@@ -1789,7 +1793,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 },
                 |expansion| {
                     let Some(key) = self.signature_comparison_key(db, source, target) else {
-                        return work(expansion);
+                        return work(&GuardedRelation::new(self, expansion));
                     };
                     let cached = self.relation_visitor.signatures.borrow().get(&key).copied();
                     if let Some(result) = cached
@@ -1798,7 +1802,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                     {
                         return result;
                     }
-                    let result = work(expansion);
+                    let result = work(&GuardedRelation::new(self, expansion));
                     self.relation_visitor
                         .signatures
                         .borrow_mut()
@@ -2043,40 +2047,14 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             }
 
             (Type::Recursive(source_recursive), _) => {
-                // Both comparing arguments and unfolding can revisit this pair.
-                self.with_recursion_guard(db, source, target, |expansion| {
-                    let by_arguments = if let Type::Recursive(target_recursive) = target {
-                        self.when_recursive_types_relate_by_arguments(
-                            db,
-                            source_recursive,
-                            target_recursive,
-                        )
-                    } else {
-                        self.never()
-                    };
-                    by_arguments.or(db, self.constraints, || {
-                        expansion
-                            .expand_recursive(db, source_recursive)
-                            .map(|source_unfolded| {
-                                self.check_type_pair(db, source_unfolded, target)
-                            })
-                            .unwrap_or(ConstraintSet::from_bool(
-                                self.constraints,
-                                self.relation.is_assignability(),
-                            ))
-                    })
+                self.with_recursion_guard(db, source, target, |comparison| {
+                    comparison.compare_source_recursive(db, source_recursive, target)
                 })
             }
 
             (_, Type::Recursive(target_recursive)) => {
-                self.with_recursion_guard(db, source, target, |expansion| {
-                    expansion
-                        .expand_recursive(db, target_recursive)
-                        .map(|target_unfolded| self.check_type_pair(db, source, target_unfolded))
-                        .unwrap_or(ConstraintSet::from_bool(
-                            self.constraints,
-                            self.relation.is_assignability(),
-                        ))
+                self.with_recursion_guard(db, source, target, |comparison| {
+                    comparison.compare_target_recursive(db, source, target_recursive)
                 })
             }
 
@@ -2089,14 +2067,14 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             }
 
             (Type::TypeAlias(source_alias), _) => {
-                self.with_recursion_guard(db, source, target, |_| {
-                    self.check_type_pair(db, source_alias.value_type(db, env), target)
+                self.with_recursion_guard(db, source, target, |comparison| {
+                    comparison.compare_source_alias(db, source_alias, target)
                 })
             }
 
             (_, Type::TypeAlias(target_alias)) => {
-                self.with_recursion_guard(db, source, target, |_| {
-                    self.check_type_pair(db, source, target_alias.value_type(db, env))
+                self.with_recursion_guard(db, source, target, |comparison| {
+                    comparison.compare_target_alias(db, source, target_alias)
                 })
             }
 
@@ -2648,20 +2626,15 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 ),
                 Type::FunctionLiteral(target_function),
             ) if matches!(self.relation, TypeRelation::Assignability) => {
-                self.with_recursion_guard(db, source, target, |expansion| {
-                    expansion
-                        .inspect_signatures(db, source_partial.partial(db), |source| {
-                            expansion
-                                .inspect_signatures(
-                                    db,
-                                    target_function.into_callable_type(db),
-                                    |target| self.check_callable_signature_pair(db, source, target),
-                                )
-                                .unwrap_or_else(|| self.never())
-                        })
-                        .unwrap_or_else(|| self.never())
+                self.with_recursion_guard(db, source, target, |comparison| {
+                    comparison.compare_signatures(
+                        db,
+                        source_partial.partial(db),
+                        target_function.into_callable_type(db),
+                    )
                 })
             }
+
             (Type::BoundMethod(source_method), Type::BoundMethod(target_method)) => {
                 self.check_bound_method_pair(db, source_method, target_method)
             }
@@ -3524,13 +3497,13 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
         db: &'db dyn Db,
         source: Type<'db>,
         target: Type<'db>,
-        work: impl FnOnce(&TypeExpansionContext<'_, '_, 'db>) -> ConstraintSet<'db, 'c>,
+        work: impl FnOnce(&GuardedDisjointness<'_, '_, '_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c> {
         self.disjointness_visitor.visit_with_expansion(
             db,
             (source, target),
             self.materialization_visitor,
-            work,
+            |expansion| work(&GuardedDisjointness::new(self, expansion)),
         )
     }
 
@@ -3708,34 +3681,26 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             (Type::Divergent(_), _) | (_, Type::Divergent(_)) => self.never(),
 
             (Type::Recursive(left_recursive), _) => {
-                self.with_recursion_guard(db, left, right, |expansion| {
-                    expansion
-                        .expand_recursive(db, left_recursive)
-                        .map(|left_unfolded| self.check_type_pair(db, left_unfolded, right))
-                        .unwrap_or(self.never())
+                self.with_recursion_guard(db, left, right, |comparison| {
+                    comparison.compare_source_recursive(db, left_recursive, right)
                 })
             }
 
             (_, Type::Recursive(right_recursive)) => {
-                self.with_recursion_guard(db, left, right, |expansion| {
-                    expansion
-                        .expand_recursive(db, right_recursive)
-                        .map(|right_unfolded| self.check_type_pair(db, left, right_unfolded))
-                        .unwrap_or(self.never())
+                self.with_recursion_guard(db, left, right, |comparison| {
+                    comparison.compare_target_recursive(db, left, right_recursive)
                 })
             }
 
             (Type::TypeAlias(alias), _) => nontrivial_check(self, || {
-                let left_alias_ty = alias.value_type(db, env);
-                self.with_recursion_guard(db, left, right, |_| {
-                    self.check_type_pair(db, left_alias_ty, right)
+                self.with_recursion_guard(db, left, right, |comparison| {
+                    comparison.compare_source_alias(db, alias, right)
                 })
             }),
 
             (_, Type::TypeAlias(alias)) => nontrivial_check(self, || {
-                let right_alias_ty = alias.value_type(db, env);
-                self.with_recursion_guard(db, left, right, |_| {
-                    self.check_type_pair(db, left, right_alias_ty)
+                self.with_recursion_guard(db, left, right, |comparison| {
+                    comparison.compare_target_alias(db, left, alias)
                 })
             }),
 

@@ -1583,7 +1583,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         db: &'db dyn Db,
         source: CallableType<'db>,
         target: CallableType<'db>,
-        expansion: &TypeExpansionContext<'_, '_, 'db>,
+        comparison: &super::relation::GuardedRelation<'_, '_, '_, 'c, 'db>,
     ) -> ConstraintSet<'db, 'c> {
         if target.runtime_class(db).is_some()
             && target.runtime_class(db) != source.runtime_class(db)
@@ -1593,15 +1593,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         if self.equivalent_lambda_inputs(db, source, target) {
             return self.always();
         }
-        expansion
-            .inspect_signatures(db, source, |source| {
-                expansion
-                    .inspect_signatures(db, target, |target| {
-                        self.check_callable_signature_pair(db, source, target)
-                    })
-                    .unwrap_or_else(|| self.never())
-            })
-            .unwrap_or_else(|| self.never())
+        comparison.compare_signatures(db, source, target)
     }
 
     pub(super) fn check_callables_vs_callable(

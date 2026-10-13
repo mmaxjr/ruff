@@ -87,8 +87,8 @@ use super::type_alias::AliasCycleSummary;
 use super::variance::{VarianceInferable, VarianceOrigin};
 use super::{
     ApplyTypeMappingVisitor, BoundTypeVarIdentity, CallableType, ClassLiteral, ClassType,
-    GenericContext, MaterializationKind, Type, TypeContext, TypeMapping, TypeRecursionContext,
-    TypedDictType, VarianceTerm,
+    GenericContext, MaterializationKind, Type, TypeContext, TypeMapping, TypedDictType,
+    VarianceTerm,
 };
 use crate::{Db, ProgramEnvironment};
 
