@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use itertools::{Either, Itertools};
 use ruff_db::{
     PythonFile,
@@ -141,7 +142,7 @@ impl<'db> FrozenDataclassDispatch<'db> {
     pub(crate) fn receiver(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         object_ty: Type<'db>,
     ) -> Type<'db> {
         match self {
@@ -301,9 +302,10 @@ impl<'db> StaticClassLiteral<'db> {
     pub(crate) fn has_ordering_method_in_mro(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> bool {
-        self.total_ordering_root_method(db, specialization)
+        self.total_ordering_root_method(db, env, specialization)
             .is_some()
     }
 
@@ -317,12 +319,13 @@ impl<'db> StaticClassLiteral<'db> {
     fn total_ordering_root_method(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Option<Type<'db>> {
         const ORDERING_METHODS: [&str; 4] = ["__lt__", "__le__", "__gt__", "__ge__"];
 
         for name in ORDERING_METHODS {
-            for base in self.iter_mro(db, specialization) {
+            for base in self.iter_mro_specialized(db, env, specialization) {
                 let Some(base_class) = base.into_class() else {
                     continue;
                 };
@@ -432,8 +435,13 @@ impl<'db> StaticClassLiteral<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> Option<GenericContext<'db>> {
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_scope(class.body_scope(db)),
+            );
             GenericContext::from_base_classes(
                 db,
+                &env,
                 class.definition(db),
                 class
                     .explicit_bases(db)
@@ -495,18 +503,18 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
     ) -> FxIndexSet<BoundTypeVarInstance<'db>> {
         struct CollectTypeVars<'a, 'db> {
-            env: &'a ProgramEnvironment<'db>,
+            env: &'a TypeOperations<'db>,
             typevars: RefCell<FxIndexSet<BoundTypeVarInstance<'db>>>,
             recursion_guard: TypeCollector<'db>,
         }
 
         impl<'db> TypeVisitor<'db> for CollectTypeVars<'_, 'db> {
-            fn program_environment(&self) -> &ProgramEnvironment<'db> {
+            fn program_environment(&self) -> &TypeOperations<'db> {
                 self.env
             }
 
-            fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-                None
+            fn should_visit_lazy_type_attributes(&self) -> bool {
+                false
             }
 
             fn visit_recursive_type(
@@ -538,7 +546,8 @@ impl<'db> StaticClassLiteral<'db> {
             }
         }
 
-        let env = ProgramEnvironment::from_scope(self.body_scope(db));
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
         let visitor = CollectTypeVars {
             env: &env,
             typevars: RefCell::default(),
@@ -610,7 +619,10 @@ impl<'db> StaticClassLiteral<'db> {
 
     pub(crate) fn top_materialization(self, db: &'db dyn Db) -> ClassType<'db> {
         self.apply_specialization(db, |generic_context| {
-            let env = ProgramEnvironment::from_program(generic_context.program(db));
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_program(generic_context.program(db)),
+            );
             generic_context
                 .unknown_specialization(db, self.known(db))
                 .materialize_impl(
@@ -708,8 +720,12 @@ impl<'db> StaticClassLiteral<'db> {
     }
 
     /// Iterate over the explicit bases that contribute to metaclass selection.
-    fn metaclass_bases(self, db: &'db dyn Db) -> impl Iterator<Item = ClassBase<'db>> {
-        let env = ProgramEnvironment::from_scope(self.body_scope(db));
+    fn metaclass_bases(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> impl Iterator<Item = ClassBase<'db>> {
+        let env = env.in_environment(ProgramEnvironment::from_scope(self.body_scope(db)));
         self.explicit_bases(db)
             .iter()
             .copied()
@@ -845,7 +861,7 @@ impl<'db> StaticClassLiteral<'db> {
     #[salsa::tracked(
         returns(as_ref),
         cycle_initial=|db, _, self_: StaticClassLiteral<'db>| {
-            let env = ProgramEnvironment::from_scope(self_.body_scope(db));
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self_.body_scope(db)));
             Err(Box::new(StaticMroError::cycle(
                 db, &env,
                 self_.apply_optional_specialization(db, None),
@@ -855,7 +871,9 @@ impl<'db> StaticClassLiteral<'db> {
     )]
     fn try_mro_unspecialized(self, db: &'db dyn Db) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
         tracing::trace!("StaticClassLiteral::try_mro: {}", self.name(db));
-        Mro::of_static_class(db, self, None).map_err(Box::new)
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        Mro::of_static_class(db, &env, self, None).map_err(Box::new)
     }
 
     /// Iterate over the [method resolution order] ("MRO") of the class.
@@ -866,24 +884,31 @@ impl<'db> StaticClassLiteral<'db> {
     /// cases rather than simply iterating over the inferred resolution order for the class.
     ///
     /// [method resolution order]: https://docs.python.org/3/glossary.html#term-method-resolution-order
-    pub(crate) fn iter_mro(
+    pub(crate) fn iter_mro(self, db: &'db dyn Db) -> MroIterator<'db> {
+        ClassLiteral::Static(self).iter_mro(db)
+    }
+
+    /// Apply type arguments to the declared ancestry within the caller's operation.
+    pub(crate) fn iter_mro_specialized(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> MroIterator<'db> {
-        MroIterator::new(db, ClassLiteral::Static(self), specialization)
+        MroIterator::new(db, env, ClassLiteral::Static(self), specialization)
     }
 
     /// Return `true` if `other` is present in this class's MRO.
     pub(super) fn is_subclass_of(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         other: ClassType<'db>,
     ) -> bool {
         // `is_subclass_of` is checking the subtype relation, in which gradual types do not
         // participate, so we should not return `True` if we find `Any/Unknown` in the MRO.
-        self.iter_mro(db, specialization)
+        self.iter_mro_specialized(db, env, specialization)
             .contains(&ClassBase::Class(other))
     }
 
@@ -920,15 +945,18 @@ impl<'db> StaticClassLiteral<'db> {
             return true;
         };
 
-        metaclass.iter_mro(db).any(|base| match base {
-            ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
-            ClassBase::Class(base) => base.static_class_literal(db).is_none_or(|(base, _)| {
-                implicit_attribute_names(db, base.body_scope(db))
-                    .binary_search(&Name::new_static("__getattribute__"))
-                    .is_ok()
-            }),
-            ClassBase::Generic | ClassBase::Protocol | ClassBase::TypedDict(_) => false,
-        })
+        metaclass
+            .class_literal(db)
+            .iter_mro(db)
+            .any(|base| match base {
+                ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
+                ClassBase::Class(base) => base.static_class_literal(db).is_none_or(|(base, _)| {
+                    implicit_attribute_names(db, base.body_scope(db))
+                        .binary_search(&Name::new_static("__getattribute__"))
+                        .is_ok()
+                }),
+                ClassBase::Generic | ClassBase::Protocol | ClassBase::TypedDict(_) => false,
+            })
     }
 
     /// Return the properties shared by all instances of this class.
@@ -943,7 +971,7 @@ impl<'db> StaticClassLiteral<'db> {
             class: StaticClassLiteral<'db>,
         ) -> ClassInstanceFlags {
             let mut flags = ClassInstanceFlags::empty();
-            for base in class.iter_mro(db, None) {
+            for base in class.iter_mro(db) {
                 match base {
                     ClassBase::Any => flags.insert(
                         ClassInstanceFlags::INHERITS_FROM_EXPLICIT_ANY
@@ -988,8 +1016,7 @@ impl<'db> StaticClassLiteral<'db> {
     /// Return the module defining the `TypedDict` base of this class.
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn typed_dict_module(self, db: &'db dyn Db) -> Option<TypingModule> {
-        self.iter_mro(db, None)
-            .find_map(ClassBase::typed_dict_module)
+        self.iter_mro(db).find_map(ClassBase::typed_dict_module)
     }
 
     /// Return `true` if this class constitutes a typed dict specification (inherits from
@@ -1009,7 +1036,7 @@ impl<'db> StaticClassLiteral<'db> {
     /// `typing.NamedTuple`, either directly or indirectly, including functional forms like
     /// `NamedTuple("X", ...)`).
     pub(crate) fn has_named_tuple_class_in_mro(self, db: &'db dyn Db) -> bool {
-        self.iter_mro(db, None)
+        self.iter_mro(db)
             .filter_map(ClassBase::into_class)
             .any(|base| match base.class_literal(db) {
                 ClassLiteral::DynamicNamedTuple(_) => true,
@@ -1134,16 +1161,19 @@ impl<'db> StaticClassLiteral<'db> {
     fn inherited_dataclass_transformer_params(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Option<DataclassTransformerParams<'db>> {
         self.dataclass_transformer_params(db).or_else(|| {
-            self.iter_mro(db, specialization).skip(1).find_map(|base| {
-                base.into_class().and_then(|class| {
-                    class
-                        .static_class_literal(db)
-                        .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
+            self.iter_mro_specialized(db, env, specialization)
+                .skip(1)
+                .find_map(|base| {
+                    base.into_class().and_then(|class| {
+                        class
+                            .static_class_literal(db)
+                            .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
+                    })
                 })
-            })
         })
     }
 
@@ -1207,11 +1237,12 @@ impl<'db> StaticClassLiteral<'db> {
         {
             let program_file = class.program_file(db);
             let python_file = program_file.python_file(db);
-            let env = ProgramEnvironment::from_file(program_file);
+            let env =
+                TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
             tracing::trace!("StaticClassLiteral::try_metaclass: {}", class.name(db));
 
             // Identify the class's own metaclass (or take the first base class's metaclass).
-            let mut base_classes = class.metaclass_bases(db).peekable();
+            let mut base_classes = class.metaclass_bases(db, &env).peekable();
 
             if (base_classes.peek().is_some() && class.inheritance_cycle(db).is_some())
                 || class.try_mro(db, None).is_err_and(StaticMroError::is_cycle)
@@ -1344,7 +1375,11 @@ impl<'db> StaticClassLiteral<'db> {
                 .metaclass
                 .static_class_literal(db)
                 .and_then(|(metaclass_literal, specialization)| {
-                    metaclass_literal.inherited_dataclass_transformer_params(db, specialization)
+                    metaclass_literal.inherited_dataclass_transformer_params(
+                        db,
+                        &env,
+                        specialization,
+                    )
                 })
                 .map(|params| MetaclassTransformInfo {
                     params,
@@ -1382,7 +1417,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn class_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -1392,7 +1427,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn class_member_inner(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
         policy: MemberLookupPolicy,
@@ -1414,12 +1449,12 @@ impl<'db> StaticClassLiteral<'db> {
                         env,
                         name,
                         policy,
-                        self.iter_mro(db, Some(specialization)),
+                        self.iter_mro_specialized(db, env, Some(specialization)),
                     )
                 }
                 _ => {
                     let member =
-                        self.class_member_from_mro(db, env, name, policy, self.iter_mro(db, None));
+                        self.class_member_from_mro(db, env, name, policy, self.iter_mro(db));
                     let specialization = generic_context.default_specialization(db, self.known(db));
                     // An inherited method's `Self` bound can still contain this class's type
                     // variables, so the default arguments must also specialize that bound.
@@ -1429,21 +1464,27 @@ impl<'db> StaticClassLiteral<'db> {
                 }
             }
         } else {
-            self.class_member_from_mro(db, env, name, policy, self.iter_mro(db, specialization))
+            self.class_member_from_mro(
+                db,
+                env,
+                name,
+                policy,
+                self.iter_mro_specialized(db, env, specialization),
+            )
         }
     }
 
     pub(crate) fn class_member_from_mro(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
         mro_iter: impl Iterator<Item = ClassBase<'db>>,
     ) -> PlaceAndQualifiers<'db> {
         fn into_function_like_callable<'d>(
             db: &'d dyn Db,
-            env: &ProgramEnvironment<'d>,
+            env: &TypeOperations<'d>,
             ty: Type<'d>,
         ) -> Type<'d> {
             match ty {
@@ -1507,14 +1548,14 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn own_class_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         inherited_generic_context: Option<GenericContext<'db>>,
         specialization: Option<Specialization<'db>>,
         name: &str,
     ) -> Member<'db> {
         fn into_dunder_paramspec_callable<'d>(
             db: &'d dyn Db,
-            env: &ProgramEnvironment<'d>,
+            env: &TypeOperations<'d>,
             ty: Type<'d>,
         ) -> Type<'d> {
             match ty {
@@ -1604,9 +1645,11 @@ impl<'db> StaticClassLiteral<'db> {
                     Type::FunctionLiteral(function),
                     Some(_),
                     "__new__" | "__init__",
-                ) => Type::FunctionLiteral(
-                    function.with_inherited_generic_context(db, generic_context),
-                ),
+                ) => Type::FunctionLiteral(function.with_inherited_generic_context(
+                    db,
+                    env,
+                    generic_context,
+                )),
                 _ => ty,
             }
         });
@@ -1678,7 +1721,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(crate) fn own_synthesized_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         inherited_generic_context: Option<GenericContext<'db>>,
         name: &str,
@@ -1695,7 +1738,7 @@ impl<'db> StaticClassLiteral<'db> {
         if self.total_ordering(db)
             && matches!(name, "__lt__" | "__le__" | "__gt__" | "__ge__")
             && !self
-                .iter_mro(db, specialization)
+                .iter_mro_specialized(db, env, specialization)
                 .filter_map(ClassBase::into_class)
                 .filter_map(|class| class.static_class_literal(db))
                 .filter(|(class, _)| !class.is_known(db, KnownClass::Object))
@@ -1704,8 +1747,8 @@ impl<'db> StaticClassLiteral<'db> {
                         .ignore_possibly_undefined()
                         .is_some()
                 })
-            && self.has_ordering_method_in_mro(db, specialization)
-            && let Some(root_method_ty) = self.total_ordering_root_method(db, specialization)
+            && self.has_ordering_method_in_mro(db, env, specialization)
+            && let Some(root_method_ty) = self.total_ordering_root_method(db, env, specialization)
             && let Some(callables) = root_method_ty.try_upcast_to_callable(db, env)
         {
             let bool_ty = KnownClass::Bool.to_instance(db, env);
@@ -1878,7 +1921,7 @@ impl<'db> StaticClassLiteral<'db> {
                     && let Some(metadata) = field_policy.pydantic_metadata()
                 {
                     field_ty = pydantic::constructor_parameter_type(
-                        db, self, field_name, field_ty, strict, metadata,
+                        db, env, self, field_name, field_ty, strict, metadata,
                     );
                 }
 
@@ -2213,7 +2256,7 @@ impl<'db> StaticClassLiteral<'db> {
     fn own_frozen_dataclass_subclass_method(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         method: FrozenDataclassMethod,
     ) -> Option<Type<'db>> {
@@ -2221,8 +2264,12 @@ impl<'db> StaticClassLiteral<'db> {
             return None;
         }
 
-        let frozen_base_fields =
-            self.inherited_non_slotted_frozen_dataclass_fields(db, specialization, method.name())?;
+        let frozen_base_fields = self.inherited_non_slotted_frozen_dataclass_fields(
+            db,
+            env,
+            specialization,
+            method.name(),
+        )?;
 
         let instance_ty = Type::instance(
             db,
@@ -2276,6 +2323,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(crate) fn inherited_frozen_dataclass_dispatch(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         method: &str,
         name: &str,
@@ -2289,7 +2337,7 @@ impl<'db> StaticClassLiteral<'db> {
         }
 
         let frozen_base_fields =
-            self.inherited_non_slotted_frozen_dataclass_fields(db, specialization, method)?;
+            self.inherited_non_slotted_frozen_dataclass_fields(db, env, specialization, method)?;
 
         if frozen_base_fields
             .names
@@ -2308,13 +2356,14 @@ impl<'db> StaticClassLiteral<'db> {
     fn inherited_non_slotted_frozen_dataclass_fields(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         method: &str,
     ) -> Option<InheritedFrozenDataclassFields<'db>> {
         let mut names = FxIndexSet::default();
         let mut last_frozen_base = None;
 
-        for base in self.iter_mro(db, specialization).skip(1) {
+        for base in self.iter_mro_specialized(db, env, specialization).skip(1) {
             let Some(base_class_type) = base.into_class() else {
                 break;
             };
@@ -2387,7 +2436,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(crate) fn typed_dict_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
         policy: MemberLookupPolicy,
@@ -2437,6 +2486,9 @@ impl<'db> StaticClassLiteral<'db> {
             DynamicTypedDict(DynamicTypedDictLiteral<'db>),
         }
 
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+
         debug_assert_ne!(
             field_policy,
             CodeGeneratorKind::NamedTuple,
@@ -2445,7 +2497,7 @@ impl<'db> StaticClassLiteral<'db> {
 
         let mut class_variables = FxIndexSet::default();
         let mut map: FxIndexMap<_, _> = self
-            .iter_mro(db, specialization)
+            .iter_mro_specialized(db, &env, specialization)
             .rev()
             .filter_map(|superclass| {
                 let class = superclass.into_class()?;
@@ -2633,7 +2685,8 @@ impl<'db> StaticClassLiteral<'db> {
         field_policy: CodeGeneratorKind<'db>,
     ) -> OwnClassFields<'db> {
         let class_body_scope = self.body_scope(db);
-        let env = ProgramEnvironment::from_scope(class_body_scope);
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class_body_scope));
         let table = place_table(db, class_body_scope);
 
         let use_def = use_def_map(db, class_body_scope);
@@ -2733,8 +2786,13 @@ impl<'db> StaticClassLiteral<'db> {
                 let mut converter = None;
                 let mut strict = pydantic::ConfigBoolean::Unspecified;
                 if field_policy.is_pydantic() {
-                    let metadata =
-                        pydantic::field_metadata(db, first_declaration, default_ty, specialization);
+                    let metadata = pydantic::field_metadata(
+                        db,
+                        &env,
+                        first_declaration,
+                        default_ty,
+                        specialization,
+                    );
                     default_ty = metadata.default_ty;
                     init = metadata.init;
                     alias = metadata.alias;
@@ -2898,7 +2956,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn instance_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
@@ -2906,7 +2964,9 @@ impl<'db> StaticClassLiteral<'db> {
             return Place::Undefined.into();
         }
 
-        match MroLookup::new(db, env, self.iter_mro(db, specialization)).instance_member(name) {
+        match MroLookup::new(db, env, self.iter_mro_specialized(db, env, specialization))
+            .instance_member(name)
+        {
             InstanceMemberResult::Done(result) => result,
             InstanceMemberResult::TypedDict => KnownClass::TypedDictFallback
                 .to_instance(db, env)
@@ -2933,7 +2993,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn own_instance_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> Member<'db> {
         // TODO: There are many things that are not yet implemented here:
@@ -3391,7 +3451,8 @@ fn expanded_fixed_length_starred_class_base_tuple<'db>(
     };
 
     let starred_ty = definition_expression_type(db, class_definition, &starred.value);
-    let env = ProgramEnvironment::from_definition(class_definition);
+    let env =
+        TypeOperations::for_inference(db, ProgramEnvironment::from_definition(class_definition));
     let Tuple::Fixed(tuple) = starred_ty.tuple_instance_spec(db, &env)?.into_owned() else {
         return None;
     };
@@ -3402,7 +3463,7 @@ impl<'db> VarianceInferable<'db> for StaticClassLiteral<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        _: &ProgramEnvironment<'db>,
+        _: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         VarianceTerm::variable(db, VarianceOrigin::Class(self), typevar)
@@ -3420,7 +3481,8 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        let env = ProgramEnvironment::from_scope(self.body_scope(db));
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
 
         if self.is_typed_dict(db) {
             return TypedDictType::new(self.identity_specialization(db))
@@ -3633,7 +3695,10 @@ fn explicit_bases_cycle_fn<'db>(
     literal: StaticClassLiteral<'db>,
 ) -> Box<[Type<'db>]> {
     if previous.len() == current.len() {
-        let env = ProgramEnvironment::from_scope(literal.body_scope(db));
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_scope(literal.body_scope(db)),
+        );
         // As long as the length of bases hasn't changed, use the same "monotonic widening"
         // strategy that we use with most types, to avoid oscillations.
         current

@@ -115,11 +115,9 @@ mod stable {
         forall types s, t, u. {
             let negated = s.negate(db, env);
             let mut cache = None;
-            crate::types::operations::TypeOperations::with_root(db, env, |ops| {
-                [t, u].into_iter().all(|target| {
-                    s.negation_is_subtype_of_cached(db, env, target, &mut cache, ops.context())
-                        == negated.is_subtype_of(db, env, target)
-                })
+            [t, u].into_iter().all(|target| {
+                s.negation_is_subtype_of_cached(db, env, target, &mut cache, env.context())
+                    == negated.is_subtype_of(db, env, target)
             })
         }
     );

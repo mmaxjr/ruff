@@ -1,5 +1,5 @@
 use crate::Db;
-use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use compact_str::CompactString;
 use ruff_python_ast::{self as ast, AnyNodeRef};
 
@@ -87,7 +87,7 @@ impl<'db> BinaryInferenceState<'db> {
     pub(super) fn try_map_union<E>(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         union: UnionType<'db>,
         mut transform: impl FnMut(Type<'db>, &mut Self) -> Result<Type<'db>, E>,
     ) -> Result<Type<'db>, E> {
@@ -114,7 +114,7 @@ impl<'db> BinaryInferenceState<'db> {
     fn limit_tuple_addition_result(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> Type<'db> {
         if !self.used_tuple_addition {
@@ -229,6 +229,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         } else {
             UnionTypeInstance::from_value_expression_types(
                 db,
+                env,
                 [left_ty, right_ty],
                 self.scope(),
                 self.typevar_binding_context,
@@ -402,7 +403,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     /// otherwise returns the union of all results.
     pub(super) fn map_constrained_typevar_constraints(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         typevar: Type<'db>,
         constraints: TypeVarConstraints<'db>,
         mut op: impl FnMut(Type<'db>) -> Option<Type<'db>>,
@@ -542,7 +543,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             (Type::TypeAlias(alias), rhs, _) => visitor.visit(db, (left_ty, op, right_ty), || {
                 self.infer_binary_expression_type_impl(
                     node,
-                    alias.value_type(db),
+                    alias.value_type(db, env),
                     rhs,
                     op,
                     visitor,
@@ -554,7 +555,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 self.infer_binary_expression_type_impl(
                     node,
                     lhs,
-                    alias.value_type(db),
+                    alias.value_type(db, env),
                     op,
                     visitor,
                     state,
@@ -1102,6 +1103,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 } else {
                     Some(UnionTypeInstance::from_value_expression_types(
                         db,
+                        env,
                         [left_ty, right_ty],
                         self.scope(),
                         self.typevar_binding_context,
@@ -1115,6 +1117,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             {
                 Some(UnionTypeInstance::from_value_expression_types(
                     db,
+                    env,
                     [left_ty, right_ty],
                     self.scope(),
                     self.typevar_binding_context,

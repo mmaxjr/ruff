@@ -325,7 +325,7 @@ fn check_non_generic_overload_implementation_consistency<'db>(
 
     let overload_signatures = overloads.iter().flat_map(|overload| {
         overload
-            .decorated_signatures(db)
+            .decorated_signatures(db, env)
             .map(move |signature| (overload, signature))
     });
 

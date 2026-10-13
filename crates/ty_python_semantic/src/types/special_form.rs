@@ -5,6 +5,7 @@ use super::{ClassType, Type, TypeFormType, TypingModule, class::KnownClass};
 use crate::ProgramEnvironment;
 use crate::db::Db;
 use crate::types::IntersectionType;
+use crate::types::TypeOperations;
 use crate::types::infer::InferenceFlags;
 use crate::types::{
     CallableType, FunctionDecorators, InvalidTypeExpression, TypeDefinition, TypeQualifiers,
@@ -135,7 +136,7 @@ pub enum SpecialFormType {
 
 impl SpecialFormType {
     /// Return the [`KnownClass`] which this symbol is an instance of
-    pub(crate) fn class(self, db: &dyn Db, env: &ProgramEnvironment<'_>) -> KnownClass {
+    pub(crate) fn class(self, db: &dyn Db, env: &TypeOperations<'_>) -> KnownClass {
         match self {
             Self::Union if env.python_version(db) >= PythonVersion::PY314 => KnownClass::Type,
 
@@ -193,7 +194,7 @@ impl SpecialFormType {
     pub(super) fn instance_fallback<'db>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         self.class(db, env).to_instance(db, env)
     }
@@ -215,7 +216,7 @@ impl SpecialFormType {
     pub(crate) fn type_form_argument<'db>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<Type<'db>> {
         match self {
             Self::Never | Self::NoReturn => Some(Type::Never),
@@ -242,11 +243,11 @@ impl SpecialFormType {
     }
 
     /// Return `true` if this symbol is an instance of `class`.
-    pub(super) fn is_instance_of(
+    pub(super) fn is_instance_of<'db>(
         self,
-        db: &dyn Db,
-        env: &ProgramEnvironment<'_>,
-        class: ClassType,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        class: ClassType<'db>,
     ) -> bool {
         self.class(db, env).is_subclass_of(db, env, class)
     }
@@ -558,11 +559,7 @@ impl SpecialFormType {
         }
     }
 
-    pub(super) fn to_meta_type<'db>(
-        self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-    ) -> Type<'db> {
+    pub(super) fn to_meta_type<'db>(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         self.class(db, env).to_class_literal(db, env)
     }
 
@@ -787,7 +784,7 @@ impl SpecialFormType {
     pub(super) fn definition<'db>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<TypeDefinition<'db>> {
         self.definition_modules()
             .iter()
@@ -814,11 +811,12 @@ impl SpecialFormType {
     pub(super) fn in_type_expression<'db>(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         scope_id: ScopeId<'db>,
         typevar_binding_context: Option<Definition<'db>>,
         inference_flags: InferenceFlags,
     ) -> Result<Type<'db>, InvalidTypeExpression<'db>> {
-        let env = ProgramEnvironment::from_scope(scope_id);
+        let env = env.in_environment(ProgramEnvironment::from_scope(scope_id));
         let env = &env;
         match self {
             Self::Never | Self::NoReturn => Ok(Type::Never),
@@ -859,7 +857,8 @@ impl SpecialFormType {
                     ));
                 };
 
-                let typing_self = typing_self(db, scope_id, typevar_binding_context, class.into());
+                let typing_self =
+                    typing_self(db, env, scope_id, typevar_binding_context, class.into());
 
                 let in_staticmethod = typing_self.is_some_and(|typing_self| {
                     let Some(binding_definition) = typing_self.binding_context(db).definition()

@@ -1,6 +1,7 @@
 //! Implicit instance and class attributes inferred from method assignments.
 
 use super::{MethodDecorator, static_literal::StaticClassLiteral};
+use crate::types::TypeOperations;
 use crate::{
     Db, ProgramEnvironment, TypeQualifiers, attribute_assignments, attribute_declarations,
     place::{Place, Provenance},
@@ -105,7 +106,7 @@ impl<'db> StaticClassLiteral<'db> {
         let target_method_decorator = attribute.target_method_decorator(db);
         let program_file = class_body_scope.program_file(db);
         let python_file = program_file.python_file(db);
-        let env = &ProgramEnvironment::from_file(program_file);
+        let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
         // If we do not see any declarations of an attribute, neither in the class body nor in
         // any method, we build a union of the raw types inferred from all bindings of that
@@ -369,7 +370,7 @@ fn implicit_attribute_binding_type<'db>(
     let program_file = definition.program_file(db);
     let module = parsed_module(db, program_file.python_file(db)).load(db);
     let index = semantic_index(db, program_file);
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     match definition.kind(db) {
         DefinitionKind::AnnotatedAssignment(_) => {
@@ -487,7 +488,10 @@ fn implicit_attribute_cycle_recover<'db>(
     attribute_member: ImplicitAttribute<'db>,
     attribute: ImplicitAttributeName<'db>,
 ) -> ImplicitAttribute<'db> {
-    let env = ProgramEnvironment::from_scope(attribute.class_body_scope(db));
+    let env = TypeOperations::for_inference(
+        db,
+        ProgramEnvironment::from_scope(attribute.class_body_scope(db)),
+    );
     let inner =
         attribute_member
             .member

@@ -1,14 +1,15 @@
 //! Bounded projections of correlated constraint solutions.
 
+use crate::types::TypeOperations;
 use rustc_hash::FxHashSet;
 
 use super::{
     CandidateSolutions, CandidateTypeVarSolution, ConstraintSet, PathBoundSolution, Solutions,
     TypeVarSolution,
 };
+use crate::Db;
 use crate::types::typevar::TypeVarSet;
 use crate::types::{Type, TypeVarVariance};
-use crate::{Db, ProgramEnvironment};
 
 /// Limits for one projection, including preprocessing, path collection, and its result.
 #[derive(Clone, Copy, Debug)]
@@ -73,14 +74,16 @@ impl ProjectionTypeBudget {
     pub(crate) fn charge_type<'db>(
         &mut self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> Result<(), ProjectionError> {
-        self.charge_type_inner(db, ty, &mut FxHashSet::default())
+        self.charge_type_inner(db, env, ty, &mut FxHashSet::default())
     }
 
     fn charge_type_inner<'db>(
         &mut self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         seen_aliases: &mut FxHashSet<Type<'db>>,
     ) -> Result<(), ProjectionError> {
@@ -91,7 +94,7 @@ impl ProjectionTypeBudget {
         match ty {
             Type::Union(union) => {
                 for element in union.elements(db) {
-                    self.charge_type_inner(db, *element, seen_aliases)?;
+                    self.charge_type_inner(db, env, *element, seen_aliases)?;
                 }
             }
             Type::Intersection(intersection) => {
@@ -99,11 +102,11 @@ impl ProjectionTypeBudget {
                     .iter_positive(db)
                     .chain(intersection.iter_negative(db))
                 {
-                    self.charge_type_inner(db, element, seen_aliases)?;
+                    self.charge_type_inner(db, env, element, seen_aliases)?;
                 }
             }
             Type::TypeAlias(alias) if seen_aliases.insert(ty) => {
-                self.charge_type_inner(db, alias.value_type(db), seen_aliases)?;
+                self.charge_type_inner(db, env, alias.value_type(db, env), seen_aliases)?;
             }
             _ => {}
         }
@@ -116,7 +119,7 @@ impl<'db> ConstraintSet<'db, '_> {
     pub(crate) fn solutions(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         inferable: TypeVarSet<'db>,
     ) -> Result<Solutions<'db>, ProjectionError> {
         let builder = self.builder;
@@ -132,7 +135,7 @@ impl<'db> ConstraintSet<'db, '_> {
     fn bounded_path_bounds(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         inferable: TypeVarSet<'db>,
         budget: SolutionBudget,
     ) -> Result<CandidateSolutions<'db>, ProjectionError> {
@@ -160,7 +163,7 @@ impl<'db> ConstraintSet<'db, '_> {
     pub(crate) fn solutions_with(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         inferable: TypeVarSet<'db>,
         budget: SolutionBudget,
         choose: impl FnMut(TypeVarVariance, &CandidateTypeVarSolution<'db>) -> PathBoundSolution<'db>,
@@ -170,11 +173,11 @@ impl<'db> ConstraintSet<'db, '_> {
         path_bounds.try_solve_with(choose, |solution| {
             for violation in solution.violations() {
                 for evidence in violation.evidence_types() {
-                    type_budget.charge_type(db, *evidence)?;
+                    type_budget.charge_type(db, env, *evidence)?;
                 }
             }
             for binding in &solution.solved_typevars {
-                type_budget.charge_type(db, binding.solution)?;
+                type_budget.charge_type(db, env, binding.solution)?;
             }
             Ok(())
         })
@@ -197,7 +200,7 @@ impl<'db> ConstraintSet<'db, '_> {
     pub(crate) fn try_fold_solutions<T>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         inferable: TypeVarSet<'db>,
         budget: SolutionBudget,
         choose: impl FnMut(TypeVarVariance, &CandidateTypeVarSolution<'db>) -> PathBoundSolution<'db>,

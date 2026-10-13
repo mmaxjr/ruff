@@ -1,5 +1,5 @@
 use std::{fmt, vec};
-use ty_python_semantic::ProgramEnvironment;
+use ty_python_semantic::TypeOperations;
 
 use crate::{Db, FxIndexMap, HasNavigationTargets, NavigationTarget};
 use ruff_db::parsed::parsed_module;
@@ -32,7 +32,7 @@ impl InlayHint {
         let InlayHintImportContext { db, file, importer } = context;
 
         let position = expr.range().end();
-        let env = ProgramEnvironment::from_file(file);
+        let env = TypeOperations::for_file(db, file);
         // Render the type to a string, and get subspans for all the types that make it up
         let details = ty.display(db, &env).to_string_parts();
 
@@ -691,7 +691,7 @@ impl<'a, 'db> DynamicImporter<'a, 'db> {
     fn import_symbol(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: &Type<'db>,
         module_name: &str,
         symbol_name: &str,

@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use std::cell::LazyCell;
 use std::fmt::Write;
 
@@ -212,7 +213,10 @@ impl<'db> CodeGeneratorKind<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> Option<CodeGeneratorKind<'db>> {
-            let env = ProgramEnvironment::from_scope(class.body_scope(db));
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_scope(class.body_scope(db)),
+            );
             // If a class is directly decorated as a dataclass, it's a dataclass.
             // If a class' metaclass is a dataclass transformer, it's a dataclass.
             // If a class inherits from a base class that is a dataclass
@@ -233,18 +237,18 @@ impl<'db> CodeGeneratorKind<'db> {
                 .is_none_or(|type_class| {
                     !class.is_subclass_of(
                         db,
+                        &env,
                         None,
                         ClassType::NonGeneric(ClassLiteral::Static(type_class)),
                     )
                 })
-                && let Some(transformer_params) =
-                    class.iter_mro(db, None).skip(1).find_map(|base| {
-                        base.into_class().and_then(|class| {
-                            class
-                                .static_class_literal(db)
-                                .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
-                        })
+                && let Some(transformer_params) = class.iter_mro(db).skip(1).find_map(|base| {
+                    base.into_class().and_then(|class| {
+                        class
+                            .static_class_literal(db)
+                            .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
                     })
+                })
             {
                 Some(CodeGeneratorKind::from_dataclass_transformer(
                     db,
@@ -444,7 +448,7 @@ impl<'db> GenericAlias<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -489,7 +493,7 @@ impl<'db> GenericAlias<'db> {
     pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'_, 'db>,
@@ -518,7 +522,7 @@ impl<'db> VarianceInferable<'db> for GenericAlias<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         match self.specialization(db).tuple(db) {
@@ -546,7 +550,7 @@ impl<'db> GenericAlias<'db> {
         returns(as_ref),
         cycle_initial=|db, _, alias: GenericAlias<'db>| {
             let origin = alias.origin(db);
-            let env = ProgramEnvironment::from_scope(origin.body_scope(db));
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(origin.body_scope(db)));
             Err(Box::new(StaticMroError::cycle(
                 db,
                 &env,
@@ -561,7 +565,11 @@ impl<'db> GenericAlias<'db> {
     ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
         let origin = self.origin(db);
         tracing::trace!("GenericAlias::try_mro: {}", origin.name(db));
-        Mro::of_static_class(db, origin, Some(self.specialization(db))).map_err(Box::new)
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_scope(origin.body_scope(db)),
+        );
+        Mro::of_static_class(db, &env, origin, Some(self.specialization(db))).map_err(Box::new)
     }
 
     /// Compose each type argument's variance with its formal parameter's variance. Inferred
@@ -578,7 +586,10 @@ impl<'db> GenericAlias<'db> {
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         let origin = self.origin(db);
-        let env = ProgramEnvironment::from_file(origin.program_file(db));
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_file(origin.program_file(db)),
+        );
 
         let specialization = self.specialization(db);
 
@@ -643,7 +654,7 @@ impl<'db> ClassLiteral<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -688,7 +699,9 @@ impl<'db> ClassLiteral<'db> {
 
     /// Returns an iterator over the MRO.
     pub(crate) fn iter_mro(self, db: &'db dyn Db) -> MroIterator<'db> {
-        MroIterator::new(db, self, None)
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_file(self.program_file(db)));
+        MroIterator::new(db, &env, self, None)
     }
 
     /// Return the properties shared by all instances of this class.
@@ -750,7 +763,7 @@ impl<'db> ClassLiteral<'db> {
     pub(crate) fn class_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -769,7 +782,7 @@ impl<'db> ClassLiteral<'db> {
     pub(super) fn class_member_from_mro(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
         mro_iter: impl Iterator<Item = ClassBase<'db>>,
@@ -857,7 +870,7 @@ impl<'db> ClassLiteral<'db> {
     pub(crate) fn metaclass_instance_type(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         metaclass_instance_type(db, env, self.metaclass(db))
     }
@@ -1017,10 +1030,14 @@ impl<'db> ClassLiteral<'db> {
     ///     class Foo(int, X): ...
     /// TypeError: multiple bases have instance lay-out conflict
     /// ```
-    fn as_disjoint_base(self, db: &'db dyn Db) -> Option<DisjointBase<'db>> {
+    fn as_disjoint_base(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<DisjointBase<'db>> {
         match self {
             Self::Static(class) => class.as_disjoint_base(db),
-            Self::Dynamic(class) => class.as_disjoint_base(db),
+            Self::Dynamic(class) => class.as_disjoint_base(db, env),
             // Dynamic namedtuples define `__slots__ = ()`, but `__slots__` must be
             // non-empty for a class to be a disjoint base.
             // Dynamic TypedDicts don't define `__slots__`.
@@ -1032,7 +1049,7 @@ impl<'db> ClassLiteral<'db> {
     pub(crate) fn to_non_generic_instance(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         match self {
             Self::Static(class) => class.to_non_generic_instance(db),
@@ -1071,7 +1088,7 @@ impl<'db> ClassLiteral<'db> {
     pub(crate) fn instance_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
@@ -1099,7 +1116,7 @@ impl<'db> ClassLiteral<'db> {
     pub(crate) fn typed_dict_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
         policy: MemberLookupPolicy,
@@ -1137,7 +1154,10 @@ impl<'db> ClassLiteral<'db> {
             Self::Static(static_class) => static_class.explicit_bases(db).into(),
             Self::Dynamic(dynamic_class) => dynamic_class.explicit_bases(db).into(),
             Self::DynamicNamedTuple(namedtuple) => {
-                let env = ProgramEnvironment::from_scope(namedtuple.scope(db));
+                let env = TypeOperations::for_inference(
+                    db,
+                    ProgramEnvironment::from_scope(namedtuple.scope(db)),
+                );
                 [Type::from(namedtuple.tuple_base_class(db, &env))].into()
             }
             Self::DynamicTypedDict(_) => {
@@ -1215,7 +1235,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -1284,6 +1304,7 @@ impl<'db> ClassType<'db> {
     pub(crate) fn static_class_literal_specialized(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         additional_specialization: Option<Specialization<'db>>,
     ) -> Option<(StaticClassLiteral<'db>, Option<Specialization<'db>>)> {
         match self {
@@ -1298,11 +1319,11 @@ impl<'db> ClassType<'db> {
                 let origin = generic.origin(db);
                 Some((
                     origin,
-                    Some(
-                        generic
-                            .specialization(db)
-                            .apply_optional_specialization(db, additional_specialization),
-                    ),
+                    Some(generic.specialization(db).apply_optional_specialization(
+                        db,
+                        env,
+                        additional_specialization,
+                    )),
                 ))
             }
         }
@@ -1331,8 +1352,12 @@ impl<'db> ClassType<'db> {
     }
 
     /// Return `Some` if this class is known to be a [`DisjointBase`], or `None` if it is not.
-    fn as_disjoint_base(self, db: &'db dyn Db) -> Option<DisjointBase<'db>> {
-        self.class_literal(db).as_disjoint_base(db)
+    fn as_disjoint_base(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<DisjointBase<'db>> {
+        self.class_literal(db).as_disjoint_base(db, env)
     }
 
     /// Return `true` if this class represents `known_class`
@@ -1356,7 +1381,8 @@ impl<'db> ClassType<'db> {
         db: &'db dyn Db,
         class_literal: ClassLiteral<'db>,
     ) -> bool {
-        self.iter_mro(db)
+        self.class_literal(db)
+            .iter_mro(db)
             .filter_map(ClassBase::into_class)
             .any(|base| base.class_literal(db) == class_literal)
     }
@@ -1379,7 +1405,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'_, 'db>,
@@ -1400,11 +1426,12 @@ impl<'db> ClassType<'db> {
     /// cases rather than simply iterating over the inferred resolution order for the class.
     ///
     /// [method resolution order]: https://docs.python.org/3/glossary.html#term-method-resolution-order
-    pub(super) fn iter_mro(self, db: &'db dyn Db) -> MroIterator<'db> {
+    pub(super) fn iter_mro(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> MroIterator<'db> {
         match self {
             Self::NonGeneric(class) => class.iter_mro(db),
             Self::Generic(generic) => MroIterator::new(
                 db,
+                env,
                 ClassLiteral::Static(generic.origin(db)),
                 Some(generic.specialization(db)),
             ),
@@ -1416,20 +1443,22 @@ impl<'db> ClassType<'db> {
     pub(super) fn iter_mro_specialized(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         additional_specialization: Option<Specialization<'db>>,
     ) -> MroIterator<'db> {
         match self {
-            Self::NonGeneric(class) => MroIterator::new(db, class, None),
+            Self::NonGeneric(class) => MroIterator::new(db, env, class, None),
             Self::Generic(generic) => {
                 let origin = generic.origin(db);
                 MroIterator::new(
                     db,
+                    env,
                     ClassLiteral::Static(origin),
-                    Some(
-                        generic
-                            .specialization(db)
-                            .apply_optional_specialization(db, additional_specialization),
-                    ),
+                    Some(generic.specialization(db).apply_optional_specialization(
+                        db,
+                        env,
+                        additional_specialization,
+                    )),
                 )
             }
         }
@@ -1456,7 +1485,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn iter_explicit_ancestors(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> impl Iterator<Item = Self> {
         let mut pending = vec![self];
         let mut seen = FxHashSet::default();
@@ -1469,7 +1498,7 @@ impl<'db> ClassType<'db> {
                 let (literal, specialization) = class.class_literal_and_specialization(db);
                 pending.extend(literal.explicit_bases(db).iter().rev().filter_map(|base| {
                     ClassBase::try_from_explicit_base(db, env, *base, Some(literal))?
-                        .apply_optional_specialization(db, specialization)
+                        .apply_optional_specialization(db, env, specialization)
                         .into_class()
                 }));
                 return Some(class);
@@ -1485,7 +1514,8 @@ impl<'db> ClassType<'db> {
     /// Returns `true` if any class in this class's MRO (excluding `object`) defines an ordering
     /// method (`__lt__`, `__le__`, `__gt__`, `__ge__`). Used by `@total_ordering` validation.
     pub(super) fn has_ordering_method_in_mro(self, db: &'db dyn Db) -> bool {
-        self.iter_mro(db)
+        self.class_literal(db)
+            .iter_mro(db)
             .filter_map(ClassBase::into_class)
             .filter(|class| !class.is_object(db))
             .any(|class| class.class_literal(db).has_own_ordering_method(db))
@@ -1495,7 +1525,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn is_subclass_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: ClassType<'db>,
     ) -> bool {
         self.has_relation_to(db, env, target, TypeRelation::Subtyping)
@@ -1508,7 +1538,7 @@ impl<'db> ClassType<'db> {
     fn has_relation_to(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Self,
         relation: TypeRelation,
     ) -> bool {
@@ -1543,7 +1573,7 @@ impl<'db> ClassType<'db> {
     fn most_derived_metaclass(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Self,
     ) -> Option<Type<'db>> {
         if self.is_subclass_of(db, env, other) {
@@ -1579,12 +1609,7 @@ impl<'db> ClassType<'db> {
     ///
     /// Making `Root` inherit `Right` would create a cycle. An unknown base introduced outside
     /// their shared ancestry can still make `Left` inherit `Right`.
-    fn could_inherit_from(
-        self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        target: Self,
-    ) -> bool {
+    fn could_inherit_from(self, db: &'db dyn Db, env: &TypeOperations<'db>, target: Self) -> bool {
         if target.is_final(db)
             || !self.has_relation_to(db, env, target, TypeRelation::Assignability)
         {
@@ -1598,12 +1623,12 @@ impl<'db> ClassType<'db> {
         }
 
         let target_ancestors: FxIndexSet<_> = target
-            .iter_mro(db)
+            .iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .map(|class| class.class_literal(db))
             .collect();
 
-        self.iter_mro(db)
+        self.iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .map(|class| class.class_literal(db))
             .filter(|class| !target_ancestors.contains(class))
@@ -1642,20 +1667,25 @@ impl<'db> ClassType<'db> {
         heap_size=ruff_memory_usage::heap_size
     )]
     pub(super) fn nearest_disjoint_base(self, db: &'db dyn Db) -> Option<DisjointBase<'db>> {
-        self.iter_mro(db)
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
+        );
+        self.class_literal(db)
+            .iter_mro(db)
             .filter_map(ClassBase::into_class)
-            .find_map(|base| base.as_disjoint_base(db))
+            .find_map(|base| base.as_disjoint_base(db, &env))
     }
 
     /// Return `true` if this class could exist in the MRO of `other`.
     fn could_exist_in_mro_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Self,
         constraints: &ConstraintSetBuilder<'db>,
     ) -> bool {
-        self.could_exist_in_mro_of_impl(db, other, |this, other| {
+        self.could_exist_in_mro_of_impl(db, env, other, |this, other| {
             this.is_disjoint_from(db, env, other, constraints, TypeVarSet::None)
                 .is_always_satisfied(db, env, TypeVarSet::None)
         })
@@ -1666,11 +1696,11 @@ impl<'db> ClassType<'db> {
     pub(super) fn could_exist_in_mro_of_with_disjointness_checker<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Self,
         checker: &DisjointnessChecker<'_, 'c, 'db>,
     ) -> bool {
-        self.could_exist_in_mro_of_impl(db, other, |this, other| {
+        self.could_exist_in_mro_of_impl(db, env, other, |this, other| {
             checker
                 .check_specialization_pair(db, this, other)
                 .is_always_satisfied(db, env, checker.inferable)
@@ -1680,11 +1710,12 @@ impl<'db> ClassType<'db> {
     fn could_exist_in_mro_of_impl(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         other: Self,
         specializations_are_disjoint: impl Fn(Specialization<'db>, Specialization<'db>) -> bool,
     ) -> bool {
         other
-            .iter_mro(db)
+            .iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .any(|class| match (self, class) {
                 (ClassType::NonGeneric(this_class), ClassType::NonGeneric(other_class)) => {
@@ -1705,16 +1736,17 @@ impl<'db> ClassType<'db> {
     fn has_incompatible_generic_base(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         other: Self,
         specializations_are_disjoint: impl Fn(Specialization<'db>, Specialization<'db>) -> bool,
     ) -> bool {
         let other_generic_bases: Vec<_> = other
-            .iter_mro(db)
+            .iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .filter_map(ClassType::into_generic_alias)
             .collect();
 
-        self.iter_mro(db)
+        self.iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .filter_map(ClassType::into_generic_alias)
             .any(|self_alias| {
@@ -1736,7 +1768,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn could_coexist_in_mro_with(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Self,
         constraints: &ConstraintSetBuilder<'db>,
     ) -> bool {
@@ -1760,7 +1792,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn could_coexist_in_mro_with_disjointness_checker<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Self,
         checker: &DisjointnessChecker<'_, 'c, 'db>,
     ) -> bool {
@@ -1791,7 +1823,7 @@ impl<'db> ClassType<'db> {
     fn could_coexist_in_mro_with_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Self,
         context: Option<&ErrorContextTree<'db>>,
         could_exist_in_mro_of: impl Fn(Self, Self) -> bool,
@@ -1825,7 +1857,7 @@ impl<'db> ClassType<'db> {
         }
 
         // A class cannot implement two incompatible specializations of an invariant base.
-        if self.has_incompatible_generic_base(db, other, specializations_are_disjoint) {
+        if self.has_incompatible_generic_base(db, env, other, specializations_are_disjoint) {
             return false;
         }
 
@@ -1882,7 +1914,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn metaclass_instance_type(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         metaclass_instance_type(db, env, self.metaclass(db))
     }
@@ -1895,7 +1927,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn class_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -1925,7 +1957,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn own_class_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         inherited_generic_context: Option<GenericContext<'db>>,
         name: &str,
     ) -> Member<'db> {
@@ -1945,10 +1977,10 @@ impl<'db> ClassType<'db> {
                 return dynamic.own_class_member(db, name);
             }
             Self::NonGeneric(ClassLiteral::DynamicNamedTuple(namedtuple)) => {
-                return namedtuple.own_class_member(db, name);
+                return namedtuple.own_class_member(db, env, name);
             }
             Self::NonGeneric(ClassLiteral::DynamicTypedDict(typeddict)) => {
-                return typeddict.own_class_member(db, name);
+                return typeddict.own_class_member(db, env, name);
             }
             Self::NonGeneric(ClassLiteral::DynamicEnum(enum_lit)) => {
                 return enum_lit.own_class_member(db, name);
@@ -1959,7 +1991,7 @@ impl<'db> ClassType<'db> {
 
         let fallback_member_lookup = || {
             let specialization = specialization
-                .map(|specialization| specialization.tuple_runtime_element_specialization(db));
+                .map(|specialization| specialization.tuple_runtime_element_specialization(db, env));
             class_literal
                 .own_class_member(db, env, inherited_generic_context, specialization, name)
                 .map_type(|ty| ty.apply_optional_owner_specialization_to_member(db, specialization))
@@ -2249,7 +2281,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn instance_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
         match self {
@@ -2319,7 +2351,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn own_instance_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> Member<'db> {
         match self {
@@ -2405,7 +2437,10 @@ impl<'db> ClassType<'db> {
         db: &'db dyn Db,
         receiver: Type<'db>,
     ) -> CallableTypes<'db> {
-        let env = &ProgramEnvironment::from_file(self.class_literal(db).program_file(db));
+        let env = &TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
+        );
         // TODO: This mimics a lot of the logic in Type::try_call_from_constructor. Can we
         // consolidate the two? Can we invoke a class by upcasting the class into a Callable, and
         // then relying on the call binding machinery to Just Work™?
@@ -2592,8 +2627,11 @@ impl<'db> ClassType<'db> {
                 }) = new_function_symbol
                 {
                     if let Some(class_generic_context) = class_generic_context {
-                        new_function =
-                            new_function.with_inherited_generic_context(db, class_generic_context);
+                        new_function = new_function.with_inherited_generic_context(
+                            db,
+                            env,
+                            class_generic_context,
+                        );
                     }
                     if let Some(callable) = new_function
                         .into_bound_method_type(db, instance_type)
@@ -2667,7 +2705,7 @@ impl<'db> VarianceInferable<'db> for ClassType<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         match self {
@@ -2723,15 +2761,14 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         // specialize only an ancestor that matches the target. Specializing the entire MRO can
         // otherwise compare recursive type arguments before this relation can reject the class.
         let source = source.identity_specialization(db);
-        let visitor = ApplyTypeMappingVisitor::new(self.env)
-            .with_recursion_context(self.materialization_visitor.recursion_context());
+        let visitor = ApplyTypeMappingVisitor::new(self.env);
         let specialize = |specialization: Specialization<'db>| {
             specializations
                 .0
                 .map_or(specialization, |source_specialization| {
                     specialization.apply_specialization_impl(
                         db,
-                        source_specialization.tuple_runtime_element_specialization(db),
+                        source_specialization.tuple_runtime_element_specialization(db, self.env),
                         false,
                         &visitor,
                     )
@@ -2739,50 +2776,54 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         };
 
         let mut generic_target = None;
-        let result = source.iter_mro(db).when_any(db, self.constraints, |base| {
-            match base {
-                ClassBase::Any => ConstraintSet::from_bool(
-                    self.constraints,
-                    self.relation.is_assignability() || target.is_known(db, KnownClass::Object),
-                ),
-                ClassBase::Dynamic(_) | ClassBase::Divergent(_) => match self.relation {
-                    TypeRelation::Subtyping | TypeRelation::Redundancy { .. } => {
-                        ConstraintSet::from_bool(
-                            self.constraints,
-                            target.is_known(db, KnownClass::Object),
-                        )
-                    }
-                    TypeRelation::Assignability => {
-                        ConstraintSet::from_bool(self.constraints, !target.is_final(db))
-                    }
-                },
+        let result = source
+            .iter_mro(db, self.env)
+            .when_any(db, self.constraints, |base| {
+                match base {
+                    ClassBase::Any => ConstraintSet::from_bool(
+                        self.constraints,
+                        self.relation.is_assignability() || target.is_known(db, KnownClass::Object),
+                    ),
+                    ClassBase::Dynamic(_) | ClassBase::Divergent(_) => match self.relation {
+                        TypeRelation::Subtyping | TypeRelation::Redundancy { .. } => {
+                            ConstraintSet::from_bool(
+                                self.constraints,
+                                target.is_known(db, KnownClass::Object),
+                            )
+                        }
+                        TypeRelation::Assignability => {
+                            ConstraintSet::from_bool(self.constraints, !target.is_final(db))
+                        }
+                    },
 
-                // Protocol, Generic, and TypedDict are special bases that don't match ClassType.
-                ClassBase::Protocol | ClassBase::Generic | ClassBase::TypedDict(_) => self.never(),
-
-                ClassBase::Class(source) if source.class_literal(db) != target => self.never(),
-
-                ClassBase::Class(source) => match (source, specializations.1) {
-                    // Two non-generic classes match if they have the same class literal.
-                    (ClassType::NonGeneric(_), None) => self.always(),
-
-                    // Two generic classes match if they have the same origin and compatible specializations.
-                    (ClassType::Generic(source), Some(target)) => {
-                        generic_target = Some(target);
-                        self.check_specialization_pair(
-                            db,
-                            specialize(source.specialization(db)),
-                            target,
-                        )
-                    }
-
-                    // Generic and non-generic classes don't match.
-                    (ClassType::Generic(_), None) | (ClassType::NonGeneric(_), Some(_)) => {
+                    // Protocol, Generic, and TypedDict are special bases that don't match ClassType.
+                    ClassBase::Protocol | ClassBase::Generic | ClassBase::TypedDict(_) => {
                         self.never()
                     }
-                },
-            }
-        });
+
+                    ClassBase::Class(source) if source.class_literal(db) != target => self.never(),
+
+                    ClassBase::Class(source) => match (source, specializations.1) {
+                        // Two non-generic classes match if they have the same class literal.
+                        (ClassType::NonGeneric(_), None) => self.always(),
+
+                        // Two generic classes match if they have the same origin and compatible specializations.
+                        (ClassType::Generic(source), Some(target)) => {
+                            generic_target = Some(target);
+                            self.check_specialization_pair(
+                                db,
+                                specialize(source.specialization(db)),
+                                target,
+                            )
+                        }
+
+                        // Generic and non-generic classes don't match.
+                        (ClassType::Generic(_), None) | (ClassType::NonGeneric(_), Some(_)) => {
+                            self.never()
+                        }
+                    },
+                }
+            });
 
         let Some(target_specialization) = generic_target else {
             return result;
@@ -2931,7 +2972,7 @@ impl<'db> VarianceInferable<'db> for ClassLiteral<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         match self {
@@ -2951,13 +2992,13 @@ impl<'db> VarianceInferable<'db> for ClassLiteral<'db> {
 /// use this to avoid duplicating the MRO traversal logic.
 pub(super) struct MroLookup<'db, I> {
     db: &'db dyn Db,
-    env: ProgramEnvironment<'db>,
+    env: TypeOperations<'db>,
     mro_iter: I,
 }
 
 impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
     /// Create a new MRO lookup from a database and an MRO iterator.
-    pub(super) fn new(db: &'db dyn Db, env: &ProgramEnvironment<'db>, mro_iter: I) -> Self {
+    pub(super) fn new(db: &'db dyn Db, env: &TypeOperations<'db>, mro_iter: I) -> Self {
         Self {
             db,
             env: env.clone(),
@@ -3037,7 +3078,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
     /// nested placeholders in genuinely expanding recursive types such as the tuple above.
     fn infer_augmented_bindings(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         bindings: &[(ClassType<'db>, AugmentedBindings<'db>)],
     ) -> (Type<'db>, Provenance<'db>) {
         let mut union = UnionBuilder::new(db, env);
@@ -3374,7 +3415,7 @@ pub(super) struct CompletedMemberLookup<'db> {
 
 impl<'db> CompletedMemberLookup<'db> {
     /// Finalize the lookup result by handling dynamic type intersection.
-    fn finalize(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> PlaceAndQualifiers<'db> {
+    fn finalize(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> PlaceAndQualifiers<'db> {
         match (
             PlaceAndQualifiers::from(self.lookup_result),
             self.dynamic_type,
@@ -3551,7 +3592,7 @@ pub(super) enum DisjointBaseKind {
 /// their metaclass is unknown, but they are still class objects.
 pub(super) fn metaclass_instance_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     metaclass: Type<'db>,
 ) -> Type<'db> {
     let instance = metaclass
@@ -3606,11 +3647,7 @@ impl<'db> ClassMetaclass<'db> {
     }
 
     /// Return the metaclass guaranteed by class declarations, without the typeshed fallback.
-    pub(super) fn for_inheritance(
-        self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-    ) -> Type<'db> {
+    pub(super) fn for_inheritance(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         match self {
             Self::Selected(metaclass) => metaclass,
             Self::ProtocolFallback => KnownClass::Type.to_class_literal(db, env),

@@ -1,6 +1,7 @@
 use crate::Db;
 use crate::FxIndexMap;
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use std::collections::VecDeque;
 use std::ops::Deref;
 
@@ -54,6 +55,7 @@ impl<'db> Mro<'db> {
     /// [`super::infer::infer_complete_scope_types`].)
     pub(super) fn of_static_class(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         class_literal: StaticClassLiteral<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Result<Self, StaticMroError<'db>> {
@@ -88,7 +90,7 @@ impl<'db> Mro<'db> {
             resolved_bases.push(ClassBase::Generic);
         }
 
-        let env = &ProgramEnvironment::from_scope(class_literal.body_scope(db));
+        let env = &env.in_environment(ProgramEnvironment::from_scope(class_literal.body_scope(db)));
         let class = class_literal.apply_optional_specialization(db, specialization);
 
         let original_bases = class_literal.explicit_bases(db);
@@ -230,7 +232,7 @@ impl<'db> Mro<'db> {
                 seqs.push(
                     resolved_bases
                         .iter()
-                        .map(|base| base.apply_optional_specialization(db, specialization))
+                        .map(|base| base.apply_optional_specialization(db, env, specialization))
                         .collect(),
                 );
 
@@ -341,7 +343,7 @@ impl<'db> Mro<'db> {
 
     pub(super) fn from_error(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         class: ClassType<'db>,
     ) -> Self {
         Self::from([
@@ -356,9 +358,10 @@ impl<'db> Mro<'db> {
     /// Uses C3 linearization when possible, returning an error if the MRO cannot be resolved.
     pub(super) fn of_dynamic_class(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         dynamic: DynamicClassLiteral<'db>,
     ) -> Result<Self, DynamicMroError<'db>> {
-        let env = &ProgramEnvironment::from_scope(dynamic.scope(db));
+        let env = &env.in_environment(ProgramEnvironment::from_scope(dynamic.scope(db)));
         let original_bases = dynamic.explicit_bases(db);
 
         // Convert Types to ClassBases, tracking any that fail conversion.
@@ -446,9 +449,10 @@ impl<'db> Mro<'db> {
     /// both bases to produce `[Http, int, Enum, object]`
     pub(super) fn of_dynamic_enum(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         dynamic_enum: DynamicEnumLiteral<'db>,
     ) -> Result<Self, DynamicMroError<'db>> {
-        let env = &ProgramEnvironment::from_scope(dynamic_enum.scope(db));
+        let env = &env.in_environment(ProgramEnvironment::from_scope(dynamic_enum.scope(db)));
         let self_base = ClassBase::Class(ClassType::NonGeneric(dynamic_enum.into()));
 
         // Convert the functional enum bases (`type=` mixin first, enum base second)
@@ -509,7 +513,7 @@ impl<'db> Mro<'db> {
     /// Preserves known bases even when an invalid base must be replaced with `Unknown`.
     fn dynamic_fallback(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         dynamic: DynamicClassLiteral<'db>,
     ) -> Self {
         Self::fallback_from_bases(
@@ -530,7 +534,7 @@ impl<'db> Mro<'db> {
     /// including when subclasses inherit this fallback MRO.
     fn fallback_from_bases(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         class: ClassType<'db>,
         bases: impl IntoIterator<Item = ClassBase<'db>>,
     ) -> Self {
@@ -598,6 +602,7 @@ impl<'db> FromIterator<ClassBase<'db>> for Mro<'db> {
 #[derive(Clone)]
 pub(crate) struct MroIterator<'db> {
     db: &'db dyn Db,
+    operations: TypeOperations<'db>,
 
     /// The class whose MRO we're iterating over
     class: ClassLiteral<'db>,
@@ -619,11 +624,13 @@ pub(crate) struct MroIterator<'db> {
 impl<'db> MroIterator<'db> {
     pub(super) fn new(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         class: ClassLiteral<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Self {
         Self {
             db,
+            operations: env.clone(),
             class,
             specialization,
             first_element_yielded: false,
@@ -656,11 +663,12 @@ impl<'db> MroIterator<'db> {
     /// Return an iterator over that MRO which skips the first element of the MRO.
     fn full_mro_except_first_element(&mut self) -> &mut std::slice::Iter<'db, ClassBase<'db>> {
         let db = self.db;
+        let env = &self.operations;
         self.subsequent_elements
             .get_or_insert_with(|| match self.class {
                 ClassLiteral::Static(literal) => {
                     let specialization = self.specialization.map(|specialization| {
-                        specialization.tuple_runtime_element_specialization(db)
+                        specialization.tuple_runtime_element_specialization(db, env)
                     });
                     let mut full_mro_iter = match literal.try_mro(db, specialization) {
                         Ok(mro) => mro.iter(),
@@ -738,11 +746,7 @@ pub(super) struct StaticMroError<'db> {
 
 impl<'db> StaticMroError<'db> {
     /// Construct an MRO error of kind `InheritanceCycle`.
-    pub(super) fn cycle(
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        class: ClassType<'db>,
-    ) -> Self {
+    pub(super) fn cycle(db: &'db dyn Db, env: &TypeOperations<'db>, class: ClassType<'db>) -> Self {
         StaticMroErrorKind::InheritanceCycle.into_mro_error(db, env, class)
     }
 
@@ -805,7 +809,7 @@ impl<'db> StaticMroErrorKind<'db> {
     fn into_mro_error(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         class: ClassType<'db>,
     ) -> StaticMroError<'db> {
         StaticMroError {
@@ -881,7 +885,7 @@ fn c3_merge<'db>(
 /// the `Generic[]` base. If not, this function will return `None`.
 fn check_generic_reorder_fixes_mro<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     resolved_bases: &[ClassBase<'db>],
     original_bases: &[Type<'db>],
 ) -> Option<usize> {
@@ -966,7 +970,7 @@ impl<'db> DynamicMroErrorKind<'db> {
     fn into_error(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         class_literal: DynamicClassLiteral<'db>,
     ) -> DynamicMroError<'db> {
         DynamicMroError {

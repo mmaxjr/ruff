@@ -1,5 +1,5 @@
 use crate::Db;
-use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::{
     CallArguments, DataclassParams, KnownClass, KnownInstanceType, SpecialFormType,
@@ -312,7 +312,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             );
             let decorator_result = apply_class_decorator(db, env, decorator_ty, original_class_ty);
             let decorated_ty = decorator_result.return_type();
-            if !is_unknown_decorator_result(db, decorated_ty)
+            if !is_unknown_decorator_result(db, env, decorated_ty)
                 && !type_retains_original_class(db, env, original_class_ty, decorated_ty)
             {
                 metadata_applies_to_original_class = false;
@@ -392,7 +392,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 decorated_ty,
                 |ty, _| ty,
                 |_, resolved| {
-                    if is_unknown_decorator_result(db, decorated_ty) {
+                    if is_unknown_decorator_result(db, env, decorated_ty) {
                         inferred_ty
                     } else if let divergent_ty @ Type::Divergent(_) = resolved {
                         // Keep the current binding to bootstrap decorators whose return annotations
@@ -513,7 +513,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
 
 fn apply_class_decorator<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     decorator_ty: Type<'db>,
     decorated_ty: Type<'db>,
 ) -> ClassDecoratorResult<'db> {
@@ -544,7 +544,7 @@ fn apply_class_decorator<'db>(
 /// original class object even if the decorator call produced a `SubclassOf` type internally.
 fn class_decorator_preserves_class_binding<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     original_class: Type<'db>,
     decorated_class: Type<'db>,
 ) -> bool {
@@ -569,9 +569,12 @@ fn class_decorator_preserves_class_binding<'db>(
         Type::Union(union) => union.elements(db).iter().all(|element| {
             class_decorator_preserves_class_binding(db, env, original_class, *element)
         }),
-        Type::TypeAlias(alias) => {
-            class_decorator_preserves_class_binding(db, env, original_class, alias.value_type(db))
-        }
+        Type::TypeAlias(alias) => class_decorator_preserves_class_binding(
+            db,
+            env,
+            original_class,
+            alias.value_type(db, env),
+        ),
         _ => SubclassOfType::try_from_type(db, env, original_class).is_some_and(
             |original_meta_type| decorated_class.is_equivalent_to(db, env, original_meta_type),
         ),
@@ -582,7 +585,7 @@ fn class_decorator_preserves_class_binding<'db>(
 /// intersection members.
 fn type_retains_original_class<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     original_class: Type<'db>,
     decorated_class: Type<'db>,
 ) -> bool {
@@ -596,7 +599,7 @@ fn type_retains_original_class<'db>(
             .iter()
             .all(|element| type_retains_original_class(db, env, original_class, *element)),
         Type::TypeAlias(alias) => {
-            type_retains_original_class(db, env, original_class, alias.value_type(db))
+            type_retains_original_class(db, env, original_class, alias.value_type(db, env))
         }
         _ => class_decorator_preserves_class_binding(db, env, original_class, decorated_class),
     }
@@ -607,8 +610,12 @@ fn type_retains_original_class<'db>(
 /// This also handles `type[Unknown]` results from generic decorator factories whose type
 /// variables are specialized before the returned decorator receives the class. Explicit `Any`
 /// results do not trigger this fallback.
-fn is_unknown_decorator_result<'db>(db: &'db dyn Db, result_ty: Type<'db>) -> bool {
-    result_ty.has_outer_type(db, |result_ty| match result_ty {
+fn is_unknown_decorator_result<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    result_ty: Type<'db>,
+) -> bool {
+    result_ty.has_outer_type(db, env, |result_ty| match result_ty {
         Type::SubclassOf(subclass_of) => subclass_of
             .subclass_of()
             .into_dynamic()
@@ -624,7 +631,7 @@ fn is_unknown_decorator_result<'db>(db: &'db dyn Db, result_ty: Type<'db>) -> bo
 /// returns the original class object again.
 fn merge_class_preserving_decorator_result<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     original_class: Type<'db>,
     current_binding: Type<'db>,
     decorated_binding: Type<'db>,

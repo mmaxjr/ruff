@@ -11,7 +11,7 @@ use ruff_python_ast::find_node::covering_node;
 use ruff_text_size::{Ranged, TextRange, TextSize};
 use std::fmt::{self, Display};
 use ty_python_core::ProgramFile;
-use ty_python_semantic::ProgramEnvironment;
+use ty_python_semantic::TypeOperations;
 use ty_python_semantic::types::ide_support::{resolved_call_signature, typed_dict_key_hover};
 use ty_python_semantic::types::{KnownInstanceType, SpecialFormType, Type, TypeVarVariance};
 
@@ -140,7 +140,7 @@ pub fn hover<'db>(
                     .and_then(|def| def.docstring(db))
                     .or_else(|| match ty {
                         Type::KnownInstance(KnownInstanceType::TypeAliasType(alias)) => {
-                            Definitions::from_ty(db, &env, alias.value_type(db))
+                            Definitions::from_ty(db, &env, alias.value_type(db, &env))
                                 .and_then(|def| def.docstring(db))
                         }
                         _ => None,
@@ -333,7 +333,7 @@ impl<'db> Hover<'db> {
     pub const fn display<'a>(&'a self, db: &'db dyn Db, kind: MarkupKind) -> impl Display {
         std::fmt::from_fn(move |f| {
             let mut first = true;
-            let env = ProgramEnvironment::from_file(self.program_file);
+            let env = TypeOperations::for_file(db, self.program_file);
             for content in &self.contents {
                 if !first {
                     kind.horizontal_line().fmt(f)?;
@@ -401,7 +401,7 @@ impl<'db> HoverContent<'db> {
     fn display<'a>(
         &'a self,
         db: &'db dyn Db,
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         kind: MarkupKind,
     ) -> DisplayHoverContent<'a, 'db> {
         DisplayHoverContent {
@@ -415,7 +415,7 @@ impl<'db> HoverContent<'db> {
 
 pub(crate) struct DisplayHoverContent<'a, 'db> {
     db: &'db dyn Db,
-    env: &'a ProgramEnvironment<'db>,
+    env: &'a TypeOperations<'db>,
     content: &'a HoverContent<'db>,
     kind: MarkupKind,
 }

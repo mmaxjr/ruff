@@ -1,5 +1,6 @@
 //! Abstract-method discovery and diagnostics shared by class validation and constructor calls.
 
+use crate::types::TypeOperations;
 use ruff_db::{
     diagnostic::{Annotation, Span, SubDiagnostic, SubDiagnosticSeverity},
     parsed::parsed_module,
@@ -42,7 +43,7 @@ impl<'db> AbstractMethods<'db> {
     pub(super) fn annotate_diagnostic(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         diagnostic: &mut LintDiagnosticGuard,
     ) {
         let Some((first_method_name, abstract_method)) = self.methods.iter().next() else {
@@ -140,7 +141,7 @@ impl<'db> AbstractMethods<'db> {
 
         for superclass in self
             .class
-            .iter_mro(db)
+            .iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .take_while(|superclass| superclass != defining_class)
         {
@@ -288,11 +289,14 @@ impl<'db> ClassType<'db> {
         }
 
         let mut abstract_methods: FxIndexMap<Name, _> = FxIndexMap::default();
-        let env = &ProgramEnvironment::from_file(self.class_literal(db).program_file(db));
+        let env = &TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
+        );
 
         // Iterate through the MRO in reverse order,
         // skipping `object` (we know it doesn't define any abstract methods)
-        for supercls in self.iter_mro(db).rev().skip(1) {
+        for supercls in self.iter_mro(db, env).rev().skip(1) {
             let ClassBase::Class(class) = supercls else {
                 continue;
             };

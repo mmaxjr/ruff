@@ -6,6 +6,7 @@
 //! may be fixed for the configured environment while still serving a purpose in code that is
 //! designed to support multiple environments.
 
+use crate::types::TypeOperations;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::{self as ast, helpers::any_over_expr, name::Name};
 use rustc_hash::FxHashMap;
@@ -269,6 +270,7 @@ impl RedundantConditionContext {
             | ast::Expr::Compare(_) => any_over_expr(condition.expression, |expression| {
                 is_special_cased_condition_expression(
                     builder.db(),
+                    builder.program_environment(),
                     builder.program_file(),
                     expression,
                     |expr| builder.expression_type(expr),
@@ -333,6 +335,7 @@ impl RedundantConditionContext {
 /// As elsewhere in ty, `TYPE_CHECKING` is recognized syntactically, without resolving its origin.
 fn is_special_cased_condition_expression<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     file: ProgramFile<'db>,
     expression: &ast::Expr,
     mut expression_type: impl FnMut(&ast::Expr) -> Type<'db>,
@@ -368,7 +371,7 @@ fn is_special_cased_condition_expression<'db>(
         _ => {}
     }
 
-    condition_definition_info(db, file, expression, expression_type)
+    condition_definition_info(db, env, file, expression, expression_type)
         .contains_special_cased_condition
 }
 
@@ -377,6 +380,7 @@ fn is_special_cased_condition_expression<'db>(
 /// of the enclosing scope.
 pub(super) fn condition_definition_info<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     file: ProgramFile<'db>,
     expression: &ast::Expr,
     expression_type: impl FnMut(&ast::Expr) -> Type<'db>,
@@ -387,12 +391,13 @@ pub(super) fn condition_definition_info<'db>(
         ast::Expr::Attribute(attribute) if attribute.ctx.is_load() => {}
         _ => return ConditionDefinitionInfo::default(),
     }
-    place_condition_definition_info(db, file, expression, expression_type)
+    place_condition_definition_info(db, env, file, expression, expression_type)
 }
 
 /// Also accepts augmented-assignment targets, which have a recorded load despite their store context.
 fn place_condition_definition_info<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     file: ProgramFile<'db>,
     expression: &ast::Expr,
     mut expression_type: impl FnMut(&ast::Expr) -> Type<'db>,
@@ -403,7 +408,7 @@ fn place_condition_definition_info<'db>(
         && let Some(place) = PlaceExpr::try_from_expr(expression)
     {
         let scope = scope.to_scope_id(db, file);
-        let env = ProgramEnvironment::from_scope(scope);
+        let env = env.in_environment(ProgramEnvironment::from_scope(scope));
         let resolution = resolve_place_load(
             db,
             index,
@@ -586,7 +591,7 @@ fn resolved_condition_definition_info<'db>(
         db,
         &resolve_definition(
             db,
-            &ProgramEnvironment::from_scope(scope),
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope)),
             definition,
             symbol_name,
             ImportAliasResolution::ResolveAliases,
@@ -671,7 +676,7 @@ fn attribute_condition_definition_info<'db>(
         db,
         &definitions_for_attribute(
             db,
-            &ProgramEnvironment::from_program(program),
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program)),
             receiver,
             &name,
         ),
@@ -702,6 +707,7 @@ fn definition_contains_special_cased_condition<'db>(
     let definition_kind = definition.kind(db);
     let file = definition.file(db);
     let program_file = definition.program_file(db);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     let in_known_module = |known| {
         file_to_module(db, program_file.resolver_file(db))
@@ -763,7 +769,7 @@ fn definition_contains_special_cased_condition<'db>(
         }
         DefinitionKind::AugmentedAssignment(assignment) => {
             let assignment = assignment.node(&module);
-            if place_condition_definition_info(db, program_file, &assignment.target, |expr| {
+            if place_condition_definition_info(db, &env, program_file, &assignment.target, |expr| {
                 infer_definition_types(db, definition).expression_type(expr)
             })
             .contains_special_cased_condition
@@ -810,7 +816,7 @@ fn definition_contains_special_cased_condition<'db>(
     let mut definition_inference = None;
 
     any_over_expr(source_expression, |expression| {
-        is_special_cased_condition_expression(db, program_file, expression, |expr| {
+        is_special_cased_condition_expression(db, &env, program_file, expression, |expr| {
             if let Some(standalone) = standalone {
                 expression_inference
                     .get_or_insert_with(|| {
@@ -891,11 +897,12 @@ fn predicate_contains_special_cased_condition<'db>(
         | PredicateNode::StarImportPlaceholder(_) => return false,
     };
     let file = expression.program_file(db);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
     let module = parsed_module(db, expression.python_file(db)).load(db);
     let mut inference = None;
 
     any_over_expr(expression.node_ref(db).node(&module), |subexpression| {
-        is_special_cased_condition_expression(db, file, subexpression, |expr| {
+        is_special_cased_condition_expression(db, &env, file, subexpression, |expr| {
             inference
                 .get_or_insert_with(|| {
                     infer_expression_types(db, expression, TypeContext::default())

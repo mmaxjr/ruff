@@ -128,7 +128,7 @@ pub(super) fn check_class_method_typevar_variance<'db>(
                     return;
                 }
                 for (function, ty) in member
-                    .local_function_bindings(db, class.body_scope(db))
+                    .local_function_bindings(db, env, class.body_scope(db))
                     .filter(|(function, _)| !exclude_from_variance(db, *function))
                 {
                     check_method_typevar_variance(
@@ -307,6 +307,7 @@ fn check_pep695_function_legacy_typevars<'db>(
     };
     let Some(legacy_context) = GenericContext::from_function_params(
         db,
+        env,
         definition,
         signature.parameters(),
         signature.return_ty,

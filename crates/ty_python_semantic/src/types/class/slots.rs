@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use itertools::Itertools;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::{self as ast, name::Name};
@@ -317,7 +318,7 @@ impl<'db> StaticClassLiteral<'db> {
                 return SlotDefinition::DynamicOrNone;
             };
             let inherited_slots: FxIndexSet<_> = self
-                .iter_mro(db, None)
+                .iter_mro(db)
                 .skip(1)
                 .filter_map(ClassBase::into_class)
                 .filter_map(|class| class.static_class_literal(db).map(|(class, _)| class))
@@ -344,7 +345,7 @@ impl<'db> StaticClassLiteral<'db> {
         //
         //     if condition:
         //         __slots__ = ("value",)
-        let env = ProgramEnvironment::from_scope(body_scope);
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(body_scope));
         let use_def = use_def_map(db, body_scope);
         let bindings = use_def.end_of_scope_symbol_bindings(symbol);
         let Place::Defined(DefinedPlace {
@@ -453,7 +454,7 @@ impl<'db> StaticClassLiteral<'db> {
         let mut slots = FxIndexSet::default();
         let mut dictionary = InstanceDictionary::Absent;
 
-        for base in self.iter_mro(db, None) {
+        for base in self.iter_mro(db) {
             let base = match base {
                 ClassBase::Class(base) => base,
                 ClassBase::Any | ClassBase::Divergent(_) | ClassBase::Dynamic(_) => {
@@ -555,7 +556,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn own_slot_descriptor(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         name: &str,
     ) -> Type<'db> {

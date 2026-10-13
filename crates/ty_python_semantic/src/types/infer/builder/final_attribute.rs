@@ -1,12 +1,13 @@
+use crate::types::TypeOperations;
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span};
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast as ast;
 use ruff_text_size::Ranged;
 
+use crate::Db;
 use crate::place::place_from_declarations;
 use crate::types::infer::nearest_enclosing_function;
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
-use crate::{Db, ProgramEnvironment};
 use crate::{
     TypeQualifiers,
     types::{
@@ -55,7 +56,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let env = self.program_environment();
         let class_ty = object_ty.nominal_class(db, env)?;
 
-        for base in class_ty.iter_mro(db) {
+        for base in class_ty.iter_mro(db, env) {
             let Some(class) = base.into_class() else {
                 continue;
             };
@@ -322,7 +323,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             Type::TypeAlias(alias) => {
                 return self.validate_final_attribute_assignment(
                     target,
-                    alias.value_type(db),
+                    alias.value_type(db, self.program_environment()),
                     attribute,
                 );
             }
@@ -358,7 +359,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
 /// Find a receiver whose declaration prevents deletion of this attribute.
 pub(super) fn final_attribute_receiver<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
 ) -> Option<Type<'db>> {

@@ -1,4 +1,5 @@
 use crate::Db;
+use crate::types::TypeOperations;
 use itertools::{Either, Itertools};
 use ruff_db::{diagnostic::Annotation, source::source_text};
 use ruff_diagnostics::{Edit, Fix};
@@ -505,7 +506,7 @@ pub(crate) fn check_static_class_definitions<'db>(
             );
         }
 
-        if let Some(ordered_base_class) = ordered_dataclass_base_class(db, base_class) {
+        if let Some(ordered_base_class) = ordered_dataclass_base_class(db, env, base_class) {
             // Suppress the diagnostic if the child class manually overrides all comparison
             // methods, since the user has explicitly fixed the LSP violation.
             if !class.has_own_comparison_methods(db)
@@ -637,7 +638,9 @@ pub(crate) fn check_static_class_definitions<'db>(
     }
 
     // Check that `@total_ordering` has a valid ordering method in the MRO
-    if class.total_ordering(db) && !class.has_ordering_method_in_mro(db, None) {
+    if class.total_ordering(db)
+        && !class.has_ordering_method_in_mro(db, context.program_environment(), None)
+    {
         // Find the `@total_ordering` decorator to report the diagnostic at its location
         if let Some(decorator) = class_node.decorator_list.iter().find(|decorator| {
             file_expression_type(&decorator.expression)
@@ -834,7 +837,7 @@ pub(crate) fn check_static_class_definitions<'db>(
                     "__init_subclass__",
                     MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
                     // skip(1) to skip the current class and only consider base classes.
-                    class.iter_mro(db, None).skip(1),
+                    class.iter_mro(db).skip(1),
                 )
                 .ignore_possibly_undefined();
 
@@ -1180,7 +1183,7 @@ fn has_inherited_dataclass_field_order_violation<'db>(
     required_field: &Field<'db>,
 ) -> bool {
     class
-        .iter_mro(db, None)
+        .iter_mro(db)
         .skip(1)
         .filter_map(ClassBase::into_class)
         .filter_map(|ancestor| ancestor.static_class_literal(db))
@@ -1248,7 +1251,7 @@ fn check_class_namespace_against_metaclass_members<'db>(
     let mut metaclass_instance_members = FxHashSet::default();
     let mut metaclass_assigned_members = FxHashSet::default();
     for metaclass in metaclass
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .filter_map(|class| class.static_class_literal(db).map(|(literal, _)| literal))
     {
@@ -1370,9 +1373,13 @@ fn check_class_namespace_against_metaclass_members<'db>(
 
 fn ordered_dataclass_base_class<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     base_class: ClassType<'db>,
 ) -> Option<ClassType<'db>> {
-    for ancestor in base_class.iter_mro(db).filter_map(ClassBase::into_class) {
+    for ancestor in base_class
+        .iter_mro(db, env)
+        .filter_map(ClassBase::into_class)
+    {
         let Some((ancestor_literal, _)) = ancestor.static_class_literal(db) else {
             continue;
         };

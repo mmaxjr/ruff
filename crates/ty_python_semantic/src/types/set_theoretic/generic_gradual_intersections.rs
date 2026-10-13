@@ -1,3 +1,5 @@
+use crate::Db;
+use crate::types::TypeOperations;
 use crate::types::generics::specialization_variance;
 use crate::types::tuple::TupleSpec;
 use crate::types::visitor::contains_growing_type;
@@ -5,7 +7,6 @@ use crate::types::{
     ClassBase, ClassType, IntersectionType, KnownClass, MaterializationKind, Type, TypeVarVariance,
     UnionType,
 };
-use crate::{Db, ProgramEnvironment};
 
 pub(super) enum GenericIntersection<'db> {
     /// Replace both intersection elements with this equivalent type.
@@ -40,7 +41,7 @@ pub(super) enum GenericIntersection<'db> {
 /// A recursive pair is returned separately so callers can also skip relation-based reductions.
 pub(super) fn generic_gradual_intersection<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     left: Type<'db>,
     right: Type<'db>,
 ) -> Option<GenericIntersection<'db>> {
@@ -60,7 +61,7 @@ pub(super) fn generic_gradual_intersection<'db>(
 /// Subclass arguments that do not specialize the base retain their gradualness.
 fn base_top_intersection<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     base: Type<'db>,
     subclass: Type<'db>,
 ) -> Option<GenericIntersection<'db>> {
@@ -94,7 +95,7 @@ fn base_top_intersection<'db>(
 
     let inherited_specialization = subclass_class
         .identity_specialization(db)
-        .iter_mro(db)
+        .iter_mro(db, env)
         .find_map(|ancestor| match ancestor {
             ClassBase::Class(ClassType::Generic(alias)) if alias.origin(db) == base_class => {
                 Some(alias.specialization(db))
@@ -204,7 +205,7 @@ fn base_top_intersection<'db>(
 /// For example, `list[Any]` dynamically generalizes `list[int]`, while `list[str]` does not.
 fn dynamic_generalization_intersection<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     general: Type<'db>,
     specific: Type<'db>,
 ) -> Option<Type<'db>> {

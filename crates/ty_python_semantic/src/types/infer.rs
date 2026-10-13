@@ -44,6 +44,7 @@
 //! be considered a bug.)
 
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use itertools::Either;
 use ruff_db::parsed::parsed_module;
@@ -117,7 +118,8 @@ pub(super) struct CyclicTypeAliasError<'db> {
         }
     },
     cycle_fn=|db, cycle: &salsa::Cycle, _: &ImplicitAliasInference<'db>, mut result: ImplicitAliasInference<'db>, definition: Definition<'db>, parameters: Option<crate::types::GenericContext<'db>>| {
-        let recover = |ty| RecursiveType::recover(db, definition, cycle.id(), parameters, ty);
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
+        let recover = |ty| RecursiveType::recover(db, &env, definition, cycle.id(), parameters, ty);
         result.ty = result.ty.map(recover).map_err(|error| CyclicTypeAliasError {
             fallback_type: recover(error.fallback_type),
         });
@@ -141,7 +143,7 @@ pub(super) fn infer_implicit_alias_type<'db>(
         };
     };
     let index = semantic_index(db, program_file);
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
     TypeInferenceBuilder::new(
         db,
         &env,
@@ -216,7 +218,7 @@ fn extend_collection_use_constraints<'db>(
 /// the same normalization as expression and binding types before the next iteration uses them.
 fn normalize_collection_use_constraints<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     constraints: &mut CollectionUseConstraints<'db>,
     cycle: &salsa::Cycle,
 ) {
@@ -287,7 +289,7 @@ fn infer_definition_types_inner<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -346,7 +348,7 @@ pub(crate) fn function_known_decorators<'db>(
     let module = parsed_module(db, python_file).load(db);
     let index = semantic_index(db, program_file);
 
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -456,7 +458,7 @@ pub(crate) fn infer_deferred_types<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -493,7 +495,7 @@ pub(crate) fn infer_function_default_types<'db>(
     let python_file = program_file.python_file(db);
     let module = parsed_module(db, python_file).load(db);
     let index = semantic_index(db, program_file);
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -559,7 +561,7 @@ fn infer_scope_types<'db>(
     cycle_initial=|_, id, _| ScopeInference::cycle_initial(Type::divergent(id)),
     cycle_fn=|db, cycle, previous: &ScopeInference<'db>, inference: ScopeInference<'db>, input: InferScope<'db>| {
         let (scope, _, _) = input.into_inner(db);
-        let env = ProgramEnvironment::from_scope(scope);
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
         inference.cycle_normalized(db, &env, previous, cycle)
     },
     heap_size=ruff_memory_usage::heap_size
@@ -580,7 +582,7 @@ pub(crate) fn infer_scope_types_impl<'db>(
     // The isolation of the query is by the return inferred types.
     let index = semantic_index(db, program_file);
 
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -612,7 +614,7 @@ pub(crate) fn infer_expression_types<'db>(
     cycle_initial=expression_cycle_initial,
     cycle_fn=|db, cycle, previous: &ExpressionInference<'db>, inference: ExpressionInference<'db>, input: InferExpression<'db>| {
         let (expression, _, _) = input.into_inner(db);
-        let env = ProgramEnvironment::from_scope(expression.scope(db));
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(expression.scope(db)));
         inference.cycle_normalized(db, &env, previous, cycle)
     },
     heap_size=ruff_memory_usage::heap_size
@@ -636,7 +638,7 @@ pub(super) fn infer_expression_types_impl<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -698,7 +700,7 @@ pub(crate) fn infer_expression_type<'db>(
     cycle_initial=|_, id, _| Type::divergent(id),
     cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, input: InferExpression<'db>| {
         let (expression, _, _) = input.into_inner(db);
-        let env = ProgramEnvironment::from_scope(expression.scope(db));
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(expression.scope(db)));
         result.cycle_normalized(db, &env, *previous, cycle)
     },
     heap_size=ruff_memory_usage::heap_size
@@ -739,7 +741,7 @@ pub(super) fn infer_statement_types<'db>(
         StatementInferenceInner::cycle_initial(statement.scope(db), Type::divergent(id))
     },
     cycle_fn=|db, cycle, previous: &StatementInferenceInner<'db>, inference: StatementInferenceInner<'db>, statement: StatementInner<'db>| {
-        let env = ProgramEnvironment::from_file(statement.program_file(db));
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(statement.program_file(db)));
         inference.cycle_normalized(db, &env, previous, cycle)
     },
     heap_size=ruff_memory_usage::heap_size
@@ -761,7 +763,7 @@ fn infer_statement_types_impl<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -1055,7 +1057,7 @@ impl<'db> TypeContext<'db> {
     fn known_specialization(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         known_class: KnownClass,
     ) -> Option<Specialization<'db>> {
         self.annotation
@@ -1079,7 +1081,7 @@ impl<'db> TypeContext<'db> {
     fn narrow_targets(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<Cow<'db, [Type<'db>]>> {
         fn targets<'db>(
             db: &'db dyn Db,
@@ -1132,7 +1134,7 @@ pub(super) fn infer_unpack_types<'db>(
     returns(ref),
     cycle_initial=|_, id, _, _| UnpackResult::cycle_initial(Type::divergent(id)),
     cycle_fn=|db, cycle, previous: &UnpackResult<'db>, result: UnpackResult<'db>, unpack: Unpack<'db>, _| {
-        let env = ProgramEnvironment::from_file(unpack.program_file(db));
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(unpack.program_file(db)));
         result.cycle_normalized(db, &env, previous, cycle)
     },
     heap_size=ruff_memory_usage::heap_size
@@ -1152,7 +1154,7 @@ fn infer_unpack_types_impl<'db>(
     )
     .entered();
 
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
     let mut unpacker = Unpacker::new(db, &env, unpack.target_scope(db), program_file, &module);
     unpacker.unpack(unpack.target(db, &module), unpack.value(db), environment);
     unpacker.finish()
@@ -1321,7 +1323,7 @@ impl<'db> ScopeInference<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous_inference: &ScopeInference<'db>,
         cycle: &salsa::Cycle,
     ) -> ScopeInference<'db> {
@@ -1530,7 +1532,7 @@ impl<'db> DefinitionTypes<'db> {
 
     fn normalize_binding(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &DefinitionTypes<'db>,
         cycle: &salsa::Cycle,
         owner: Definition<'db>,
@@ -1546,7 +1548,7 @@ impl<'db> DefinitionTypes<'db> {
 
     fn normalize_declaration(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &DefinitionTypes<'db>,
         cycle: &salsa::Cycle,
         owner: Definition<'db>,
@@ -1563,7 +1565,7 @@ impl<'db> DefinitionTypes<'db> {
     fn cycle_normalized(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &DefinitionTypes<'db>,
         cycle: &salsa::Cycle,
         owner: Definition<'db>,
@@ -1818,7 +1820,8 @@ impl<'db> DefinitionInference<'db> {
         definition: Definition<'db>,
         cycle_recovery: Type<'db>,
     ) -> Self {
-        let env = ProgramEnvironment::from_definition(definition);
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
         let mut types = DefinitionTypes::Empty;
 
         // Eagerly store more precise types for collection literals to avoid an extra
@@ -1901,7 +1904,8 @@ impl<'db> DefinitionInference<'db> {
         cycle: &salsa::Cycle,
         definition: Definition<'db>,
     ) -> DefinitionInference<'db> {
-        let env = ProgramEnvironment::from_definition(definition);
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
         if cycle.iteration() > crate::TAINTED_CYCLES {
             self.widen_comparison_truthiness(db, &env, previous_inference);
         }
@@ -1965,7 +1969,7 @@ impl<'db> DefinitionInference<'db> {
     fn widen_comparison_truthiness(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &Self,
     ) {
         let comparison_truthiness = widen_comparison_truthiness(
@@ -2269,7 +2273,7 @@ impl<'db> ExpressionInference<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &ExpressionInference<'db>,
         cycle: &salsa::Cycle,
     ) -> ExpressionInference<'db> {
@@ -2323,7 +2327,7 @@ impl<'db> ExpressionInference<'db> {
     fn widen_comparison_truthiness(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &Self,
     ) {
         let comparison_truthiness = widen_comparison_truthiness(
@@ -2505,7 +2509,7 @@ impl<'db> StatementInferenceInner<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous_inference: &StatementInferenceInner<'db>,
         cycle: &salsa::Cycle,
     ) -> StatementInferenceInner<'db> {
@@ -2569,7 +2573,7 @@ impl<'db> StatementInferenceInner<'db> {
     fn widen_comparison_truthiness(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &Self,
     ) {
         let comparison_truthiness = widen_comparison_truthiness(

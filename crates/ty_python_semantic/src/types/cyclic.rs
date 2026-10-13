@@ -20,6 +20,7 @@
 //! avoid this is to prefer always calling `visitor.visit` only in the main recursive method on
 //! `Type`.
 
+use crate::types::TypeOperations;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Eq;
 use std::collections::hash_map::Entry;
@@ -286,7 +287,7 @@ struct SpecializationFlowGraph<'db> {
 struct SpecializationFlowVisitor<'db> {
     source_origin: RecursiveOrigin<'db>,
     source_parameters: FxHashSet<BoundTypeVarIdentity<'db>>,
-    env: ProgramEnvironment<'db>,
+    env: TypeOperations<'db>,
     visited_types: TypeCollector<'db>,
     edges: RefCell<Vec<FlowEdge<'db>>>,
     referenced_definitions: RefCell<Vec<RecursiveDefinition<'db>>>,
@@ -297,7 +298,7 @@ struct SpecializationFlowVisitor<'db> {
 /// Finds which parameters of the current source definition occur in one actual argument.
 struct SourceParameterCollector<'a, 'db> {
     source_parameters: &'a FxHashSet<BoundTypeVarIdentity<'db>>,
-    env: &'a ProgramEnvironment<'db>,
+    env: &'a TypeOperations<'db>,
     found: RefCell<FxHashMap<BoundTypeVarIdentity<'db>, bool>>,
     visited_types: TypeCollector<'db>,
     in_nested_type: Cell<bool>,
@@ -460,13 +461,17 @@ impl<'db> DefinitionUse<'db> {
     }
 
     /// Read actual arguments without expanding the referenced definition's body.
-    fn arguments(self, db: &'db dyn Db) -> Option<Vec<(BoundTypeVarIdentity<'db>, Type<'db>)>> {
+    fn arguments(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<Vec<(BoundTypeVarIdentity<'db>, Type<'db>)>> {
         let (target, specialization) = match self {
             Self::Specialized(target, specialization) => (target, specialization),
             Self::Lambda(lambda) => {
                 return Some(
                     lambda
-                        .captured_arguments(db)
+                        .captured_arguments(db, env)
                         .flat_map(|(parameter, arguments)| {
                             let identity = RecursiveDefinition::parameter_identity(db, parameter);
                             arguments
@@ -503,7 +508,7 @@ impl<'db> DefinitionUse<'db> {
             }
             Self::Specialized(_, None) => {}
             Self::Lambda(lambda) => {
-                for (_, arguments) in lambda.captured_arguments(db) {
+                for (_, arguments) in lambda.captured_arguments(db, visitor.program_environment()) {
                     for argument in arguments {
                         visitor.visit_type(db, argument);
                     }
@@ -711,7 +716,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
         Some(Self {
             source_origin: source.origin(db),
             source_parameters: source.source_parameters(db)?,
-            env: source.environment(db),
+            env: TypeOperations::for_inference(db, source.environment(db)),
             visited_types: TypeCollector::default(),
             edges: RefCell::default(),
             referenced_definitions: RefCell::default(),
@@ -775,7 +780,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
         let target = reference.target(db);
         self.referenced_definitions.borrow_mut().push(target);
 
-        let Some(arguments) = reference.arguments(db) else {
+        let Some(arguments) = reference.arguments(db, &self.env) else {
             self.inconclusive.set(true);
             return;
         };
@@ -801,12 +806,12 @@ impl<'db> SpecializationFlowVisitor<'db> {
 }
 
 impl<'db> TypeVisitor<'db> for SpecializationFlowVisitor<'db> {
-    fn program_environment(&self) -> &ProgramEnvironment<'db> {
+    fn program_environment(&self) -> &TypeOperations<'db> {
         &self.env
     }
 
-    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-        None
+    fn should_visit_lazy_type_attributes(&self) -> bool {
+        false
     }
 
     fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: crate::types::RecursiveType<'db>) {
@@ -851,7 +856,7 @@ impl<'db> TypeVisitor<'db> for SpecializationFlowVisitor<'db> {
 impl<'a, 'db> SourceParameterCollector<'a, 'db> {
     fn classify(
         db: &'db dyn Db,
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         source_parameters: &'a FxHashSet<BoundTypeVarIdentity<'db>>,
         argument: Type<'db>,
     ) -> impl Iterator<Item = (BoundTypeVarIdentity<'db>, FlowKind)> {
@@ -881,12 +886,12 @@ impl<'a, 'db> SourceParameterCollector<'a, 'db> {
 }
 
 impl<'db> TypeVisitor<'db> for SourceParameterCollector<'_, 'db> {
-    fn program_environment(&self) -> &ProgramEnvironment<'db> {
+    fn program_environment(&self) -> &TypeOperations<'db> {
         self.env
     }
 
-    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-        None
+    fn should_visit_lazy_type_attributes(&self) -> bool {
+        false
     }
 
     fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: crate::types::RecursiveType<'db>) {
@@ -973,7 +978,7 @@ pub trait HasIdentity<'db> {
     }
 
     /// Returns an identity that remains stable while this item is active in a [`CycleDetector`].
-    fn to_identity(&self, db: &'db dyn Db) -> Self::Id;
+    fn to_identity(&self, db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id;
 }
 
 impl<'db> HasIdentity<'db> for Type<'db> {
@@ -983,7 +988,7 @@ impl<'db> HasIdentity<'db> for Type<'db> {
         self.may_share_type_identity(db, *other)
     }
 
-    fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
+    fn to_identity(&self, db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id {
         Type::to_type_identity(*self, db)
     }
 }
@@ -997,7 +1002,7 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>) {
         self.0.may_share_type_identity(db, other.0) && self.1.may_share_type_identity(db, other.1)
     }
 
-    fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
+    fn to_identity(&self, db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id {
         (self.0.to_type_identity(db), self.1.to_type_identity(db))
     }
 }
@@ -1014,7 +1019,7 @@ where
             && self.2.may_share_type_identity(db, other.2)
     }
 
-    fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
+    fn to_identity(&self, db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id {
         (
             self.0.to_type_identity(db),
             self.1,
@@ -1069,13 +1074,19 @@ where
     T: Hash + Eq + Clone + HasIdentity<'db>,
 {
     #[inline]
-    pub(crate) fn visit(&self, db: &'db dyn Db, item: T, compute: impl FnOnce() -> R) -> R {
-        match self.begin_visit(db, item) {
+    pub(crate) fn visit(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        item: T,
+        compute: impl FnOnce() -> R,
+    ) -> R {
+        match self.begin_visit(db, env, item) {
             CycleDetectorVisit::Ready(result) => result,
             CycleDetectorVisit::Cycle(..) => self.fallback.clone(),
-            CycleDetectorVisit::Pending(item) => {
+            CycleDetectorVisit::Pending(guard) => {
                 let result = compute();
-                self.finish_visit(item, result)
+                self.finish_visit(guard, result)
             }
         }
     }
@@ -1092,6 +1103,7 @@ where
     pub(super) fn try_visit(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         item: T,
         reuse_cached: impl FnOnce(&R) -> bool,
         compute: impl FnOnce() -> R,
@@ -1104,30 +1116,40 @@ where
             return Ok(result);
         }
 
-        match self.begin_active_visit(db, item) {
+        match self.begin_active_visit(db, env, item) {
             CycleDetectorVisit::Ready(result) => Ok(result),
             CycleDetectorVisit::Cycle(item, previous) => Err((item, previous)),
-            CycleDetectorVisit::Pending(item) => {
+            CycleDetectorVisit::Pending(guard) => {
                 let result = compute();
                 if was_cached {
-                    self.finish_active_visit(&item);
+                    drop(guard);
                     Ok(result)
                 } else {
-                    Ok(self.finish_visit(item, result))
+                    Ok(self.finish_visit(guard, result))
                 }
             }
         }
     }
 
-    fn begin_visit(&self, db: &'db dyn Db, item: T) -> CycleDetectorVisit<T, R> {
+    fn begin_visit(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        item: T,
+    ) -> CycleDetectorVisit<'_, 'db, T, R, INLINE_CAPACITY> {
         if let Some(result) = self.cache.borrow().get(&item) {
             return CycleDetectorVisit::Ready(result.clone());
         }
 
-        self.begin_active_visit(db, item)
+        self.begin_active_visit(db, env, item)
     }
 
-    fn begin_active_visit(&self, db: &'db dyn Db, item: T) -> CycleDetectorVisit<T, R> {
+    fn begin_active_visit(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        item: T,
+    ) -> CycleDetectorVisit<'_, 'db, T, R, INLINE_CAPACITY> {
         let seen = self.seen.borrow();
         if seen.iter().any(|active| active.item == item) {
             return CycleDetectorVisit::Ready(self.fallback.clone());
@@ -1150,25 +1172,29 @@ where
             item: item.clone(),
             identity: OnceCell::new(),
         });
+        let guard = ActiveTypeVisit {
+            seen: &self.seen,
+            revision: &self.revision,
+            item: item.clone(),
+        };
         if !candidates.is_empty() {
-            self.resolve_active_identity(db, index);
+            self.resolve_active_identity(db, env, index);
             for previous in candidates {
-                self.resolve_active_identity(db, previous);
+                self.resolve_active_identity(db, env, previous);
                 let previous = {
                     let seen = self.seen.borrow();
                     (seen[previous].identity.get() == seen[index].identity.get())
                         .then(|| seen[previous].item.clone())
                 };
                 if let Some(previous) = previous {
-                    self.finish_active_visit(&item);
                     return CycleDetectorVisit::Cycle(item, previous);
                 }
             }
         }
-        CycleDetectorVisit::Pending(item)
+        CycleDetectorVisit::Pending(guard)
     }
 
-    fn resolve_active_identity(&self, db: &'db dyn Db, index: usize) {
+    fn resolve_active_identity(&self, db: &'db dyn Db, env: &TypeOperations<'db>, index: usize) {
         let item = {
             let seen = self.seen.borrow();
             seen[index]
@@ -1178,7 +1204,7 @@ where
                 .then(|| seen[index].item.clone())
         };
         if let Some(item) = item {
-            let identity = item.to_identity(db);
+            let identity = item.to_identity(db, env);
             // A nested analysis can complete the same identity first.
             let _ = self.seen.borrow()[index].identity.set(identity);
         }
@@ -1186,30 +1212,27 @@ where
 
     /// Check the cycle policy without visiting the body. Identity analysis still registers
     /// the exact input, since computing an abstract identity can itself enter a type query.
-    pub(super) fn cycle_kind(&self, db: &'db dyn Db, item: &T) -> Option<CycleKind> {
-        match self.begin_active_visit(db, item.clone()) {
+    pub(super) fn cycle_kind(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        item: &T,
+    ) -> Option<CycleKind> {
+        match self.begin_active_visit(db, env, item.clone()) {
             CycleDetectorVisit::Ready(_) => Some(CycleKind::Exact),
             CycleDetectorVisit::Cycle(..) => Some(CycleKind::MatchingIdentity),
-            CycleDetectorVisit::Pending(item) => {
-                self.finish_active_visit(&item);
-                None
-            }
+            CycleDetectorVisit::Pending(_guard) => None,
         }
     }
 
     /// Finish a [`CycleDetectorVisit::Pending`] visit and cache its result.
-    fn finish_visit(&self, item: T, result: R) -> R {
-        self.finish_active_visit(&item);
+    fn finish_visit(&self, guard: ActiveTypeVisit<'_, 'db, T, INLINE_CAPACITY>, result: R) -> R {
+        let item = guard.item.clone();
+        drop(guard);
         self.cache
             .borrow_mut()
             .insert_completed(item, result.clone());
         result
-    }
-
-    fn finish_active_visit(&self, item: &T) {
-        self.revision.set(self.revision.get().wrapping_add(1));
-        let active = self.seen.borrow_mut().pop();
-        debug_assert!(active.as_ref().is_some_and(|active| active.item == *item));
     }
 }
 
@@ -1222,10 +1245,11 @@ where
     pub(crate) fn try_visit_active<U>(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         item: T,
         work: impl FnOnce() -> U,
     ) -> Option<U> {
-        self.visit_active(db, item, |cycle| cycle.is_none().then(work))
+        self.visit_active(db, env, item, |cycle| cycle.is_none().then(work))
     }
 
     /// Keep a visit active throughout `compute`, without caching its result.
@@ -1236,20 +1260,14 @@ where
     pub(super) fn visit_active<R>(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         item: T,
         compute: impl FnOnce(Option<CycleKind>) -> R,
     ) -> R {
-        match self.begin_active_visit(db, item) {
+        match self.begin_active_visit(db, env, item) {
             CycleDetectorVisit::Ready(()) => compute(Some(CycleKind::Exact)),
             CycleDetectorVisit::Cycle(..) => compute(Some(CycleKind::MatchingIdentity)),
-            CycleDetectorVisit::Pending(item) => {
-                let _guard = ActiveTypeVisit {
-                    seen: &self.seen,
-                    revision: &self.revision,
-                    item,
-                };
-                compute(None)
-            }
+            CycleDetectorVisit::Pending(_guard) => compute(None),
         }
     }
 }
@@ -1294,13 +1312,13 @@ impl<'db, T: fmt::Debug + HasIdentity<'db>> fmt::Debug for ActiveCycleDetectorVi
 }
 
 /// Result of starting a cycle-detector visit.
-pub(super) enum CycleDetectorVisit<T, R> {
+enum CycleDetectorVisit<'a, 'db, T: HasIdentity<'db> + PartialEq, R, const N: usize> {
     /// The item already has a completed result or hit an exact recursive edge.
     Ready(R),
     /// A different item with the same abstract identity is already pending.
     Cycle(T, T),
     /// The caller should compute the result and finish the pending visit.
-    Pending(T),
+    Pending(ActiveTypeVisit<'a, 'db, T, N>),
 }
 
 /// Guards recursive type transformations.
@@ -1590,7 +1608,7 @@ mod tests {
         CycleDetector, CycleDetectorVisit, CycleKind, Db, FlowEdge, FlowKind, HasIdentity,
         RecursiveDefinition, SpecializationFlowGraph, TypeIdentity, TypeTransformer,
     };
-    use crate::ProgramEnvironment;
+    use crate::TypeOperations;
     use crate::db::tests::setup_db;
     use crate::place::global_symbol;
     use crate::types::{KnownInstanceType, Type, TypeAliasType};
@@ -1623,7 +1641,7 @@ mod tests {
     impl<'db> HasIdentity<'db> for u8 {
         type Id = Self;
 
-        fn to_identity(&self, _db: &'db dyn Db) -> Self::Id {
+        fn to_identity(&self, _db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id {
             *self
         }
     }
@@ -1664,7 +1682,7 @@ mod tests {
             self.value % 2 == other.value % 2
         }
 
-        fn to_identity(&self, _db: &'db dyn Db) -> Self::Id {
+        fn to_identity(&self, _db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id {
             self.identity_calls.set(self.identity_calls.get() + 1);
             self.value
         }
@@ -1676,12 +1694,12 @@ mod tests {
     impl<'db> HasIdentity<'db> for ConstantIdentityItem {
         type Id = ();
 
-        fn to_identity(&self, _db: &'db dyn Db) -> Self::Id {}
+        fn to_identity(&self, _db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id {}
     }
 
     fn global_instance_type<'db>(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> Type<'db> {
         let file = system_path_to_file(db, "/src/a.py").unwrap();
@@ -1695,7 +1713,7 @@ mod tests {
 
     fn global_type_alias<'db>(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> TypeAliasType<'db> {
         let file = system_path_to_file(db, "/src/a.py").unwrap();
@@ -2022,28 +2040,30 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn caches_results_and_spills_after_two_entries() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let detector = Detector::new(0);
 
-        assert_eq!(detector.visit(db, 1, || 10), 10);
-        assert_eq!(detector.visit(db, 1, || 40), 10);
-        assert_eq!(detector.visit(db, 2, || 20), 20);
+        assert_eq!(detector.visit(db, &env, 1, || 10), 10);
+        assert_eq!(detector.visit(db, &env, 1, || 40), 10);
+        assert_eq!(detector.visit(db, &env, 2, || 20), 20);
         assert!(!detector.cache.borrow().is_spilled());
-        assert_eq!(detector.visit(db, 3, || 30), 30);
+        assert_eq!(detector.visit(db, &env, 3, || 30), 30);
         assert!(detector.cache.borrow().is_spilled());
 
-        assert_eq!(detector.visit(db, 2, || 40), 20);
-        assert_eq!(detector.visit(db, 3, || 40), 30);
+        assert_eq!(detector.visit(db, &env, 2, || 40), 20);
+        assert_eq!(detector.visit(db, &env, 3, || 40), 30);
     }
 
     #[test]
     fn nested_visit_short_circuits_on_cycle() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let detector = Detector::new(0);
 
         assert_eq!(
-            detector.visit(db, 1, || detector.visit(db, 1, || 20) + 10),
+            detector.visit(db, &env, 1, || detector.visit(db, &env, 1, || 20) + 10),
             10
         );
     }
@@ -2051,22 +2071,23 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn active_visits_distinguish_cycles_without_caching_results() {
         let db = setup_db();
+        let env = db.program_environment();
         let detector = CycleDetector::<'_, TestVisit, ConstantIdentityItem, (), 1>::new(());
 
-        detector.visit_active(&db, ConstantIdentityItem(1), |cycle| {
+        detector.visit_active(&db, &env, ConstantIdentityItem(1), |cycle| {
             assert_eq!(cycle, None);
             assert_eq!(
-                detector.visit_active(&db, ConstantIdentityItem(1), |cycle| cycle),
+                detector.visit_active(&db, &env, ConstantIdentityItem(1), |cycle| cycle),
                 Some(CycleKind::Exact),
             );
             assert_eq!(
-                detector.visit_active(&db, ConstantIdentityItem(2), |cycle| cycle),
+                detector.visit_active(&db, &env, ConstantIdentityItem(2), |cycle| cycle),
                 Some(CycleKind::MatchingIdentity),
             );
         });
 
         assert_eq!(
-            detector.visit_active(&db, ConstantIdentityItem(2), |cycle| cycle),
+            detector.visit_active(&db, &env, ConstantIdentityItem(2), |cycle| cycle),
             None,
         );
     }
@@ -2074,53 +2095,114 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn active_visits_are_released_when_unwinding() {
         let db = setup_db();
+        let env = db.program_environment();
         let detector = CycleDetector::<'_, TestVisit, u8, (), 1>::new(());
         let result = catch_unwind(AssertUnwindSafe(|| {
-            detector.visit_active(&db, 1, |_| panic!("stop the traversal"));
+            detector.visit_active(&db, &env, 1, |_| panic!("stop the traversal"));
         }));
         assert!(result.is_err());
-        assert!(detector.visit_active(&db, 1, |cycle| cycle.is_none()));
+        assert!(detector.visit_active(&db, &env, 1, |cycle| cycle.is_none()));
+    }
+
+    #[test]
+    fn cached_visits_are_released_when_unwinding() {
+        let db = setup_db();
+        let env = db.program_environment();
+        for recompute in [false, true] {
+            let detector = Detector::new(0);
+            if recompute {
+                detector.visit(&db, &env, 1, || 10);
+            }
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                if recompute {
+                    let _ =
+                        detector.try_visit(&db, &env, 1, |_| false, || panic!("cancel inference"));
+                } else {
+                    detector.visit(&db, &env, 1, || panic!("cancel inference"));
+                }
+            }));
+            assert!(result.is_err());
+            assert_eq!(detector.try_visit(&db, &env, 1, |_| false, || 20), Ok(20));
+        }
+    }
+
+    #[test]
+    fn identity_visits_are_released_when_unwinding() {
+        #[derive(Clone, Copy, Eq, Hash, PartialEq)]
+        struct Item(u8);
+
+        impl<'db> HasIdentity<'db> for Item {
+            type Id = ();
+
+            fn to_identity(&self, _db: &'db dyn Db, _env: &TypeOperations<'db>) {
+                assert!(self.0 != 2, "cancel identity analysis");
+            }
+        }
+
+        let db = setup_db();
+        let env = db.program_environment();
+        let detector = CycleDetector::<'_, TestVisit, Item, u8, 1>::new(0);
+        assert_eq!(
+            detector.visit(&db, &env, Item(1), || {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    detector.visit(&db, &env, Item(2), || 20);
+                }));
+                assert!(result.is_err());
+                10
+            }),
+            10
+        );
+        assert_eq!(detector.visit(&db, &env, Item(3), || 30), 30);
     }
 
     #[test]
     fn selectively_reuses_cached_results() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let detector = Detector::new(0);
 
-        assert_eq!(detector.try_visit(db, 1, |_| true, || 10), Ok(10));
+        assert_eq!(detector.try_visit(db, &env, 1, |_| true, || 10), Ok(10));
         assert_eq!(
-            detector.try_visit(db, 1, |&result| result == 10, || 20),
+            detector.try_visit(db, &env, 1, |&result| result == 10, || 20),
             Ok(10)
         );
         assert_eq!(
             detector.try_visit(
                 db,
+                &env,
                 1,
                 |&result| result == 20,
                 || {
-                    assert_eq!(detector.try_visit(db, 1, |_| false, || 30), Ok(0));
-                    detector.visit(db, 1, || 30) + 10
+                    assert_eq!(detector.try_visit(db, &env, 1, |_| false, || 30), Ok(0));
+                    detector.visit(db, &env, 1, || 30) + 10
                 }
             ),
             Ok(20)
         );
-        assert_eq!(detector.visit(db, 1, || 30), 10);
+        assert_eq!(detector.visit(db, &env, 1, || 30), 10);
     }
 
     #[test]
     fn recomputed_visits_share_exact_recursion_guards() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let detector = Detector::new(0);
 
         assert_eq!(
-            detector.try_visit(db, 1, |_| false, || detector.visit(db, 1, || 20) + 10),
+            detector.try_visit(
+                db,
+                &env,
+                1,
+                |_| false,
+                || detector.visit(db, &env, 1, || 20) + 10
+            ),
             Ok(10)
         );
         assert_eq!(
-            detector.visit(db, 2, || {
-                assert_eq!(detector.try_visit(db, 2, |_| false, || 20), Ok(0));
+            detector.visit(db, &env, 2, || {
+                assert_eq!(detector.try_visit(db, &env, 2, |_| false, || 20), Ok(0));
                 10
             }),
             10
@@ -2130,17 +2212,19 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn recomputed_visits_share_abstract_identity_guards() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let detector = CycleDetector::<TestVisit, ConstantIdentityItem, u8, 1>::new(0);
 
         assert_eq!(
             detector.try_visit(
                 db,
+                &env,
                 ConstantIdentityItem(1),
                 |_| false,
                 || {
                     assert_eq!(
-                        detector.try_visit(db, ConstantIdentityItem(2), |_| true, || 20),
+                        detector.try_visit(db, &env, ConstantIdentityItem(2), |_| true, || 20),
                         Err((ConstantIdentityItem(2), ConstantIdentityItem(1)))
                     );
                     10
@@ -2151,11 +2235,12 @@ class RecursivePropertySetter[T](Protocol):
         assert_eq!(
             detector.try_visit(
                 db,
+                &env,
                 ConstantIdentityItem(3),
                 |_| true,
                 || {
                     assert_eq!(
-                        detector.try_visit(db, ConstantIdentityItem(4), |_| false, || 20),
+                        detector.try_visit(db, &env, ConstantIdentityItem(4), |_| false, || 20),
                         Err((ConstantIdentityItem(4), ConstantIdentityItem(3)))
                     );
                     10
@@ -2168,14 +2253,25 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn computes_each_active_identity_once() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let identity_calls = Cell::new(0);
         let detector = CycleDetector::<TestVisit, CountingIdentityItem<'_>, u8, 1>::new(0);
 
         assert_eq!(
-            detector.visit(db, CountingIdentityItem::new(1, &identity_calls), || {
-                detector.visit(db, CountingIdentityItem::new(3, &identity_calls), || 1)
-            }),
+            detector.visit(
+                db,
+                &env,
+                CountingIdentityItem::new(1, &identity_calls),
+                || {
+                    detector.visit(
+                        db,
+                        &env,
+                        CountingIdentityItem::new(3, &identity_calls),
+                        || 1,
+                    )
+                }
+            ),
             1
         );
         assert_eq!(identity_calls.get(), 2);
@@ -2184,14 +2280,25 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn skips_identity_for_distinct_candidates() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let identity_calls = Cell::new(0);
         let detector = CycleDetector::<TestVisit, CountingIdentityItem<'_>, u8, 1>::new(0);
 
         assert_eq!(
-            detector.visit(db, CountingIdentityItem::new(1, &identity_calls), || {
-                detector.visit(db, CountingIdentityItem::new(2, &identity_calls), || 1)
-            }),
+            detector.visit(
+                db,
+                &env,
+                CountingIdentityItem::new(1, &identity_calls),
+                || {
+                    detector.visit(
+                        db,
+                        &env,
+                        CountingIdentityItem::new(2, &identity_calls),
+                        || 1,
+                    )
+                }
+            ),
             1
         );
         assert_eq!(identity_calls.get(), 0);
@@ -2200,16 +2307,27 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn skips_identity_without_a_distinct_active_item() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let identity_calls = Cell::new(0);
         let detector = CycleDetector::<TestVisit, CountingIdentityItem<'_>, u8, 1>::new(0);
 
         assert_eq!(
-            detector.visit(db, CountingIdentityItem::new(1, &identity_calls), || 1),
+            detector.visit(
+                db,
+                &env,
+                CountingIdentityItem::new(1, &identity_calls),
+                || 1
+            ),
             1
         );
         assert_eq!(
-            detector.visit(db, CountingIdentityItem::new(1, &identity_calls), || 2),
+            detector.visit(
+                db,
+                &env,
+                CountingIdentityItem::new(1, &identity_calls),
+                || 2
+            ),
             1
         );
         assert_eq!(identity_calls.get(), 0);
@@ -2218,16 +2336,17 @@ class RecursivePropertySetter[T](Protocol):
     #[test]
     fn different_items_with_same_identity_form_cycle() {
         let db = setup_db();
+        let env = db.program_environment();
         let db = &db;
         let detector = CycleDetector::<TestVisit, ConstantIdentityItem, u8, 1>::new(0);
 
         let CycleDetectorVisit::Pending(pending) =
-            detector.begin_visit(db, ConstantIdentityItem(1))
+            detector.begin_visit(db, &env, ConstantIdentityItem(1))
         else {
             panic!("the first identity should be pending");
         };
         let CycleDetectorVisit::Cycle(item, previous) =
-            detector.begin_visit(db, ConstantIdentityItem(2))
+            detector.begin_visit(db, &env, ConstantIdentityItem(2))
         else {
             panic!("a different item with the same identity should form a cycle");
         };
@@ -2235,18 +2354,20 @@ class RecursivePropertySetter[T](Protocol):
         assert_eq!(previous.0, 1);
         detector.finish_visit(pending, 1);
 
-        let CycleDetectorVisit::Ready(seen) = detector.begin_visit(db, ConstantIdentityItem(1))
+        let CycleDetectorVisit::Ready(seen) =
+            detector.begin_visit(db, &env, ConstantIdentityItem(1))
         else {
             panic!("the first identity should be ready after the pending visit is finished");
         };
         assert_eq!(seen, 1);
         let CycleDetectorVisit::Pending(pending) =
-            detector.begin_visit(db, ConstantIdentityItem(2))
+            detector.begin_visit(db, &env, ConstantIdentityItem(2))
         else {
             panic!("the second identity should be pending after the first is finished");
         };
         detector.finish_visit(pending, 2);
-        let CycleDetectorVisit::Ready(seen) = detector.begin_visit(db, ConstantIdentityItem(2))
+        let CycleDetectorVisit::Ready(seen) =
+            detector.begin_visit(db, &env, ConstantIdentityItem(2))
         else {
             panic!("the second identity should be ready after the pending visit is finished");
         };

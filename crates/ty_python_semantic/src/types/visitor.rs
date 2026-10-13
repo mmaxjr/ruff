@@ -1,5 +1,5 @@
 use crate::Db;
-use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use std::cell::{Cell, RefCell};
 use std::hash::Hash;
@@ -45,15 +45,11 @@ use crate::types::{
 /// as a more specific type such as `CallableType`. Calling a variant's visitor method directly
 /// would bypass the visitor's recursion guard and any handling of symbolic references.
 pub(crate) trait TypeVisitor<'db> {
-    fn program_environment(&self) -> &ProgramEnvironment<'db>;
+    fn program_environment(&self) -> &TypeOperations<'db>;
 
-    /// Supply the shared recursion state when visiting lazily inferred attributes.
-    /// The default walkers skip deferred attributes when this is `None`.
-    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>>;
-
-    fn should_visit_lazy_type_attributes(&self) -> bool {
-        self.lazy_type_context().is_some()
-    }
+    /// Whether this walk inspects deferred attributes. Their expansion always uses the
+    /// operation returned by `program_environment`.
+    fn should_visit_lazy_type_attributes(&self) -> bool;
 
     /// Notify the visitor that lazily-inferred type attributes were not visited.
     fn notify_skipped_lazy_type_attributes(&self) {}
@@ -496,7 +492,7 @@ pub(super) enum DynamicContentMode {
 /// Determine whether `ty` contains any dynamic type.
 pub(super) fn dynamic_content<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> DynamicContent {
     dynamic_content_impl(db, env, ty, DynamicContentMode::All)
@@ -520,7 +516,7 @@ pub(super) fn dynamic_content<'db>(
 /// because each recursive edge creates a new specialization.
 pub(super) fn non_any_dynamic_content<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> DynamicContent {
     dynamic_content_impl(db, env, ty, DynamicContentMode::NonAny)
@@ -528,12 +524,12 @@ pub(super) fn non_any_dynamic_content<'db>(
 
 pub(super) fn dynamic_content_impl<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     mode: DynamicContentMode,
 ) -> DynamicContent {
     struct DynamicContentVisitor<'a, 'db> {
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         mapping: ApplyTypeMappingVisitor<'a, 'db>,
         recursion_guard: TypeCollector<'db>,
         active_class_protocols: ActiveRecursionDetector<StaticClassLiteral<'db>>,
@@ -554,12 +550,12 @@ pub(super) fn dynamic_content_impl<'db>(
     }
 
     impl<'db> TypeVisitor<'db> for DynamicContentVisitor<'_, 'db> {
-        fn program_environment(&self) -> &ProgramEnvironment<'db> {
+        fn program_environment(&self) -> &TypeOperations<'db> {
             self.env
         }
 
-        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-            Some(self.mapping.recursion_context())
+        fn should_visit_lazy_type_attributes(&self) -> bool {
+            true
         }
 
         fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
@@ -739,12 +735,12 @@ pub(super) fn dynamic_content_impl<'db>(
 /// conservatively stops at another use of the same active definition.
 pub(super) fn contains_growing_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> bool {
     struct GrowingTypeVisitor<'visit, 'a, 'db> {
         recursive: &'visit StructuralTypeTraversal<'a, 'db, VisitRecursiveBody>,
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         recursion_guard: TypeCollector<'db>,
         active_class_protocols: ActiveRecursionDetector<StaticClassLiteral<'db>>,
         active_lambdas: ActiveRecursionDetector<ScopeId<'db>>,
@@ -752,12 +748,12 @@ pub(super) fn contains_growing_type<'db>(
     }
 
     impl<'db> TypeVisitor<'db> for GrowingTypeVisitor<'_, '_, 'db> {
-        fn program_environment(&self) -> &ProgramEnvironment<'db> {
+        fn program_environment(&self) -> &TypeOperations<'db> {
             self.env
         }
 
-        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-            Some(self.recursive.mapping_visitor().recursion_context())
+        fn should_visit_lazy_type_attributes(&self) -> bool {
+            true
         }
 
         fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
@@ -881,7 +877,7 @@ impl TypeSearchMode {
 /// Shared implementation for type searches.
 fn any_over_type_impl<'db, F, T>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     mode: TypeSearchMode,
     query: F,
@@ -892,7 +888,7 @@ where
 {
     struct AnyOverTypeVisitor<'db, 'a, 'visit, U> {
         recursive: &'visit StructuralTypeTraversal<'a, 'db, VisitRecursiveBody>,
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         query: &'a dyn Fn(Type<'db>) -> U,
         recursion_guard: TypeCollector<'db>,
         found_matching_type: Cell<U>,
@@ -903,14 +899,12 @@ where
     where
         U: Copy + Default + PartialEq,
     {
-        fn program_environment(&self) -> &ProgramEnvironment<'db> {
+        fn program_environment(&self) -> &TypeOperations<'db> {
             self.env
         }
 
-        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-            self.mode
-                .should_visit_lazy_type_attributes()
-                .then(|| self.recursive.mapping_visitor().recursion_context())
+        fn should_visit_lazy_type_attributes(&self) -> bool {
+            self.mode.should_visit_lazy_type_attributes()
         }
 
         fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
@@ -976,7 +970,7 @@ where
 /// are visited or not.
 pub(super) fn any_over_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     should_visit_lazy_type_attributes: bool,
     query: impl Fn(Type<'db>) -> bool,
@@ -995,7 +989,7 @@ pub(super) fn any_over_type<'db>(
 /// Shared arguments use the same recursion guard, so their descendants are not visited repeatedly.
 pub(super) fn any_over_type_including_alias_arguments<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     query: impl Fn(Type<'db>) -> bool,
 ) -> bool {
@@ -1009,13 +1003,13 @@ pub(super) fn any_over_type_including_alias_arguments<'db>(
 /// `Identity[Identity[int]]` are still considered finite.
 pub(super) fn any_over_type_expanding_aliases<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     query: impl Fn(Type<'db>) -> bool,
 ) -> bool {
     fn search<'db>(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         query: &impl Fn(Type<'db>) -> bool,
         active_aliases: &ActiveRecursionDetector<TypeIdentity<'db>>,
@@ -1031,7 +1025,7 @@ pub(super) fn any_over_type_expanding_aliases<'db>(
                             search(
                                 db,
                                 env,
-                                alias.value_type(db),
+                                alias.value_type(db, env),
                                 query,
                                 active_aliases,
                                 mapping,
@@ -1083,7 +1077,7 @@ pub(super) fn any_over_type_expanding_aliases<'db>(
 /// are visited or not.
 pub(super) fn find_over_type<'db, T>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     should_visit_lazy_type_attributes: bool,
     query: impl Fn(Type<'db>) -> Option<T>,

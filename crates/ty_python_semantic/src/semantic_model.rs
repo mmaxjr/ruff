@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use compact_str::CompactString;
 use ruff_db::PythonFile;
 use ruff_db::files::{File, FilePath};
@@ -89,8 +90,8 @@ impl<'db> SemanticModel<'db> {
         self.file.program(self.db)
     }
 
-    pub fn program_environment(&self) -> ProgramEnvironment<'db> {
-        ProgramEnvironment::from_file(self.program_file())
+    pub fn program_environment(&self) -> TypeOperations<'db> {
+        TypeOperations::for_file(self.db, self.file)
     }
 
     pub fn file_path(&self) -> &FilePath {

@@ -1,9 +1,10 @@
 //! Truthiness of already-inferred expressions, including paths that cannot produce a value.
 
+use crate::types::TypeOperations;
 use ruff_python_ast as ast;
 use ty_python_core::{Truthiness, expression::ExpressionContext};
 
-use crate::{Db, ProgramEnvironment, types::Type};
+use crate::{Db, types::Type};
 
 /// Determine whether an expression can finish evaluating and which boolean outcomes it can produce.
 ///
@@ -37,7 +38,7 @@ use crate::{Db, ProgramEnvironment, types::Type};
 /// The callbacks read existing inference results; this analyzer does not infer or cache types.
 pub(crate) struct TruthinessAnalyzer<'a, 'db, T, C> {
     db: &'db dyn Db,
-    env: &'a ProgramEnvironment<'db>,
+    env: &'a TypeOperations<'db>,
     expression_type: T,
     comparison_truthiness: C,
 }
@@ -50,7 +51,7 @@ where
     /// Read value types and comparison-chain outcomes from the same inference region.
     pub(crate) fn new(
         db: &'db dyn Db,
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         expression_type: T,
         comparison_truthiness: C,
     ) -> Self {
@@ -211,7 +212,7 @@ enum EvaluationOutcome<'db> {
 }
 
 impl<'db> EvaluationOutcome<'db> {
-    fn truthiness(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Truthiness {
+    fn truthiness(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Truthiness {
         match self {
             Self::Value(ty) => ty.bool(db, env),
             Self::Condition(truthiness) => truthiness,

@@ -97,7 +97,7 @@ fn collect_paths<'db, 'c>(
         Paths::default(),
         |mut paths, path, budget| {
             for binding in path {
-                budget.charge_type(db, binding.solution)?;
+                budget.charge_type(db, &env, binding.solution)?;
             }
             let mut path = path.to_vec();
             path.sort_by_key(|binding| {
@@ -167,7 +167,7 @@ fn invalid_paths_respect_projection_budgets() {
     let str = known_instance(db, KnownClass::Str);
     let bool = known_instance(db, KnownClass::Bool);
     let bytes = known_instance(db, KnownClass::Bytes);
-    let t = create_typevar(db, "T").map_bound_or_constraints(db, |_| {
+    let t = create_typevar(db, "T").map_bound_or_constraints(db, &env, |_| {
         Some(TypeVarBoundOrConstraints::Constraints(
             TypeVarConstraints::new(db, [int, str].as_slice()),
         ))
@@ -243,7 +243,7 @@ fn alternative_constraint_failures_keep_upper_bounds_on_separate_paths() {
     let bool = known_instance(db, KnownClass::Bool);
     let bytes = known_instance(db, KnownClass::Bytes);
     let declared_constraints = TypeVarConstraints::new(db, [int, str].as_slice());
-    let t = create_typevar(db, "T").map_bound_or_constraints(db, |_| {
+    let t = create_typevar(db, "T").map_bound_or_constraints(db, &env, |_| {
         Some(TypeVarBoundOrConstraints::Constraints(declared_constraints))
     });
     let builder = ConstraintSetBuilder::new();
@@ -467,8 +467,8 @@ fn incomplete_solution_discards_the_projection() {
 
     for alternatives in [[int, str], [str, int]] {
         let set = binary_choice(db, &builder, t, alternatives);
-        let choose = |_, candidate: &CandidateTypeVarSolution<'_>| {
-            let lower = candidate.inference_lower(db, &env);
+        let choose = |_: TypeVarVariance, candidate: &_| {
+            let lower = CandidateTypeVarSolution::inference_lower(candidate, db, &env);
             if lower == Some(str) {
                 PathBoundSolution::BudgetExceeded {
                     fallback: Some(str),
@@ -534,8 +534,8 @@ fn rejected_exhausted_path_does_not_poison_valid_sibling() {
                     fallback: Some(str),
                 },
             ] {
-                let choose = |_, candidate: &CandidateTypeVarSolution<'_>| {
-                    let lower = candidate.inference_lower(db, &env);
+                let choose = |_: TypeVarVariance, candidate: &_| {
+                    let lower = CandidateTypeVarSolution::inference_lower(candidate, db, &env);
                     if candidate.bound_typevar == u {
                         PathBoundSolution::Unsatisfiable
                     } else if lower == Some(str) {
@@ -560,7 +560,7 @@ fn rejected_exhausted_path_does_not_poison_valid_sibling() {
                         Vec::new(),
                         |mut paths, path, budget| {
                             for binding in path {
-                                budget.charge_type(db, binding.solution)?;
+                                budget.charge_type(db, &env, binding.solution)?;
                             }
                             paths.push(solution(path.iter().copied()));
                             Ok(paths)
@@ -667,7 +667,7 @@ fn type_budget_is_charged_before_constructing_a_union() {
             |accumulated, path, budget| {
                 assert_eq!(path.len(), 1);
                 let ty = path[0].solution;
-                budget.charge_type(db, ty)?;
+                budget.charge_type(db, &env, ty)?;
                 constructed += 1;
                 Ok(UnionType::from_two_elements(db, &env, accumulated, ty))
             },
@@ -735,10 +735,13 @@ type Recursive = int | Recursive
         (alias("Recursive")?, 2),
     ] {
         assert_eq!(
-            ProjectionTypeBudget::new(terms - 1).charge_type(db, ty),
+            ProjectionTypeBudget::new(terms - 1).charge_type(db, &env, ty),
             Err(ProjectionError::TypeBudgetExceeded)
         );
-        assert_eq!(ProjectionTypeBudget::new(terms).charge_type(db, ty), Ok(()));
+        assert_eq!(
+            ProjectionTypeBudget::new(terms).charge_type(db, &env, ty),
+            Ok(())
+        );
     }
     Ok(())
 }
@@ -795,7 +798,7 @@ class E: ...
                 |accumulated, path, budget| {
                     assert_eq!(path.len(), 1);
                     let ty = path[0].solution;
-                    budget.charge_type(db, ty)?;
+                    budget.charge_type(db, &env, ty)?;
                     IntersectionType::bounded_from_elements(db, &env, [accumulated, ty])
                         .ok_or(ProjectionError::TypeBudgetExceeded)
                 },

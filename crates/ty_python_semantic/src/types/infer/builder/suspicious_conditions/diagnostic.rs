@@ -60,7 +60,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     pub(super) fn report_redundant_condition<'ctx>(
         &'ctx self,
         condition: &RedundantCondition<'_, 'db>,
-    ) -> Option<LintDiagnosticGuard<'ctx, 'ctx>> {
+    ) -> Option<LintDiagnosticGuard<'db, 'ctx>> {
         #[derive(Debug)]
         enum FunctionInfo<'db> {
             Function(CallableType<'db>, &'db str),
@@ -292,7 +292,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             ));
 
             let definition_info =
-                condition_definition_info(db, self.program_file(), test, |expr| {
+                condition_definition_info(db, env, self.program_file(), test, |expr| {
                     self.expression_type(expr)
                 });
 
@@ -888,8 +888,8 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         test_subexpression: &ast::Expr,
         subexpression_type: Type<'db>,
         length: i64,
-        builder: LintDiagnosticGuardBuilder<'a, 'a>,
-    ) -> LintDiagnosticGuard<'a, 'a> {
+        builder: LintDiagnosticGuardBuilder<'db, 'a>,
+    ) -> LintDiagnosticGuard<'db, 'a> {
         let db = self.db();
         let env = self.program_environment();
 
@@ -1037,7 +1037,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             }
 
             let definition_info =
-                condition_definition_info(db, self.program_file(), node, |expr| {
+                condition_definition_info(db, env, self.program_file(), node, |expr| {
                     self.expression_type(expr)
                 });
 

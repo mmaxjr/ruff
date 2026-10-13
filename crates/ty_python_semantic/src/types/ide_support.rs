@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -385,7 +386,7 @@ impl<'a> ImplementationsFinder<'a> {
     /// handling.
     pub fn for_class_reference(
         db: &'a dyn Db,
-        env: &ProgramEnvironment<'a>,
+        env: &TypeOperations<'a>,
         resolved_definitions: &[ResolvedDefinition<'a>],
     ) -> Option<Self> {
         let mut roots = Vec::new();
@@ -698,7 +699,7 @@ fn member_implementation_definition<'db>(
 /// Normalizes a receiver type into the class roots used for implementation lookup.
 fn collect_implementation_root_classes<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     seen: &mut FxHashSet<ClassLiteral<'db>>,
     roots: &mut Vec<ClassLiteral<'db>>,
@@ -1002,11 +1003,11 @@ pub struct CallSignatureParameter<'db> {
 impl<'db> CallSignatureDetails<'db> {
     fn from_binding(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         binding: &crate::types::call::Binding<'db>,
     ) -> Self {
         let argument_to_parameter_mapping = binding.argument_matches().to_vec();
-        let specialization = binding.merged_specialization(db);
+        let specialization = binding.merged_specialization(db, env);
         let signature = binding.signature.clone();
         let display_details = signature.display(db, env).to_string_parts();
         let (parameters, parameter_to_displayed_parameter_mapping) =
@@ -1508,11 +1509,7 @@ pub fn definitions_for_unary_op<'db>(
 /// Promotes types in `self` positions.
 ///
 /// This is so that we show e.g. `int.__add__` instead of `Literal[4].__add__`.
-fn promote_for_self<'db>(
-    db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
-    ty: Type<'db>,
-) -> Type<'db> {
+fn promote_for_self<'db>(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> Type<'db> {
     match ty {
         Type::BoundMethod(method) => Type::BoundMethod(method.map_self_type(db, |self_ty| {
             self_ty
@@ -1690,7 +1687,7 @@ mod stub_mapping {
     use crate::types::definition_resolution::{
         ImportAliasResolution, ResolvedDefinition, find_symbol_in_scope, resolve_definition,
     };
-    use crate::{Db, ProgramEnvironment};
+    use crate::{Db, ProgramEnvironment, TypeOperations};
     use ruff_db::files::vendored_path_to_file;
     use ruff_db::parsed::parsed_module;
     use ruff_db::system::SystemPath;
@@ -1710,7 +1707,8 @@ mod stub_mapping {
             trace!("Found arbitrary FileWithRange while stub mapping, giving up");
             return None;
         };
-        let env = ProgramEnvironment::from_file(stub_program_file);
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_file(stub_program_file));
 
         // If the file isn't a stub, this is presumably the real definition
         let stub_file = stub_program_file.file(db);
@@ -1870,7 +1868,7 @@ pub struct TypeHierarchyClass<'db> {
 /// subsequent requests for supertypes or subtypes.
 pub fn type_hierarchy_prepare<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> Option<TypeHierarchyClass<'db>> {
     let class_literal = extract_class_literal(db, env, ty)?;
@@ -1885,7 +1883,7 @@ pub fn type_hierarchy_prepare<'db>(
 /// This includes `object` when the given class has no direct base classes.
 pub fn type_hierarchy_supertypes<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> Vec<TypeHierarchyClass<'db>> {
     let Some(class_literal) = extract_class_literal(db, env, ty) else {
@@ -1918,7 +1916,7 @@ pub fn type_hierarchy_supertypes<'db>(
 /// returns an empty sequence.
 pub fn type_hierarchy_subtypes<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     modules: &[Module<'db>],
 ) -> Vec<TypeHierarchyClass<'db>> {
@@ -1942,7 +1940,7 @@ pub fn type_hierarchy_subtypes<'db>(
 /// For `Animal`, this returns `Dog`, but not `LoudDog`.
 fn direct_subtypes<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     target_class: ClassLiteral<'db>,
     modules: &[Module<'db>],
 ) -> Vec<ClassLiteral<'db>> {
@@ -1982,7 +1980,7 @@ fn direct_subtypes<'db>(
         }
 
         let program_file = ProgramFile::new(db, file, env.program(db));
-        let file_env = ProgramEnvironment::from_file(program_file);
+        let file_env = env.in_environment(ProgramEnvironment::from_file(program_file));
         for class_ty in reachable_class_literals_in_file(db, program_file) {
             let bases = class_ty.explicit_bases(db);
             let is_subtype = if target_is_object
@@ -2009,7 +2007,7 @@ fn reachable_class_literals_in_file<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
 ) -> Vec<ClassLiteral<'db>> {
-    let env = ProgramEnvironment::from_file(file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
     let index = semantic_index(db, file);
     let parsed = parsed_module(db, file.python_file(db)).load(db);
     let mut classes = Vec::new();
@@ -2044,7 +2042,7 @@ fn reachable_class_literals_in_file<'db>(
 /// Extract a `ClassLiteral` from a `Type`, handling various type forms.
 fn extract_class_literal<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> Option<ClassLiteral<'db>> {
     match ty {
@@ -2156,12 +2154,15 @@ fn class_literal_to_hierarchy_info<'db>(
     }
 }
 
-pub fn constructor_signature(model: &SemanticModel, call_expr: &ast::ExprCall) -> Option<String> {
+pub fn constructor_signature<'db>(
+    model: &SemanticModel<'db>,
+    call_expr: &ast::ExprCall,
+) -> Option<String> {
     let function_ty = call_expr.func.inferred_type(model)?;
     let db = model.db();
     let class_name = function_ty.as_class_literal()?.name(db);
     let env = &model.program_environment();
-    let display_sig = |signature: &Signature| {
+    let display_sig = |signature: &Signature<'db>| {
         let params = signature
             .display(db, env)
             .multiline()

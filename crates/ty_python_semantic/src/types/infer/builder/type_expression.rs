@@ -226,7 +226,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         &self,
         expression: impl Ranged,
         message: impl std::fmt::Display,
-    ) -> Option<LintDiagnosticGuard<'_, '_>> {
+    ) -> Option<LintDiagnosticGuard<'db, '_>> {
         self.context
             .report_lint(&INVALID_TYPE_FORM, expression)
             .map(|builder| {
@@ -281,6 +281,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             .default_specialize(db, env)
             .in_type_expression(
                 db,
+                env,
                 self.scope(),
                 self.typevar_binding_context,
                 self.inference_flags(),
@@ -1325,6 +1326,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             self.recursive_implicit_alias_reference(value_ty, definition)
         {
             let db = self.db();
+            let env = self.program_environment();
             return self.infer_explicit_callable_specialization(
                 subscript,
                 alias,
@@ -1332,7 +1334,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 &|arguments| {
                     alias.apply_specialization(
                         db,
-                        parameters.specialize_partial(db, arguments.iter().copied()),
+                        parameters.specialize_partial(db, env, arguments.iter().copied()),
                     )
                 },
             );
@@ -1677,15 +1679,18 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                         if class_literal.is_tuple(self.db()) {
                             let class_type = self
                                 .infer_tuple_type_expression(subscript)
-                                .to_class_type(self.db());
+                                .to_class_type(self.db(), self.program_environment());
                             SubclassOfType::from(db, env, class_type)
                         } else {
                             match class_literal.generic_context(db) {
                                 Some(generic_context) => {
                                     let specialize = &|types: &[Option<Type<'db>>]| {
                                         let class = class_literal.apply_specialization(db, |_| {
-                                            generic_context
-                                                .specialize_partial(db, types.iter().copied())
+                                            generic_context.specialize_partial(
+                                                db,
+                                                env,
+                                                types.iter().copied(),
+                                            )
                                         });
                                         if class_literal.is_protocol(db) {
                                             match Type::instance(db, env, class) {
@@ -1790,13 +1795,14 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let specialize = &|types: &[Option<Type<'db>>]| {
             let specialized = value_ty.apply_specialization(
                 db,
-                generic_context.specialize_partial(db, types.iter().copied()),
+                generic_context.specialize_partial(db, env, types.iter().copied()),
             );
 
             if in_type_expression {
                 specialized
                     .in_type_expression(
                         db,
+                        env,
                         scope_id,
                         current_typevar_binding_context,
                         current_inference_flags,
@@ -1956,6 +1962,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                             specialized_type_alias
                                 .in_type_expression(
                                     db,
+                                    env,
                                     self.scope(),
                                     self.typevar_binding_context,
                                     self.inference_flags(),
@@ -2129,6 +2136,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                         specialized_class
                             .in_type_expression(
                                 db,
+                                env,
                                 self.scope(),
                                 self.typevar_binding_context,
                                 self.inference_flags(),
@@ -2373,7 +2381,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     AnnotatedExprContext::TypeExpression,
                 )
                 .inner_type()
-                .in_type_expression(db, self.scope(), None, self.inference_flags())
+                .in_type_expression(db, env, self.scope(), None, self.inference_flags())
                 .unwrap_or_else(|err| {
                     err.into_fallback_type(&self.context, subscript, self.inference_flags())
                 }),
@@ -3086,7 +3094,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 match subscript_ty {
                     // type aliases to literal types
                     Type::KnownInstance(KnownInstanceType::TypeAliasType(type_alias)) => {
-                        let value_ty = type_alias.value_type(db);
+                        let value_ty = type_alias.value_type(db, env);
                         if value_ty.is_literal_or_union_of_literals(db, env) {
                             return Ok(value_ty);
                         }

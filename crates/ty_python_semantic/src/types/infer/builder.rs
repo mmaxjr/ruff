@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use std::cell::{OnceCell, RefCell};
 use std::collections::hash_map;
@@ -131,9 +132,9 @@ use crate::types::{
     ClassType, CycleKind, DynamicType, GeneratorTypeMode, InferenceFlags, InternedConstraintSet,
     InternedType, IntersectionBuilder, IntersectionType, KnownBoundMethodType, KnownClass,
     KnownInstanceType, KnownUnion, LiteralValueType, LiteralValueTypeKind, MemberLookupPolicy,
-    ParamSpecAttrKind, Parameter, ParameterDefault, Parameters, ProgramEnvironment,
-    PropertyDeprecations, SentinelInstance, Signature, SpecialFormType, SubclassOfType, Type,
-    TypeAliasType, TypeAndQualifiers, TypeContext, TypeQualifiers, TypeQuery, TypeQueryContext,
+    ParamSpecAttrKind, Parameter, ParameterDefault, Parameters, PropertyDeprecations,
+    SentinelInstance, Signature, SpecialFormType, SubclassOfType, Type, TypeAliasType,
+    TypeAndQualifiers, TypeContext, TypeQualifiers, TypeQuery, TypeQueryContext,
     TypeVarBoundOrConstraints, TypeVarKind, TypeVarVariance, TypingModule, UnionAccumulator,
     UnionBuilder, UnionType, any_over_type, extract_fixed_length_iterable_element_types,
     infer_complete_scope_types, is_discarded_dict_key_assignment, todo_type,
@@ -408,7 +409,7 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
 
 fn transparent_callable_decorator_result<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     bindings: &Bindings<'db>,
     decorated_ty: Type<'db>,
 ) -> Option<Type<'db>> {
@@ -431,7 +432,7 @@ fn transparent_callable_decorator_result<'db>(
 
     fn callable_paramspec_and_return<'db>(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> Option<(BoundTypeVarInstance<'db>, TransparentCallableReturn<'db>)> {
         TypeInspector::inspect_root(
@@ -573,7 +574,7 @@ impl<'db> AttributeDeletion<'_> {
     fn check_final(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         object_ty: Type<'db>,
     ) -> Result<(), Option<AttributeDeletionError<'db>>> {
         if let Some(object_ty) =
@@ -591,7 +592,7 @@ impl<'db> AttributeDeletion<'_> {
     fn check_leaf(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         object_ty: Type<'db>,
     ) -> Result<(), Option<AttributeDeletionError<'db>>> {
         let attribute = self.attribute;
@@ -610,6 +611,7 @@ impl<'db> AttributeDeletion<'_> {
                     .and_then(|(class, specialization)| {
                         class.inherited_frozen_dataclass_dispatch(
                             db,
+                            env,
                             specialization,
                             "__delattr__",
                             attribute,
@@ -752,7 +754,7 @@ impl<'db> AttributeDeletion<'_> {
     /// when called for deletion on `object_ty`.
     fn property_deleter_returns_never(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         property_ty: Type<'db>,
         object_ty: Type<'db>,
     ) -> bool {
@@ -777,7 +779,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     /// Creates a new builder for inferring types in a region.
     pub(super) fn new(
         db: &'db dyn Db,
-        env: &'ast ProgramEnvironment<'db>,
+        env: &'ast TypeOperations<'db>,
         region: InferenceRegion<'db>,
         file: File,
         program_file: ProgramFile<'db>,
@@ -1207,7 +1209,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     }
 
     #[inline]
-    fn program_environment(&self) -> &'ast ProgramEnvironment<'db> {
+    fn program_environment(&self) -> &'ast TypeOperations<'db> {
         self.context.program_environment()
     }
 
@@ -7130,6 +7132,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 let specialized = Type::from(class.apply_specialization(db, |generic_context| {
                     generic_context.specialize_recursive(
                         db,
+                        env,
                         generic_context.variables(db).map(|typevar| {
                             type_context_mappings.get(&typevar.identity(db)).copied()
                         }),
@@ -8000,7 +8003,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 FxHashMap::default();
 
             if let Some(tcx) = tcx.annotation
-                && tcx.has_outer_type(db, |ty| matches!(ty, Type::NominalInstance(_)))
+                && tcx.has_outer_type(db, env, |ty| matches!(ty, Type::NominalInstance(_)))
                 && let Some(specialization) = tcx.known_specialization(db, env, collection_class)
                 && specialization.generic_context(self.db()) == generic_context
                 && generic_context.variables(self.db()).all(|typevar| {
@@ -8172,8 +8175,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 let class_type = collection_alias.origin(self.db()).apply_specialization(
                     db,
                     |generic_context| {
-                        generic_context
-                            .specialize_recursive(db, specialization.into_iter().map(Some))
+                        generic_context.specialize_recursive(
+                            db,
+                            env,
+                            specialization.into_iter().map(Some),
+                        )
                     },
                 );
                 return Type::from(class_type).to_instance_approximation(db, env);
@@ -9214,7 +9220,13 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let scope = scope_id.to_scope_id(self.db(), self.program_file());
 
         if let Some((source, lambda)) = contextual_callable.as_ref().and_then(|(callable, _)| {
-            callable.lambda_with_same_inputs(db, scope, &parameters, self.environment)
+            callable.lambda_with_same_inputs(
+                db,
+                self.program_environment(),
+                scope,
+                &parameters,
+                self.environment,
+            )
         }) {
             self.lambda_inputs.insert(lambda_expression.into(), source);
             self.extend_scope(source.infer_body(db));
@@ -11030,6 +11042,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 if !self.environment.for_scope(db, scope).is_empty() {
                     place_by_id_with_context(
                         db,
+                        env,
                         scope,
                         id,
                         RequiresExplicitReExport::No,
@@ -11338,9 +11351,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 in_union: bool,
             ) -> Self::Output {
                 if let Type::NewTypeInstance(newtype) = ty
-                    && newtype
-                        .concrete_base_type(db)
-                        .has_outer_type(db, super::super::Type::is_union)
+                    && newtype.concrete_base_type(db).has_outer_type(
+                        db,
+                        traversal.environment(),
+                        super::super::Type::is_union,
+                    )
                 {
                     return traversal.visit_with(db, newtype.concrete_base_type(db), in_union);
                 }
@@ -11497,6 +11512,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                             ));
                             if let Ok(defined_type) = value_type.in_type_expression(
                                 db,
+                                env,
                                 self.scope(),
                                 self.typevar_binding_context,
                                 self.inference_flags(),
@@ -11841,7 +11857,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             (_, Type::Never) => Type::Never,
 
             (_, Type::TypeAlias(alias)) => {
-                self.infer_unary_expression_type(op, alias.value_type(db), unary)
+                self.infer_unary_expression_type(op, alias.value_type(db, env), unary)
             }
 
             (ast::UnaryOp::UAdd, Type::LiteralValue(literal)) => match literal.kind() {
@@ -13284,7 +13300,7 @@ fn is_empty_collection_type_context(tcx: TypeContext<'_>) -> bool {
 
 fn prefer_collection_literal_peer_context<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     tcx: TypeContext<'db>,
 ) -> bool {
     is_empty_collection_type_context(tcx)
@@ -13738,11 +13754,7 @@ impl<'db, 'ast> AddBinding<'db, 'ast> {
     /// pyright. TODO: Other standard library classes may also be considered safe. Also,
     /// subclasses of these safe classes that do not override `__getitem__/__setitem__`
     /// may be considered safe.
-    fn is_safe_mutable_class(
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        ty: Type<'db>,
-    ) -> bool {
+    fn is_safe_mutable_class(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> bool {
         const SAFE_MUTABLE_CLASSES: &[KnownClass] = &[
             KnownClass::List,
             KnownClass::Dict,

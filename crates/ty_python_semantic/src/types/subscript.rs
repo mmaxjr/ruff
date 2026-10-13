@@ -1,8 +1,8 @@
 //! Inference for subscript expressions (e.g., `x[0]`, `list[int]`).
 
 use crate::Db;
-use crate::ProgramEnvironment;
 use crate::types::ApplyTypeMappingVisitor;
+use crate::types::TypeOperations;
 use std::fmt::{self, Display};
 
 use compact_str::{CompactString, ToCompactString};
@@ -390,7 +390,7 @@ impl<'db> SubscriptErrorKind<'db> {
 /// Preserve a constrained type variable when each alternative's result matches that constraint.
 fn map_subscript_alternatives<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     full_object_ty: Type<'db>,
     alternatives: impl IntoIterator<Item = Type<'db>>,
     mut map_fn: impl FnMut(Type<'db>) -> Result<Type<'db>, SubscriptError<'db>>,
@@ -435,7 +435,7 @@ fn map_subscript_alternatives<'db>(
 
 fn map_intersection_subscript<'db, F>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     intersection: IntersectionType<'db>,
     mut map_fn: F,
 ) -> Result<Type<'db>, SubscriptError<'db>>
@@ -505,7 +505,7 @@ where
 // `Unknown` otherwise. This is not naturally representable via synthesized `__getitem__` overloads.
 fn typed_dict_subscript<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     typed_dict: TypedDictType<'db>,
     slice_ty: Type<'db>,
 ) -> Result<Type<'db>, SubscriptError<'db>> {
@@ -598,10 +598,10 @@ impl<'db> SubscriptChecker<'_, 'db> {
                             .map(|body| self.check(db, value_ty, body))
                             .unwrap_or(Ok(value_ty)),
                         (Type::TypeAlias(alias), _) => {
-                            self.check(db, alias.value_type(db), slice_ty)
+                            self.check(db, alias.value_type(db, self.mapping.env), slice_ty)
                         }
                         (_, Type::TypeAlias(alias)) => {
-                            self.check(db, value_ty, alias.value_type(db))
+                            self.check(db, value_ty, alias.value_type(db, self.mapping.env))
                         }
                         _ => value_ty.subscript_impl(db, self, slice_ty),
                     },
@@ -614,7 +614,7 @@ impl<'db> Type<'db> {
     pub(super) fn subscript(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         slice_ty: Type<'db>,
         expr_context: ast::ExprContext,
     ) -> Result<Type<'db>, SubscriptError<'db>> {

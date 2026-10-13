@@ -49,6 +49,7 @@
 //! the public type of `f` is resolved at position 3, correctly giving you all of the overloads
 //! (and the implementation).
 
+use crate::types::TypeOperations;
 use std::{borrow::Cow, str::FromStr};
 
 use bitflags::bitflags;
@@ -233,7 +234,7 @@ impl<'db> DataclassTransformerParams<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -470,7 +471,7 @@ impl<'db> OverloadLiteral<'db> {
             .name
             .scoped_use_id(db, self.program_file(db));
 
-        let env = ProgramEnvironment::from_scope(scope);
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
         let Place::Defined(DefinedPlace {
             ty: previous_type,
             definedness: Definedness::AlwaysDefined,
@@ -531,7 +532,8 @@ impl<'db> OverloadLiteral<'db> {
         let is_generator = file_scope_id.is_generator_function(index);
 
         if function_node.is_async && !is_generator {
-            let env = ProgramEnvironment::from_file(program_file);
+            let env =
+                TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
             signature.return_ty = KnownClass::CoroutineType.to_specialized_instance(
                 db,
                 &env,
@@ -546,13 +548,16 @@ impl<'db> OverloadLiteral<'db> {
     pub(crate) fn decorated_signatures(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
     ) -> impl Iterator<Item = Signature<'db>> + Clone + 'db {
         match binding_type(db, self.definition(db)) {
             Type::Callable(callable) => Either::Left(
                 callable
                     .inspect_signatures_root(
                         db,
-                        &ProgramEnvironment::from_definition(self.definition(db)),
+                        &env.in_environment(ProgramEnvironment::from_definition(
+                            self.definition(db),
+                        )),
                         |_, signatures| signatures.overloads.clone(),
                     )
                     .unwrap_or_default()
@@ -633,7 +638,8 @@ impl<'db> OverloadLiteral<'db> {
                 .is_some_and(|class| class.is_protocol(db))
         }
 
-        let env = &ProgramEnvironment::from_scope(self.body_scope(db));
+        let env =
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
         let scope = self.body_scope(db);
         let program_file = self.program_file(db);
         let python_file = program_file.python_file(db);
@@ -709,8 +715,8 @@ impl<'db> OverloadLiteral<'db> {
                 let index = semantic_index(db, scope_id.program_file(db));
                 let class = nearest_enclosing_class(db, index, scope_id).unwrap();
 
-                let typing_self = typing_self(db, scope_id, typevar_binding_context, class.into())
-                    .expect(
+                let typing_self =
+                    typing_self(db, env, scope_id, typevar_binding_context, class.into()).expect(
                         "We should always find the surrounding class \
                      for an implicit self: Self annotation",
                     );
@@ -937,6 +943,10 @@ impl<'db> FunctionLiteral<'db> {
     /// a cross-module dependency directly on the full AST which will lead to cache
     /// over-invalidation.
     fn signature(self, db: &'db dyn Db) -> CallableSignature<'db> {
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_definition(self.last_definition.definition(db)),
+        );
         // We only include an implementation (i.e. a definition not decorated with `@overload`) if
         // it's the only definition.
         let (overloads, implementation) = self.overloads_and_implementation(db);
@@ -956,9 +966,13 @@ impl<'db> FunctionLiteral<'db> {
                             .with_source_overload_index(Some(source_overload_index)),
                     ))
                 } else {
-                    Either::Right(overload.decorated_signatures(db).map(move |signature| {
-                        signature.with_source_overload_index(Some(source_overload_index))
-                    }))
+                    Either::Right(
+                        overload
+                            .decorated_signatures(db, &env)
+                            .map(move |signature| {
+                                signature.with_source_overload_index(Some(source_overload_index))
+                            }),
+                    )
                 }
             },
         ))
@@ -1039,7 +1053,8 @@ impl<'db> FunctionLiteral<'db> {
             let definition = implementation.definition(db);
             let program_file = definition.program_file(db);
             let python_file = program_file.python_file(db);
-            let env = ProgramEnvironment::from_file(program_file);
+            let env =
+                TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
             let file = python_file.file(db);
             let module = parsed_module(db, python_file).load(db);
             let node = implementation.node(db, file, &module);
@@ -1226,14 +1241,18 @@ impl<'db> FunctionType<'db> {
             .and_then(|updated| updated.signature.as_ref())
     }
 
-    fn updated_implementation_signature(self, db: &'db dyn Db) -> Option<Signature<'db>> {
+    fn updated_implementation_signature(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<Signature<'db>> {
         let [callable] = self.updated_implementation_callables(db)? else {
             return None;
         };
         callable
             .inspect_signatures_root(
                 db,
-                &ProgramEnvironment::from_definition(self.definition(db)),
+                &env.in_environment(ProgramEnvironment::from_definition(self.definition(db))),
                 |_, signatures| {
                     let [signature] = signatures.overloads.as_slice() else {
                         return None;
@@ -1283,6 +1302,7 @@ impl<'db> FunctionType<'db> {
     pub(crate) fn with_inherited_generic_context(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         inherited_generic_context: GenericContext<'db>,
     ) -> Self {
         let updated_signature = self
@@ -1296,7 +1316,9 @@ impl<'db> FunctionType<'db> {
                     callable
                         .inspect_signatures_root(
                             db,
-                            &ProgramEnvironment::from_definition(self.definition(db)),
+                            &env.in_environment(ProgramEnvironment::from_definition(
+                                self.definition(db),
+                            )),
                             |_, signatures| {
                                 callable.with_signatures(
                                     db,
@@ -1651,15 +1673,15 @@ impl<'db> FunctionType<'db> {
     #[salsa::tracked(
         returns(ref),
         cycle_initial=|db, id, function: FunctionType<'db>| {
-            let env = ProgramEnvironment::from_scope(
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(
                 function.literal(db).last_definition.body_scope(db),
-            );
+            ));
             CallableSignature::cycle_initial(db, &env, id)
         },
         cycle_fn=|db, cycle, previous, value: CallableSignature<'db>, function: FunctionType<'db>| {
-            let env = ProgramEnvironment::from_scope(
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(
                 function.literal(db).last_definition.body_scope(db),
-            );
+            ));
             value.cycle_normalized(db, &env, previous, cycle)
         },
         heap_size=ruff_memory_usage::heap_size,
@@ -1689,7 +1711,10 @@ impl<'db> FunctionType<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        let env = ProgramEnvironment::from_scope(self.literal(db).last_definition.body_scope(db));
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_scope(self.literal(db).last_definition.body_scope(db)),
+        );
         self.signature(db).variance_of(db, &env, typevar)
     }
 
@@ -1708,9 +1733,13 @@ impl<'db> FunctionType<'db> {
         heap_size=ruff_memory_usage::heap_size,
     )]
     pub(crate) fn last_definition_signature(self, db: &'db dyn Db) -> Signature<'db> {
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_definition(self.definition(db)),
+        );
         let literal = self.literal(db);
         if literal.has_separate_implementation(db) {
-            self.updated_implementation_signature(db)
+            self.updated_implementation_signature(db, &env)
                 .unwrap_or_else(|| literal.last_definition_signature(db))
         } else {
             self.updated_signature(db)
@@ -1773,7 +1802,7 @@ impl<'db> FunctionType<'db> {
     pub(crate) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'_, 'db>,
@@ -1787,7 +1816,7 @@ impl<'db> FunctionType<'db> {
     pub(crate) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -1881,7 +1910,7 @@ pub(crate) fn function_has_stub_body(node: &ast::StmtFunctionDef) -> bool {
 /// the analysis is only done on the remaining statements if the first is a docstring.
 pub(super) fn function_body_kind<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     node: &ast::StmtFunctionDef,
     infer_type: impl Fn(&ast::Expr) -> Type<'db>,
 ) -> FunctionBodyKind {

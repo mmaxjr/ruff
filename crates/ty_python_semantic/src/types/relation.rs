@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use std::borrow::Cow;
 use std::cell::RefCell;
 
@@ -299,7 +300,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_subtype_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
@@ -310,7 +311,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_subtype_of<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
@@ -329,7 +330,7 @@ impl<'db> Type<'db> {
     pub(super) fn is_subtype_of_with_recursion(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         context: &TypeRecursionContext<'db>,
     ) -> bool {
@@ -339,7 +340,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_subtype_of<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -361,7 +362,7 @@ impl<'db> Type<'db> {
     pub fn is_assignable_to(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> bool {
         self.when_assignable_to_owned(db, env, target, TypeVarSet::None)
@@ -372,7 +373,7 @@ impl<'db> Type<'db> {
     pub(super) fn is_attribute_writable_with(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         value_ty: Type<'db>,
     ) -> bool {
@@ -401,7 +402,7 @@ impl<'db> Type<'db> {
     pub(crate) fn assignability_error_context(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> ErrorContextTree<'db> {
         self.relation_error_context(db, env, TypeRelation::Assignability, target)
@@ -418,7 +419,7 @@ impl<'db> Type<'db> {
     pub(crate) fn pure_redundancy_error_context(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> ErrorContextTree<'db> {
         self.relation_error_context(db, env, TypeRelation::Redundancy { pure: true }, target)
@@ -431,7 +432,7 @@ impl<'db> Type<'db> {
     fn relation_error_context(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         relation: TypeRelation,
         target: Type<'db>,
     ) -> ErrorContextTree<'db> {
@@ -458,7 +459,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_constraint_set_assignable_to(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
@@ -471,12 +472,15 @@ impl<'db> Type<'db> {
     pub(super) fn is_constraint_set_subtype_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> bool {
         #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| false, heap_size=ruff_memory_usage::heap_size)]
         fn is_constraint_set_subtype_of_impl<'db>(db: &'db dyn Db, types: TypePair<'db>) -> bool {
-            let env = ProgramEnvironment::from_program(types.program(db));
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_program(types.program(db)),
+            );
             let constraints = ConstraintSetBuilder::new();
             types
                 .first(db)
@@ -499,7 +503,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_assignable_to<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
@@ -517,7 +521,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_assignable_to_owned(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         inferable: TypeVarSet<'db>,
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
@@ -532,7 +536,7 @@ impl<'db> Type<'db> {
             inferable: TypeVarSet<'db>,
         ) -> OwnedConstraintSet<'db> {
             let program = types.program(db);
-            let env = ProgramEnvironment::from_program(program);
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
             let constraints = ConstraintSetBuilder::new();
             constraints.into_owned(|constraints| {
                 let source = types.first(db);
@@ -599,7 +603,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_assignable_to_owned(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
         #[salsa::tracked(
@@ -612,7 +616,7 @@ impl<'db> Type<'db> {
             types: TypePair<'db>,
         ) -> OwnedConstraintSet<'db> {
             let program = types.program(db);
-            let env = ProgramEnvironment::from_program(program);
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
             let constraints = ConstraintSetBuilder::new();
             constraints.into_owned(|constraints| {
                 let source = types.first(db);
@@ -645,7 +649,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_assignable_to<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -661,7 +665,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_assignable_to_with_provenance<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         provenance: ConstraintProvenance,
@@ -684,13 +688,13 @@ impl<'db> Type<'db> {
     pub(super) fn is_redundant_with(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
         #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| true, heap_size=ruff_memory_usage::heap_size)]
         fn is_redundant_with_impl<'db>(db: &'db dyn Db, types: TypePair<'db>) -> bool {
             let program = types.program(db);
-            let env = ProgramEnvironment::from_program(program);
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
             types
                 .first(db)
                 .has_relation_to(
@@ -717,14 +721,14 @@ impl<'db> Type<'db> {
     pub(super) fn is_redundant_with_recursion(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
         context: &TypeRecursionContext<'db>,
     ) -> bool {
         if self == other {
             return true;
         }
-        context.check_redundancy(db, env.program(db), self, other, || {
+        context.check_redundancy(db, env, self, other, || {
             self.is_related_to_with_recursion(
                 db,
                 env,
@@ -739,7 +743,7 @@ impl<'db> Type<'db> {
     fn is_related_to_with_recursion(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
         relation: TypeRelation,
         context: &TypeRecursionContext<'db>,
@@ -749,8 +753,7 @@ impl<'db> Type<'db> {
             let relation_visitor = HasRelationToVisitor::default(&constraints);
             let disjointness_visitor = IsDisjointVisitor::default(&constraints);
             let signature_relation_visitor = SignatureRelationVisitor::default();
-            let materialization_visitor =
-                ApplyTypeMappingVisitor::new(env).with_recursion_context(context);
+            let materialization_visitor = ApplyTypeMappingVisitor::new(env);
             TypeRelationChecker::new(
                 env,
                 relation,
@@ -773,30 +776,28 @@ impl<'db> Type<'db> {
     pub(super) fn is_pure_redundant_with(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
         if self == other {
             return true;
         }
 
-        let program = env.program(db);
-        let env = ProgramEnvironment::from_program(program);
         self.has_relation_to(
             db,
-            &env,
+            env,
             other,
             &ConstraintSetBuilder::new(),
             TypeVarSet::None,
             TypeRelation::Redundancy { pure: true },
         )
-        .is_always_satisfied(db, &env, TypeVarSet::None)
+        .is_always_satisfied(db, env, TypeVarSet::None)
     }
 
     pub(super) fn has_relation_to<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
@@ -818,7 +819,7 @@ impl<'db> Type<'db> {
     fn has_relation_to_with_typevar_evaluation<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         target: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
@@ -862,7 +863,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_equivalent_to(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
         self.when_equivalent_to(db, env, other, &ConstraintSetBuilder::new())
@@ -888,7 +889,7 @@ impl<'db> Type<'db> {
     pub(crate) fn when_equivalent_to<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -905,7 +906,7 @@ impl<'db> Type<'db> {
     pub(super) fn when_constraint_set_equivalent_to_owned(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
         #[salsa::tracked(
@@ -917,7 +918,10 @@ impl<'db> Type<'db> {
             db: &'db dyn Db,
             types: TypePair<'db>,
         ) -> OwnedConstraintSet<'db> {
-            let env = ProgramEnvironment::from_program(types.program(db));
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_program(types.program(db)),
+            );
             let constraints = ConstraintSetBuilder::new();
             let materialization_visitor = ApplyTypeMappingVisitor::new(&env);
             constraints.into_owned(|constraints| {
@@ -946,7 +950,7 @@ impl<'db> Type<'db> {
     pub(super) fn is_constraint_set_equivalent_to(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
         if self == other {
@@ -1000,7 +1004,7 @@ impl<'db> Type<'db> {
     pub(crate) fn is_disjoint_from(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
         let constraints = ConstraintSetBuilder::new();
@@ -1011,7 +1015,7 @@ impl<'db> Type<'db> {
     pub(crate) fn when_disjoint_from<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
@@ -1039,7 +1043,7 @@ impl<'db> Type<'db> {
     pub(super) fn is_disjoint_from_with_recursion(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
         context: &TypeRecursionContext<'db>,
     ) -> bool {
@@ -1048,8 +1052,7 @@ impl<'db> Type<'db> {
             let relation_visitor = HasRelationToVisitor::default(&constraints);
             let disjointness_visitor = IsDisjointVisitor::default(&constraints);
             let signature_relation_visitor = SignatureRelationVisitor::default();
-            let materialization_visitor =
-                ApplyTypeMappingVisitor::new(env).with_recursion_context(context);
+            let materialization_visitor = ApplyTypeMappingVisitor::new(env);
             DisjointnessChecker::new(
                 env,
                 &constraints,
@@ -1068,7 +1071,7 @@ impl<'db> Type<'db> {
     pub(crate) fn disjointness_error_context(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> ErrorContextTree<'db> {
         let constraints = ConstraintSetBuilder::new();
@@ -1095,7 +1098,7 @@ impl<'db> Type<'db> {
     pub(crate) fn when_trivially_disjoint_from<'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: Type<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
@@ -1143,13 +1146,13 @@ impl<'db, 'c> HasRelationToVisitor<'db, 'c> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum ComparisonType<'db> {
     Exact(Type<'db>),
-    Lambda(&'db LambdaSignatureKey<'db>, Option<KnownClass>),
+    Lambda(LambdaSignatureKey<'db>, Option<KnownClass>),
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SignatureComparison<'db> {
     source: ComparisonType<'db>,
     target: ComparisonType<'db>,
@@ -1175,7 +1178,7 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>, TypeRelation, TypeVarEvalu
             && self.3 == other.3
     }
 
-    fn to_identity(&self, db: &'db dyn Db) -> Self::Id {
+    fn to_identity(&self, db: &'db dyn Db, _env: &TypeOperations<'db>) -> Self::Id {
         (
             self.0.to_type_identity(db),
             self.1.to_type_identity(db),
@@ -1199,7 +1202,7 @@ impl<'db, 'c> IsDisjointVisitor<'db, 'c> {
 
 #[derive(Clone)]
 pub(super) struct TypeRelationChecker<'a, 'c, 'db> {
-    pub(super) env: &'a ProgramEnvironment<'db>,
+    pub(super) env: &'a TypeOperations<'db>,
     pub(super) constraints: &'c ConstraintSetBuilder<'db>,
     pub(super) inferable: TypeVarSet<'db>,
     pub(super) relation: TypeRelation,
@@ -1227,17 +1230,13 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         db: &'db dyn Db,
         instance: NominalInstanceType<'db>,
     ) -> ClassType<'db> {
-        instance.class_with_recursion(
-            db,
-            self.env,
-            self.materialization_visitor.recursion_context(),
-        )
+        instance.class(db, self.env)
     }
 
     /// Create a relation checker that eagerly evaluates type variables.
     #[expect(clippy::too_many_arguments)]
     pub(super) fn new(
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         relation: TypeRelation,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
@@ -1263,7 +1262,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     pub(super) fn subtyping(
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
@@ -1284,7 +1283,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     pub(super) fn constraint_set_assignability(
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
@@ -1307,7 +1306,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     pub(super) fn constraint_set_assignability_with_context(
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
@@ -1331,7 +1330,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     pub(super) fn assignability_with_context(
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
         disjointness_visitor: &'a IsDisjointVisitor<'db, 'c>,
@@ -1744,8 +1743,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     ) -> Option<SignatureComparison<'db>> {
         let key = |ty| {
             if let Type::Callable(callable) = ty
-                && let Some(key) = callable
-                    .signature_comparison_key(db, self.materialization_visitor.recursion_context())
+                && let Some(key) = callable.signature_comparison_key(db, self.env)
             {
                 ComparisonType::Lambda(key, callable.runtime_class(db))
             } else {
@@ -2092,13 +2090,13 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 
             (Type::TypeAlias(source_alias), _) => {
                 self.with_recursion_guard(db, source, target, |_| {
-                    self.check_type_pair(db, source_alias.value_type(db), target)
+                    self.check_type_pair(db, source_alias.value_type(db, env), target)
                 })
             }
 
             (_, Type::TypeAlias(target_alias)) => {
                 self.with_recursion_guard(db, source, target, |_| {
-                    self.check_type_pair(db, source, target_alias.value_type(db))
+                    self.check_type_pair(db, source, target_alias.value_type(db, env))
                 })
             }
 
@@ -2335,11 +2333,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                 Type::NominalInstance(target_instance),
             ) if target_instance.has_known_class(db, KnownClass::FunctoolsPartial) => self
                 .with_recursion_guard(db, source, target, |_| {
-                    let specialized = partial.partial(db).into_functools_partial_instance(
-                        db,
-                        env,
-                        self.materialization_visitor.recursion_context(),
-                    );
+                    let specialized = partial.partial(db).into_functools_partial_instance(db, env);
                     self.check_type_pair(db, specialized, target)
                 }),
 
@@ -2909,7 +2903,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 
                 if let Some(sequence_class) = KnownClass::Sequence.try_to_class_literal(db, env)
                     && !sequence_class
-                        .iter_mro(db, None)
+                        .iter_mro(db)
                         .filter_map(ClassBase::into_class)
                         .map(|class| class.class_literal(db))
                         .contains(&target_class)
@@ -2960,7 +2954,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 
                 if let Some(sequence_class) = KnownClass::Sequence.try_to_class_literal(db, env)
                     && !sequence_class
-                        .iter_mro(db, None)
+                        .iter_mro(db)
                         .filter_map(ClassBase::into_class)
                         .map(|class| class.class_literal(db))
                         .contains(&target_class)
@@ -3334,7 +3328,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 }
 
 pub(super) struct EquivalenceChecker<'a, 'c, 'db> {
-    env: &'a ProgramEnvironment<'db>,
+    env: &'a TypeOperations<'db>,
     pub(super) constraints: &'c ConstraintSetBuilder<'db>,
     provenance: ConstraintProvenance,
     perform_expensive_checks: bool,
@@ -3404,7 +3398,7 @@ impl<'c, 'db> EquivalenceChecker<'_, 'c, 'db> {
 }
 
 pub(super) struct DisjointnessChecker<'a, 'c, 'db> {
-    pub(super) env: &'a ProgramEnvironment<'db>,
+    pub(super) env: &'a TypeOperations<'db>,
     pub(super) constraints: &'c ConstraintSetBuilder<'db>,
     pub(super) inferable: TypeVarSet<'db>,
     context_tree: Option<ErrorContextTree<'db>>,
@@ -3430,11 +3424,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
         callable: CallableType<'db>,
         inspect: impl FnOnce(&CallableSignature<'db>) -> R,
     ) -> Option<R> {
-        callable.inspect_signatures(
-            db,
-            self.materialization_visitor.recursion_context(),
-            inspect,
-        )
+        callable.inspect_signatures(db, self.env, inspect)
     }
 
     /// Keep tuple element normalization inside this comparison's recursion context.
@@ -3443,15 +3433,11 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
         db: &'db dyn Db,
         instance: NominalInstanceType<'db>,
     ) -> ClassType<'db> {
-        instance.class_with_recursion(
-            db,
-            self.env,
-            self.materialization_visitor.recursion_context(),
-        )
+        instance.class(db, self.env)
     }
 
     pub(super) fn new(
-        env: &'a ProgramEnvironment<'db>,
+        env: &'a TypeOperations<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
         inferable: TypeVarSet<'db>,
         relation_visitor: &'a HasRelationToVisitor<'db, 'c>,
@@ -3740,14 +3726,14 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             }
 
             (Type::TypeAlias(alias), _) => nontrivial_check(self, || {
-                let left_alias_ty = alias.value_type(db);
+                let left_alias_ty = alias.value_type(db, env);
                 self.with_recursion_guard(db, left, right, |_| {
                     self.check_type_pair(db, left_alias_ty, right)
                 })
             }),
 
             (_, Type::TypeAlias(alias)) => nontrivial_check(self, || {
-                let right_alias_ty = alias.value_type(db);
+                let right_alias_ty = alias.value_type(db, env);
                 self.with_recursion_guard(db, left, right, |_| {
                     self.check_type_pair(db, left, right_alias_ty)
                 })

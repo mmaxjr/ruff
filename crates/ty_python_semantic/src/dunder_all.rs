@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::statement_visitor::{StatementVisitor, walk_stmt};
@@ -31,7 +32,7 @@ pub(crate) fn dunder_all_names(db: &dyn Db, file: ProgramFile<'_>) -> Option<FxH
 /// A visitor that collects the names in the `__all__` variable of a module.
 struct DunderAllNamesCollector<'db> {
     db: &'db dyn Db,
-    env: ProgramEnvironment<'db>,
+    env: TypeOperations<'db>,
     file: ProgramFile<'db>,
 
     /// The semantic index for the module.
@@ -52,7 +53,7 @@ impl<'db> DunderAllNamesCollector<'db> {
     fn new(db: &'db dyn Db, file: ProgramFile<'db>, index: &'db SemanticIndex<'db>) -> Self {
         Self {
             db,
-            env: ProgramEnvironment::from_file(file),
+            env: TypeOperations::for_inference(db, ProgramEnvironment::from_file(file)),
             file,
             index,
             origin: None,

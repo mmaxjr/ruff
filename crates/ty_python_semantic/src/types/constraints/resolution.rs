@@ -1,5 +1,6 @@
 //! Resolve dependencies between the selected bindings of one solution alternative.
 
+use crate::types::TypeOperations;
 use std::cell::{Cell, RefCell};
 
 use rustc_hash::FxHashMap;
@@ -17,7 +18,7 @@ use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarInstance, CallableType, KnownInstanceType, RecursiveType,
     Type, TypeAliasType, TypeContext, TypeMapping,
 };
-use crate::{Db, FxOrderMap, ProgramEnvironment};
+use crate::{Db, FxOrderMap};
 
 /// Whether a selected type is independent of the other inferable variables in its alternative.
 ///
@@ -34,7 +35,7 @@ pub(crate) enum SolutionType<'db> {
 /// `solution`; references outside `inferable` retain their original bound-variable identity.
 pub(crate) fn resolve_solution<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     inferable: TypeVarSet<'db>,
     solution: &[TypeVarSolution<'db>],
 ) -> Box<[SolutionType<'db>]> {
@@ -64,7 +65,7 @@ pub(crate) fn resolve_solution<'db>(
 struct ResolveBinding;
 
 struct Resolver<'a, 'db> {
-    env: &'a ProgramEnvironment<'db>,
+    env: &'a TypeOperations<'db>,
     inferable: TypeVarSet<'db>,
     solution: &'a [TypeVarSolution<'db>],
     indices: FxHashMap<BoundTypeVarIdentity<'db>, usize>,
@@ -75,7 +76,7 @@ impl<'db> Resolver<'_, 'db> {
     fn resolve(&self, db: &'db dyn Db, index: usize) -> Option<Type<'db>> {
         let binding = &self.solution[index];
         self.resolved
-            .visit(db, Type::TypeVar(binding.bound_typevar), || {
+            .visit(db, self.env, Type::TypeVar(binding.bound_typevar), || {
                 let original = binding.solution;
                 let replacements = RefCell::new(FxOrderMap::default());
                 if !Dependencies::check(db, self.env, original, |dependency| {
@@ -134,7 +135,7 @@ struct VisitDependencies;
 /// Collect the variables occurring in types, including lazy callable returns.
 pub(in crate::types) fn type_dependencies<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     types: impl IntoIterator<Item = Type<'db>>,
 ) -> TypeVarSet<'db> {
     let variables = RefCell::new(FxOrderMap::default());
@@ -161,7 +162,7 @@ pub(in crate::types) fn type_dependencies<'db>(
 /// Visits typevar occurrences, leaving their declarations' bounds and defaults alone.
 struct Dependencies<'a, 'db> {
     mapping: ApplyTypeMappingVisitor<'a, 'db>,
-    env: &'a ProgramEnvironment<'db>,
+    env: &'a TypeOperations<'db>,
     query: &'a dyn Fn(BoundTypeVarInstance<'db>) -> bool,
     satisfied: Cell<bool>,
     visited: CycleDetector<'db, VisitDependencies, Type<'db>, (), 3>,
@@ -170,7 +171,7 @@ struct Dependencies<'a, 'db> {
 impl<'db> Dependencies<'_, 'db> {
     fn check(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         query: impl Fn(BoundTypeVarInstance<'db>) -> bool,
     ) -> bool {
@@ -196,12 +197,12 @@ impl<'db> Dependencies<'_, 'db> {
 }
 
 impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
-    fn program_environment(&self) -> &ProgramEnvironment<'db> {
+    fn program_environment(&self) -> &TypeOperations<'db> {
         self.env
     }
 
-    fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-        None
+    fn should_visit_lazy_type_attributes(&self) -> bool {
+        false
     }
 
     fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
@@ -232,8 +233,9 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
         } else if let TypeKind::NonAtomic(non_atomic) = TypeKind::from(ty) {
             // Revisiting a recursive structural type adds no new dependencies. Binding cycles
             // are handled separately by Resolver, where their fallback is unresolved.
-            self.visited
-                .visit(db, ty, || walk_non_atomic_type(db, non_atomic, self));
+            self.visited.visit(db, self.env, ty, || {
+                walk_non_atomic_type(db, non_atomic, self)
+            });
         }
     }
 
@@ -242,7 +244,7 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
     fn visit_bound_type_var_type(&self, _db: &'db dyn Db, _typevar: BoundTypeVarInstance<'db>) {}
 
     fn visit_type_alias_type(&self, db: &'db dyn Db, alias: TypeAliasType<'db>) {
-        self.visit_type(db, alias.value_type(db));
+        self.visit_type(db, alias.value_type(db, self.env));
     }
 
     fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {

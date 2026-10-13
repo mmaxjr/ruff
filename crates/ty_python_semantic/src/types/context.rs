@@ -12,7 +12,7 @@ use ruff_python_ast::PythonVersion;
 use ruff_text_size::{Ranged, TextRange};
 use salsa::plumbing::{AsId, FromId, Id};
 
-use super::{Type, TypeCheckDiagnostics, infer_definition_types};
+use super::{Type, TypeCheckDiagnostics, TypeOperations, infer_definition_types};
 
 use crate::diagnostic::DiagnosticGuard;
 use crate::importer::Importer;
@@ -139,7 +139,7 @@ enum ProgramSource {
 /// on the current inference result.
 pub(crate) struct InferContext<'db, 'ast> {
     db: &'db dyn Db,
-    program_environment: &'ast ProgramEnvironment<'db>,
+    program_environment: &'ast TypeOperations<'db>,
     scope: ScopeId<'db>,
     file: File,
     program_file: ProgramFile<'db>,
@@ -154,7 +154,7 @@ pub(crate) struct InferContext<'db, 'ast> {
 impl<'db, 'ast> InferContext<'db, 'ast> {
     pub(crate) fn new(
         db: &'db dyn Db,
-        program_environment: &'ast ProgramEnvironment<'db>,
+        program_environment: &'ast TypeOperations<'db>,
         scope: ScopeId<'db>,
         file: File,
         program_file: ProgramFile<'db>,
@@ -194,7 +194,7 @@ impl<'db, 'ast> InferContext<'db, 'ast> {
     }
 
     #[inline]
-    pub(crate) fn program_environment(&self) -> &'ast ProgramEnvironment<'db> {
+    pub(crate) fn program_environment(&self) -> &'ast TypeOperations<'db> {
         self.program_environment
     }
 
@@ -292,7 +292,7 @@ impl<'db, 'ast> InferContext<'db, 'ast> {
         &'ctx self,
         lint: &'static LintMetadata,
         ranged: T,
-    ) -> Option<LintDiagnosticGuardBuilder<'ctx, 'db>> {
+    ) -> Option<LintDiagnosticGuardBuilder<'db, 'ctx>> {
         LintDiagnosticGuardBuilder::new(self, lint, ranged.range())
     }
 
@@ -314,7 +314,7 @@ impl<'db, 'ast> InferContext<'db, 'ast> {
         &'ctx self,
         id: DiagnosticId,
         severity: Severity,
-    ) -> Option<DiagnosticGuardBuilder<'ctx, 'db>> {
+    ) -> Option<DiagnosticGuardBuilder<'db, 'ctx>> {
         DiagnosticGuardBuilder::new(self, id, severity)
     }
 

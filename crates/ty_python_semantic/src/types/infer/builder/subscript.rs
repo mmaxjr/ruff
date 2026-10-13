@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use crate::types::recursive::{TypeInspector, TypeVisitorState};
 use itertools::{Either, EitherOrBoth, Itertools};
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span};
@@ -36,7 +37,7 @@ use crate::types::{
     TypeAliasType, TypeAndQualifiers, TypeContext, TypeMapping, TypeVarBoundOrConstraints,
     UnionType, UnionTypeInstance, any_over_type, todo_type,
 };
-use crate::{Db, FxOrderSet, ProgramEnvironment};
+use crate::{Db, FxOrderSet};
 use ty_python_core::definition::Definition;
 use ty_python_core::place::PlaceExpr;
 use ty_python_core::scope::FileScopeId;
@@ -73,7 +74,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         fn imp<'db>(
             db: &'db dyn Db,
-            env: &ProgramEnvironment<'db>,
+            env: &TypeOperations<'db>,
             ty: Type<'db>,
             visitor: &TypedDictKeyExpectedTypeVisitor<'_, 'db>,
         ) -> Option<Type<'db>> {
@@ -246,7 +247,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             }
         }
 
-        let tuple_generic_alias = |tuple: TupleType<'db>| Type::from(tuple.to_class_type(db));
+        let tuple_generic_alias = |tuple: TupleType<'db>| Type::from(tuple.to_class_type(db, env));
 
         match value_ty {
             Type::ClassLiteral(class) => {
@@ -512,11 +513,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         generic_class: StaticClassLiteral<'db>,
         generic_context: GenericContext<'db>,
     ) -> Type<'db> {
-        let env = self.program_environment();
         let db = self.db();
+        let env = self.program_environment();
         let specialize = &|types: &[Option<Type<'db>>]| {
             Type::from(generic_class.apply_specialization(db, |_| {
-                generic_context.specialize_partial(db, types.iter().copied())
+                generic_context.specialize_partial(db, env, types.iter().copied())
             }))
         };
 
@@ -585,9 +586,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             return Type::unknown();
         }
 
+        let env = self.program_environment();
         let specialize = &|types: &[Option<Type<'db>>]| {
             let type_alias = generic_type_alias.apply_specialization(db, |_| {
-                generic_context.specialize_partial(db, types.iter().copied())
+                generic_context.specialize_partial(db, env, types.iter().copied())
             });
 
             Type::KnownInstance(KnownInstanceType::TypeAliasType(type_alias))
@@ -1700,7 +1702,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         .iter_flat()
                         .flat_map(CallableBinding::matching_overloads)
                         .filter_map(|(_, identity_overload)| {
-                            identity_overload.merged_specialization(db)
+                            identity_overload.merged_specialization(db, env)
                         })
                     {
                         // Record the constraints on the receiver's generic context formed by
@@ -2501,7 +2503,7 @@ impl<'db> LegacyGenericContextError<'db> {
 #[expect(clippy::too_many_arguments)]
 fn infer_legacy_generic_subscript<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     index: &'db SemanticIndex<'db>,
     file_scope_id: FileScopeId,
     typevar_binding_context: Option<Definition<'db>>,
@@ -2551,7 +2553,7 @@ fn infer_legacy_generic_subscript<'db>(
 /// that each argument is a type variable.
 fn legacy_generic_class_context<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     index: &'db SemanticIndex<'db>,
     file_scope_id: FileScopeId,
     typevar_binding_context: Option<Definition<'db>>,

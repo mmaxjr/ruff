@@ -5,6 +5,7 @@
 //! listing all members on a nominal-instance type or a class-literal type requires
 //! listing all members in the class's body scope.
 
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::{CycleKind, TypeTraversal, TypeWalk};
 use std::cmp::Ordering;
@@ -37,7 +38,7 @@ pub(crate) fn all_end_of_scope_members<'db>(
     db: &'db dyn Db,
     scope_id: ScopeId<'db>,
 ) -> impl Iterator<Item = MemberWithDefinition<'db>> + 'db {
-    let env = ProgramEnvironment::from_scope(scope_id);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope_id));
 
     let use_def_map = use_def_map(db, scope_id);
     let table = place_table(db, scope_id);
@@ -93,7 +94,7 @@ pub(crate) fn all_reachable_members<'db>(
     db: &'db dyn Db,
     scope_id: ScopeId<'db>,
 ) -> impl Iterator<Item = MemberWithDefinition<'db>> + 'db {
-    let env = ProgramEnvironment::from_scope(scope_id);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope_id));
 
     let use_def_map = use_def_map(db, scope_id);
     let table = place_table(db, scope_id);
@@ -220,7 +221,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
     fn collect_type_members(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> bool {
         match ty {
@@ -535,7 +536,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
     fn extend_with_class_members(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         class_literal: ClassLiteral<'db>,
     ) {
@@ -572,7 +573,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
     fn extend_with_slot_members(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         class_literal: StaticClassLiteral<'db>,
     ) {
@@ -600,7 +601,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
     fn extend_with_metaclass_members(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         metaclass: Type<'db>,
     ) {
@@ -618,7 +619,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
     fn extend_with_instance_members_for_class(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         class_literal: StaticClassLiteral<'db>,
     ) {
@@ -667,14 +668,11 @@ impl<'db> AllMembers<'_, '_, 'db> {
     fn extend_with_instance_members(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         class_literal: StaticClassLiteral<'db>,
     ) {
-        for class in class_literal
-            .iter_mro(db, None)
-            .filter_map(ClassBase::into_class)
-        {
+        for class in class_literal.iter_mro(db).filter_map(ClassBase::into_class) {
             if let Some((class_literal, _)) = class.static_class_literal(db) {
                 self.extend_with_instance_members_for_class(db, env, ty, class_literal);
             }
@@ -684,7 +682,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
     fn extend_with_synthetic_members(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         class_literal: ClassLiteral<'db>,
     ) {
@@ -763,9 +761,10 @@ impl<'db> Member<'db> {
     pub(super) fn local_function_bindings(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         scope: ScopeId<'db>,
     ) -> impl Iterator<Item = (FunctionType<'db>, Type<'db>)> {
-        let env = ProgramEnvironment::from_scope(scope);
+        let env = env.in_environment(ProgramEnvironment::from_scope(scope));
         let functions = self.local_functions(db, scope);
         let retained = self.local_functions_from_type(db, scope);
         let exposed = self.ty;
@@ -986,7 +985,7 @@ pub(super) fn extract_underlying_functions<'db>(
 /// as an attribute on an object of the given type.
 pub(crate) fn all_members<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> FxHashSet<Member<'db>> {
     TypeTraversal::with_root(env, CollectMembers { db }, |root| root.visit(db, ty))

@@ -1,5 +1,6 @@
 //! Compatibility of the values read from and written to inherited attributes.
 
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use ruff_db::diagnostic::Annotation;
 use ruff_python_ast::name::Name;
@@ -7,7 +8,7 @@ use ruff_python_stdlib::identifiers::is_mangled_private;
 use ty_python_core::definition::{Definition, DefinitionKind};
 
 use crate::{
-    Db, ProgramEnvironment, attribute_declarations,
+    Db, attribute_declarations,
     lint::LintMetadata,
     place::{DefinedPlace, Place, TypeOrigin},
     types::{
@@ -109,7 +110,7 @@ fn is_method_type<'db>(db: &'db dyn Db, ty: Type<'db>) -> bool {
 /// With `owner = Base` and a `Child` receiver, the read contract remains `int`.
 fn member_contract<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     owner: ClassType<'db>,
     receiver: Type<'db>,
     name: &str,
@@ -290,7 +291,7 @@ fn member_contract<'db>(
 /// whose input domain cannot yet be represented.
 fn descriptor_write_domain<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     descriptor: Type<'db>,
     receiver: Type<'db>,
     storage_type: Type<'db>,
@@ -360,7 +361,7 @@ enum AttributeViolation<'db> {
 /// Read types are covariant and write types are contravariant.
 fn attribute_violation<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     receiver: Type<'db>,
     target_receiver: Type<'db>,
     name: &str,
@@ -526,7 +527,7 @@ impl<'db> AttributeOverrideViolation<'db> {
 /// Diagnostic settings do not affect which check applies.
 pub(super) fn check_override<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     class: ClassType<'db>,
     superclass: ClassType<'db>,
     inherited_owner: Option<ClassType<'db>>,
@@ -609,7 +610,7 @@ pub(super) fn check_override<'db>(
         if let Some(MemberContract::Attribute(parent_source)) =
             member_contract(db, env, parent, parent_receiver, name, inherited_kind)
             && parent
-                .iter_mro(db)
+                .iter_mro(db, env)
                 .skip(1)
                 .filter_map(ClassBase::into_class)
                 .chain(parent.iter_explicit_ancestors(db, env).skip(1))

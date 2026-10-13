@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use ruff_db::diagnostic::Span;
 use ruff_python_ast::name::Name;
 use ruff_text_size::TextRange;
@@ -30,7 +31,7 @@ impl<'db> EnumSpec<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -72,7 +73,7 @@ impl<'db> DynamicEnumAnchor<'db> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -113,7 +114,7 @@ impl<'db> DynamicEnumLiteral<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -196,19 +197,20 @@ impl<'db> DynamicEnumLiteral<'db> {
         cycle_initial=|db, _, self_: DynamicEnumLiteral<'db>| {
             Ok(Mro::from([
                 ClassBase::Class(ClassType::NonGeneric(ClassLiteral::DynamicEnum(self_))),
-                ClassBase::object(db, &ProgramEnvironment::from_scope(self_.scope(db))),
+                ClassBase::object(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self_.scope(db)))),
             ]))
         }
     )]
     pub(crate) fn try_mro(self, db: &'db dyn Db) -> Result<Mro<'db>, DynamicMroError<'db>> {
-        Mro::of_dynamic_enum(db, self)
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.scope(db)));
+        Mro::of_dynamic_enum(db, &env, self)
     }
 
     fn has_known_members(self, db: &'db dyn Db) -> bool {
         self.spec(db).has_known_members(db)
     }
 
-    fn mixin_class(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Option<ClassType<'db>> {
+    fn mixin_class(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Option<ClassType<'db>> {
         let mixin = self.mixin_type(db)?;
         let ClassBase::Class(class) = ClassBase::try_from_type(db, env, mixin, None)? else {
             return None;
@@ -266,7 +268,7 @@ impl<'db> DynamicEnumLiteral<'db> {
     pub(crate) fn class_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -301,7 +303,7 @@ impl<'db> DynamicEnumLiteral<'db> {
     pub(crate) fn instance_member(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
         if let Some(mixin_class) = self.mixin_class(db, env) {

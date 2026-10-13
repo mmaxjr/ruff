@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use crate::types::constraints::ConstraintSet;
 use crate::types::relation::{DisjointnessChecker, TypeRelation, TypeRelationChecker};
 use crate::types::{ClassType, KnownUnion, Type, definition_expression_type, visitor};
@@ -57,7 +58,7 @@ impl<'db> NewType<'db> {
         returns(copy),
         cycle_initial=|db, _, self_: NewType<'db>| NewTypeBase::ClassType(ClassType::object(
             db,
-            &ProgramEnvironment::from_definition(self_.definition(db)),
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_definition(self_.definition(db))),
         )),
         heap_size=ruff_memory_usage::heap_size
     )]
@@ -68,7 +69,7 @@ impl<'db> NewType<'db> {
         let definition = self.definition(db);
         let program_file = definition.program_file(db);
         let python_file = program_file.python_file(db);
-        let env = ProgramEnvironment::from_file(program_file);
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
         let object_fallback = NewTypeBase::ClassType(ClassType::object(db, &env));
         let module = parsed_module(db, python_file).load(db);
         let DefinitionKind::Assignment(assignment) = definition.kind(db) else {
@@ -113,7 +114,10 @@ impl<'db> NewType<'db> {
             match base {
                 NewTypeBase::NewType(_) => continue,
                 concrete => {
-                    let env = ProgramEnvironment::from_definition(self.definition(db));
+                    let env = TypeOperations::for_inference(
+                        db,
+                        ProgramEnvironment::from_definition(self.definition(db)),
+                    );
                     return concrete.instance_type(db, &env);
                 }
             }
@@ -192,7 +196,7 @@ impl<'db> NewType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -288,7 +292,7 @@ pub enum NewTypeBase<'db> {
 }
 
 impl<'db> NewTypeBase<'db> {
-    pub fn instance_type(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub fn instance_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         match self {
             NewTypeBase::ClassType(class_type) => Type::instance(db, env, class_type),
             NewTypeBase::NewType(newtype) => Type::NewTypeInstance(newtype),
@@ -300,7 +304,7 @@ impl<'db> NewTypeBase<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {

@@ -2,6 +2,7 @@ use super::context::InferContext;
 use super::{ClassType, Signature, Type, TypeContext, UnionType};
 use crate::Db;
 use crate::place::Provenance;
+use crate::types::TypeOperations;
 use crate::types::call::bind::BindingError;
 use crate::types::function::OverloadLiteral;
 use crate::types::{MemberLookupPolicy, PropertyInstanceType};
@@ -39,15 +40,11 @@ enum ReflectedMethodPriority {
 ///
 /// This is intentionally conservative: a false negative only widens a binary operation's result,
 /// while a false positive could discard a valid normal-method result.
-fn has_exact_runtime_class<'db>(
-    db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
-    ty: Type<'db>,
-) -> bool {
+fn has_exact_runtime_class<'db>(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> bool {
     match ty {
         Type::ClassLiteral(_) | Type::LiteralValue(_) => true,
         Type::NominalInstance(instance) => instance.class(db, env).is_final(db),
-        Type::TypeAlias(alias) => has_exact_runtime_class(db, env, alias.value_type(db)),
+        Type::TypeAlias(alias) => has_exact_runtime_class(db, env, alias.value_type(db, env)),
         _ => false,
     }
 }
@@ -58,7 +55,7 @@ fn has_exact_runtime_class<'db>(
 /// metaclass.
 fn operator_dispatch_class<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> Option<ClassType<'db>> {
     match ty {
@@ -83,7 +80,7 @@ fn operator_dispatch_class<'db>(
 /// ```
 fn reflected_method_priority<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     left_ty: Type<'db>,
     right_ty: Type<'db>,
 ) -> ReflectedMethodPriority {
@@ -138,7 +135,7 @@ impl<'db> Type<'db> {
     /// equality when neither comparison method is available.
     pub(super) fn try_call_rich_comparison_dunder(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         left: Type<'db>,
         right: Type<'db>,
         dunder: &'static str,
@@ -199,7 +196,7 @@ impl<'db> Type<'db> {
     /// Returns `None` if resolution fails; callers remain responsible for call-site diagnostics.
     pub(crate) fn try_call_bin_op_result(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         left_ty: Type<'db>,
         op: ast::Operator,
         right_ty: Type<'db>,
@@ -212,7 +209,7 @@ impl<'db> Type<'db> {
             op: ast::Operator,
             right_ty: Type<'db>,
         ) -> Option<BinaryOperationResult<'db>> {
-            let env = &ProgramEnvironment::from_program(program);
+            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
             Type::try_call_bin_op(db, env, left_ty, op, right_ty)
                 .ok()
                 .map(|bindings| BinaryOperationResult {
@@ -229,7 +226,7 @@ impl<'db> Type<'db> {
 
     pub(crate) fn try_call_bin_op(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         left_ty: Type<'db>,
         op: ast::Operator,
         right_ty: Type<'db>,
@@ -246,7 +243,7 @@ impl<'db> Type<'db> {
 
     pub(crate) fn try_call_bin_op_with_policy(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         left_ty: Type<'db>,
         op: ast::Operator,
         right_ty: Type<'db>,
@@ -363,7 +360,7 @@ impl<'db> Type<'db> {
 pub(crate) struct CallError<'db>(pub(crate) CallErrorKind, pub(crate) Box<Bindings<'db>>);
 
 impl<'db> CallError<'db> {
-    pub(crate) fn return_type(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub(crate) fn return_type(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         self.1.return_type(db, env)
     }
 
@@ -492,7 +489,7 @@ impl<'db> CallDunderError<'db> {
     pub(super) fn return_type(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<Type<'db>> {
         match self {
             Self::MethodNotAvailable | Self::CallError(CallErrorKind::NotCallable, _, _) => None,
@@ -504,7 +501,7 @@ impl<'db> CallDunderError<'db> {
     pub(super) fn fallback_return_type(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         self.return_type(db, env).unwrap_or(Type::unknown())
     }

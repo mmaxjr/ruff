@@ -61,6 +61,7 @@
 //! [test-discovery]: https://docs.pytest.org/en/stable/explanation/goodpractices.html#conventions-for-python-test-discovery
 //! [unittest-tests]: https://docs.pytest.org/en/stable/how-to/unittest.html
 
+use crate::types::TypeOperations;
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
 use ruff_python_ast::StmtClassDef;
 use ruff_text_size::Ranged;
@@ -368,7 +369,10 @@ fn pytest_test_class_kind<'db>(
     }
 
     let class = original_class_type(db, definition)?;
-    let env = ProgramEnvironment::from_file(definition.program_file(db));
+    let env = TypeOperations::for_inference(
+        db,
+        ProgramEnvironment::from_file(definition.program_file(db)),
+    );
     if place_value_type(
         db,
         class
@@ -412,7 +416,8 @@ fn has_default_pytest_constructors(db: &dyn Db, class: ClassLiteral<'_>) -> bool
     let Some(class) = class.as_static() else {
         return false;
     };
-    let env = ProgramEnvironment::from_file(class.program_file(db));
+    let env =
+        TypeOperations::for_inference(db, ProgramEnvironment::from_file(class.program_file(db)));
     let Some(object) = KnownClass::Object.try_to_class_literal(db, &env) else {
         return false;
     };
@@ -442,7 +447,8 @@ fn is_unittest_test_case(db: &dyn Db, class: ClassLiteral<'_>) -> bool {
 
 /// Unittest uses `runTest` only when no named test methods are available, including inherited ones.
 fn has_unittest_test_methods<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> bool {
-    let env = ProgramEnvironment::from_file(class.program_file(db));
+    let env =
+        TypeOperations::for_inference(db, ProgramEnvironment::from_file(class.program_file(db)));
     class
         .iter_mro(db)
         .filter_map(ClassBase::into_class)
@@ -481,7 +487,7 @@ fn is_default_pytest_test_file(db: &dyn Db, file: ProgramFile<'_>) -> bool {
         return false;
     }
 
-    let env = ProgramEnvironment::from_file(file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
     !place_value_type(
         db,
         symbol(

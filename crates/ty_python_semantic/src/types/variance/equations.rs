@@ -10,6 +10,7 @@
 //! parameter cannot connect two components. Conversely, reaching invariance does not erase
 //! later dependencies, even though ordinary evaluation can stop there.
 
+use crate::types::TypeOperations;
 use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -255,11 +256,17 @@ impl<'db> VarianceVariable<'db> {
             }
             VarianceOrigin::GenericAlias(alias) => alias.variance_equation(db, typevar),
             VarianceOrigin::TypeAlias(alias) => alias.variance_equation(db, typevar),
-            VarianceOrigin::Recursive(recursive) => recursive.variance_equation(db, typevar),
+            VarianceOrigin::Recursive(recursive) => {
+                let env = TypeOperations::for_inference(db, recursive.environment(db));
+                recursive.variance_equation(db, &env, typevar)
+            }
             VarianceOrigin::Function(function) => function.variance_equation(db, typevar),
             VarianceOrigin::LambdaReturn(source) => source.return_variance(db, typevar),
             VarianceOrigin::TypedDict(class) => {
-                let env = ProgramEnvironment::from_file(class.class_literal(db).program_file(db));
+                let env = TypeOperations::for_inference(
+                    db,
+                    ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
+                );
                 TypedDictType::new(class).variance_of_items(db, &env, typevar)
             }
         }

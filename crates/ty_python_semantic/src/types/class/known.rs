@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use crate::{
     Db, Program, ProgramEnvironment,
     place::{DefinedPlace, Definedness, Place, known_module_symbol},
@@ -1210,7 +1211,7 @@ impl KnownClass {
             returns(copy),
             cycle_initial=|_, id, _| Type::divergent(id),
             cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, argument: KnownClassArgument<'db>| {
-                let env = ProgramEnvironment::from_program(argument.program(db));
+                let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(argument.program(db)));
                 result.cycle_normalized(db, &env, *previous, cycle)
             },
             heap_size=ruff_memory_usage::heap_size,
@@ -1219,7 +1220,10 @@ impl KnownClass {
             db: &'db dyn Db,
             argument: KnownClassArgument<'db>,
         ) -> Type<'db> {
-            let env = &ProgramEnvironment::from_program(argument.program(db));
+            let env = &TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_program(argument.program(db)),
+            );
             argument
                 .class(db)
                 .to_class_literal(db, env)
@@ -1237,7 +1241,7 @@ impl KnownClass {
     pub(crate) fn to_instance_unknown<'db>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         debug_assert_ne!(
             self,
@@ -1257,7 +1261,7 @@ impl KnownClass {
     pub(crate) fn to_specialized_class_type<'t, 'db, T>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: T,
     ) -> Option<ClassType<'db>>
     where
@@ -1266,7 +1270,7 @@ impl KnownClass {
     {
         fn to_specialized_class_type_impl<'db>(
             db: &'db dyn Db,
-            env: &ProgramEnvironment<'db>,
+            env: &TypeOperations<'db>,
             class: KnownClass,
             class_literal: StaticClassLiteral<'db>,
             specialization: Cow<[Type<'db>]>,
@@ -1317,7 +1321,7 @@ impl KnownClass {
     pub(crate) fn to_specialized_instance<'t, 'db, T>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: T,
     ) -> Type<'db>
     where
@@ -1348,7 +1352,7 @@ impl KnownClass {
             argument: KnownClassArgument<'db>,
         ) -> Result<Option<StaticClassLiteral<'db>>, KnownClassLookupError<'db>> {
             let program = argument.program(db);
-            let env = &ProgramEnvironment::from_program(program);
+            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
             let python_version = env.python_version(db);
             let class = argument.class(db);
             let module = class.canonical_module(python_version);
@@ -1436,7 +1440,7 @@ impl KnownClass {
     /// and all possible subclasses of the class.
     ///
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
-    pub fn to_subclass_of<'db>(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub fn to_subclass_of<'db>(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         self.to_class_literal(db, env)
             .to_class_type(db)
             .map(|class| SubclassOfType::from(db, env, class))
@@ -1446,7 +1450,7 @@ impl KnownClass {
     pub(crate) fn to_specialized_subclass_of<'db>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         specialization: &[Type<'db>],
     ) -> Type<'db> {
         self.to_specialized_class_type(db, env, specialization)
@@ -1459,17 +1463,18 @@ impl KnownClass {
     pub(crate) fn is_subclass_of<'db>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: ClassType<'db>,
     ) -> bool {
-        self.lookup_class_literal(db, env)
-            .is_ok_and(|class| class.is_some_and(|class| class.is_subclass_of(db, None, other)))
+        self.lookup_class_literal(db, env).is_ok_and(|class| {
+            class.is_some_and(|class| class.is_subclass_of(db, env, None, other))
+        })
     }
 
     pub(crate) fn when_subclass_of<'db, 'c>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other: ClassType<'db>,
         constraints: &'c ConstraintSetBuilder<'db>,
     ) -> ConstraintSet<'db, 'c> {
@@ -2194,7 +2199,7 @@ impl<'db> KnownClassLookupError<'db> {
     fn display<'env>(
         self,
         db: &'db dyn Db,
-        env: &'env ProgramEnvironment<'db>,
+        env: &'env TypeOperations<'db>,
         class: KnownClass,
     ) -> impl std::fmt::Display + 'env {
         std::fmt::from_fn(move |f| {

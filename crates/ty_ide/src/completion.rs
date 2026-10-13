@@ -1,7 +1,7 @@
 use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, binary_heap};
-use ty_python_semantic::{Db as SemanticDb, ProgramEnvironment};
+use ty_python_semantic::{Db as SemanticDb, TypeOperations};
 
 use compact_str::{CompactString, CompactStringExt};
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
@@ -257,7 +257,7 @@ impl<'db> Completions<'db> {
     fn add_semantic(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         completion: SemanticCompletion<'db>,
     ) -> bool {
         self.add(CompletionBuilder::from_semantic_completion(
@@ -300,7 +300,7 @@ impl<'db> Extend<SemanticCompletion<'db>> for Completions<'db> {
         T: IntoIterator<Item = SemanticCompletion<'db>>,
     {
         let db = self.db;
-        let env = ProgramEnvironment::from_file(self.program_file);
+        let env = TypeOperations::for_file(db, self.program_file);
         for c in it {
             self.add_semantic(db, &env, c);
         }
@@ -451,7 +451,7 @@ impl<'db> CompletionBuilder<'db> {
 
     fn from_semantic_completion(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         semantic: SemanticCompletion<'db>,
     ) -> CompletionBuilder<'db> {
         let definition = semantic.ty.and_then(|ty| Definitions::from_ty(db, env, ty));
@@ -508,7 +508,7 @@ impl<'db> CompletionBuilder<'db> {
             // but aren't marked here. That is, false negatives are
             // possible but false positives are not.
             if let Some(exception_ty) = collection_context.exception_ty {
-                let env = ProgramEnvironment::from_file(program_file);
+                let env = TypeOperations::for_file(db, program_file);
                 self.is_context_specific |= ty.is_assignable_to(db, &env, exception_ty);
             }
             if collection_context.is_in_class_def() {
@@ -528,7 +528,7 @@ impl<'db> CompletionBuilder<'db> {
         }
         let kind = self.kind.or_else(|| {
             self.ty.and_then(|ty| {
-                completion_kind_from_type(db, &ProgramEnvironment::from_file(program_file), ty)
+                completion_kind_from_type(db, &TypeOperations::for_file(db, program_file), ty)
             })
         });
         let relevance = Relevance::new(db, program_file, collection_context, query, &self);
@@ -1404,11 +1404,7 @@ impl<'m> ContextCursor<'m> {
     ///
     /// The return value is always `None` if the cursor is not
     /// inside a `raise` or `except` context.
-    fn exception_ty<'db>(
-        &self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-    ) -> Option<Type<'db>> {
+    fn exception_ty<'db>(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Option<Type<'db>> {
         let base_exception_ty = KnownClass::BaseException.to_subclass_of(db, env);
         let base_exception_instance = KnownClass::BaseException.to_instance(db, env);
         let raise_ty =
@@ -2298,7 +2294,7 @@ pub(crate) fn unresolved_fixes<'db>(
 /// and general language keywords (like `raise`).
 fn add_keyword_completions<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     completions: &mut Completions<'db>,
 ) {
     let keyword_values = [
@@ -3192,7 +3188,7 @@ fn add_import_completions_impl<'db>(
     semantic_completions: impl IntoIterator<Item = SemanticCompletion<'db>>,
     module_dependency_kind: impl Fn(&SemanticCompletion<'db>) -> Option<ModuleDependencyKind>,
 ) {
-    let env = ProgramEnvironment::from_file(completions.program_file);
+    let env = TypeOperations::for_file(db, completions.program_file);
     for semantic in semantic_completions {
         let module_dependency_kind = module_dependency_kind(&semantic);
         let is_from_type_check_only_module = matches!(
@@ -3308,7 +3304,7 @@ fn is_name_like_token(token: &Token) -> bool {
 /// on `CompletionBuilder`.
 fn completion_kind_from_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> Option<CompletionKind> {
     TypeQueryContext::with_root(env, FindCompletionKind, |root| root.visit(db, ty))

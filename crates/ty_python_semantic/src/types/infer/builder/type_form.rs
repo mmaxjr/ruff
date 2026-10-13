@@ -30,11 +30,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 Type::TypeForm(_) => Some(None),
                 Type::Union(union)
                     if union.elements(self.db()).iter().any(|element| {
-                        element.has_outer_type(db, |ty| matches!(ty, Type::TypeForm(_)))
+                        element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
                     }) =>
                 {
                     Some(Some(target.filter_union(db, env, |element| {
-                        !element.has_outer_type(db, |ty| matches!(ty, Type::TypeForm(_)))
+                        !element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
                     })))
                 }
                 _ => None,
@@ -46,7 +46,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let value_ty = self
             .speculate_without_diagnostics()
             .infer_maybe_standalone_expression(expression, TypeContext::default());
-        if value_ty.has_outer_type(db, |ty| ty.is_never())
+        if value_ty.has_outer_type(db, env, |ty| ty.is_never())
             || self.contains_type_form_value(expression, value_ty)
             || non_type_form_fallback
                 .is_some_and(|alternative| value_ty.is_assignable_to(db, env, alternative))

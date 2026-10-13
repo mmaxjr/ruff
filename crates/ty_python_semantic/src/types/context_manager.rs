@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use crate::{
     FxOrderSet, Program,
@@ -48,7 +49,7 @@ impl<'db> TypeQuery<'db> for CanSuppressExceptions {
         if let Type::NewTypeInstance(newtype) = manager
             && newtype
                 .concrete_base_type(db)
-                .has_outer_type(db, super::Type::is_union)
+                .has_outer_type(db, env, super::Type::is_union)
         {
             return traversal.visit(db, newtype.concrete_base_type(db));
         }
@@ -171,7 +172,7 @@ impl<'db> Type<'db> {
     pub(crate) fn can_suppress_exceptions(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         mode: EvaluationMode,
     ) -> bool {
         #[salsa::tracked(
@@ -185,7 +186,7 @@ impl<'db> Type<'db> {
             manager: Type<'db>,
             is_async: bool,
         ) -> bool {
-            let env = ProgramEnvironment::from_program(program);
+            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
             TypeQueryContext::with_root(&env, CanSuppressExceptions { is_async }, |traversal| {
                 traversal.visit(db, manager)
             })
@@ -198,7 +199,7 @@ impl<'db> Type<'db> {
     ///
     /// This method should only be used outside of type checking because it omits any errors.
     /// For type checking, use [`try_enter_with_mode`](Self::try_enter_with_mode) instead.
-    pub(super) fn enter(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub(super) fn enter(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         self.try_enter_with_mode(db, env, EvaluationMode::Sync)
             .unwrap_or_else(|err| err.fallback_enter_type(db, env))
     }
@@ -207,7 +208,7 @@ impl<'db> Type<'db> {
     ///
     /// This method should only be used outside of type checking because it omits any errors.
     /// For type checking, use [`try_enter_with_mode`](Self::try_enter_with_mode) instead.
-    pub(super) fn aenter(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub(super) fn aenter(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         self.try_enter_with_mode(db, env, EvaluationMode::Async)
             .unwrap_or_else(|err| err.fallback_enter_type(db, env))
     }
@@ -223,7 +224,7 @@ impl<'db> Type<'db> {
     pub(super) fn try_enter_with_mode(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         mode: EvaluationMode,
     ) -> Result<Type<'db>, ContextManagerError<'db>> {
         let (enter_method, exit_method) = match mode {
@@ -388,14 +389,14 @@ impl<'db> ContextManagerError<'db> {
     pub(super) fn fallback_enter_type(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         self.enter_type(db, env).unwrap_or(Type::unknown())
     }
 
     /// Returns the `__enter__` or `__aenter__` return type if it is known,
     /// or `None` if the type never has a callable `__enter__` or `__aenter__` attribute
-    fn enter_type(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Option<Type<'db>> {
+    fn enter_type(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Option<Type<'db>> {
         match self {
             Self::Exit {
                 enter_return_type,

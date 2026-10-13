@@ -1,4 +1,5 @@
 use crate::Db;
+use crate::types::TypeOperations;
 use crate::types::relation::TypeRelation;
 /// This module defines a tree structure for collecting contextual information about type relation errors
 /// (for example, why two types are not assignable or cannot overlap).
@@ -9,12 +10,12 @@ use ruff_python_ast::name::Name;
 use ty_python_core::definition::Definition;
 use ty_python_core::semantic_index;
 
+use crate::FxOrderSet;
 use crate::types::context::LintDiagnosticGuard;
 use crate::types::infer::nearest_enclosing_class;
 use crate::types::iteration::add_async_generator_stub_help;
 use crate::types::tuple::TupleLength;
 use crate::types::{DisplaySettings, Type, TypedDictType};
-use crate::{FxOrderSet, ProgramEnvironment};
 
 /// The relation explained by a diagnostic node, independently of the checker that owns the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -251,7 +252,7 @@ impl<'db> ErrorContext<'db> {
     fn render(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         relation: ErrorRelation,
         help_messages: &mut FxOrderSet<HelpMessages<'db>>,
     ) -> Option<String> {
@@ -739,7 +740,7 @@ impl<'db> HelpMessages<'db> {
     fn attach_to(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment,
+        env: &TypeOperations<'db>,
         relation: ErrorRelation,
         diag: &mut LintDiagnosticGuard<'_, '_>,
     ) {
@@ -850,7 +851,7 @@ impl<'db> ErrorContextNode<'db> {
     fn render_tree(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         output_lines: &mut Vec<String>,
         help_messages: &mut FxOrderSet<(ErrorRelation, HelpMessages<'db>)>,
         prefix: &str,
@@ -1024,7 +1025,7 @@ impl<'db> ErrorContextTree<'db> {
     pub(in crate::types) fn attach_to(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         diag: &mut LintDiagnosticGuard<'_, '_>,
     ) {
         let mut output_lines = Vec::new();

@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use std::fmt::Display;
 
 use ty_module_resolver::{SearchPath, file_to_module};
@@ -50,7 +51,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -128,7 +129,7 @@ impl<'db> ClassBase<'db> {
     /// Convert an explicit base while preserving a direct use of the `Any` special form.
     pub(super) fn try_from_explicit_base(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         subclass: Option<ClassLiteral<'db>>,
     ) -> Option<Self> {
@@ -144,7 +145,7 @@ impl<'db> ClassBase<'db> {
     /// Return `None` if `ty` is not an acceptable type for a class base.
     pub(super) fn try_from_type(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         subclass: Option<ClassLiteral<'db>>,
     ) -> Option<Self> {
@@ -173,7 +174,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn inferred_metaclass(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         subclass: ClassLiteral<'db>,
     ) -> ClassMetaclass<'db> {
         let metaclass = match self {
@@ -219,11 +220,13 @@ impl<'db> ClassBase<'db> {
     pub(crate) fn apply_optional_specialization(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Self {
         if let Some(specialization) = specialization {
-            let env =
-                &ProgramEnvironment::from_program(specialization.generic_context(db).program(db));
+            let env = &env.in_environment(ProgramEnvironment::from_program(
+                specialization.generic_context(db).program(db),
+            ));
             let new_self = self.apply_type_mapping_impl(
                 db,
                 &TypeMapping::ApplySpecialization(ApplySpecialization::specialization(
@@ -244,7 +247,7 @@ impl<'db> ClassBase<'db> {
     fn materialize(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         kind: MaterializationKind,
     ) -> Self {
         self.apply_type_mapping_impl(
@@ -282,7 +285,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn mro(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         additional_specialization: Option<Specialization<'db>>,
     ) -> impl Iterator<Item = ClassBase<'db>> + Clone {
         match self {
@@ -295,7 +298,7 @@ impl<'db> ClassBase<'db> {
             | ClassBase::Generic
             | ClassBase::TypedDict(_) => ClassBaseMroIterator::length_2(db, env, self),
             ClassBase::Class(class) => {
-                ClassBaseMroIterator::from_class(db, class, additional_specialization)
+                ClassBaseMroIterator::from_class(db, env, class, additional_specialization)
             }
         }
     }
@@ -303,7 +306,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn display(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> impl std::fmt::Display {
         self.display_with(db, env, DisplaySettings::default())
     }
@@ -311,7 +314,7 @@ impl<'db> ClassBase<'db> {
     pub(super) fn display_with<'env>(
         self,
         db: &'db dyn Db,
-        env: &'env ProgramEnvironment<'db>,
+        env: &'env TypeOperations<'db>,
         display_settings: DisplaySettings<'db>,
     ) -> impl Display + 'env {
         std::fmt::from_fn(move |f| match self {
@@ -529,7 +532,7 @@ impl<'db> TypeQuery<'db> for ResolveClassBase<'db> {
                             env,
                             fields.values().map(|field| field.declared_ty),
                         )
-                        .to_class_type(db)
+                        .to_class_type(db, env)
                         .into(),
                     )
                 }
@@ -591,18 +594,14 @@ enum ClassBaseMroIterator<'db> {
 
 impl<'db> ClassBaseMroIterator<'db> {
     /// Iterate over an MRO of length 2 that consists of `first_element` and then `object`.
-    fn length_2(
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        first_element: ClassBase<'db>,
-    ) -> Self {
+    fn length_2(db: &'db dyn Db, env: &TypeOperations<'db>, first_element: ClassBase<'db>) -> Self {
         ClassBaseMroIterator::Length2([first_element, ClassBase::object(db, env)].into_iter())
     }
 
     /// Iterate over an MRO of length 3 that consists of `first_element`, then `second_element`, then `object`.
     fn length_3(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         element_1: ClassBase<'db>,
         element_2: ClassBase<'db>,
     ) -> Self {
@@ -614,10 +613,15 @@ impl<'db> ClassBaseMroIterator<'db> {
     /// Iterate over the MRO of an arbitrary class. The MRO may be of any length.
     fn from_class(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         class: ClassType<'db>,
         additional_specialization: Option<Specialization<'db>>,
     ) -> Self {
-        ClassBaseMroIterator::FromClass(class.iter_mro_specialized(db, additional_specialization))
+        ClassBaseMroIterator::FromClass(class.iter_mro_specialized(
+            db,
+            env,
+            additional_specialization,
+        ))
     }
 }
 

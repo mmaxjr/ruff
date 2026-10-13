@@ -8,6 +8,7 @@
 //! relation and constraint set.
 
 use crate::Db;
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::{CycleKind, TypeTraversal, TypeWalk};
 use ty_module_resolver::KnownModule;
@@ -24,7 +25,6 @@ use super::{
     PropertyInstanceType, SelfBinding, Signature, Type, TypeContext, TypeMapping, TypeQualifiers,
     TypeVarBoundOrConstraints, UnionType, UpcastPolicy,
 };
-use crate::ProgramEnvironment;
 use crate::place::{
     DefinedPlace, Definedness, Place, PlaceAndQualifiers, builtins_symbol, place_from_bindings,
 };
@@ -130,7 +130,7 @@ pub(super) enum InstanceAttributeWriteMember<'db> {
 /// Resolve attribute-specific dispatch through inherited frozen-dataclass setters.
 pub(super) fn instance_setattr_dispatch<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
 ) -> Option<FrozenDataclassDispatch<'db>> {
@@ -138,14 +138,20 @@ pub(super) fn instance_setattr_dispatch<'db>(
         .nominal_class(db, env)
         .and_then(|class| class.static_class_literal(db))
         .and_then(|(class, specialization)| {
-            class.inherited_frozen_dataclass_dispatch(db, specialization, "__setattr__", attribute)
+            class.inherited_frozen_dataclass_dispatch(
+                db,
+                env,
+                specialization,
+                "__setattr__",
+                attribute,
+            )
         })
 }
 
 /// Whether or not an attribute write is blocked by the receiver's `__setattr__` method.
 pub(super) fn instance_attribute_write_is_blocked<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     member: &InstanceAttributeWriteMember<'_>,
     attribute: &str,
@@ -293,7 +299,7 @@ pub(super) type AttributeWriteResolver<'env, 'db> =
 
 impl<'env, 'db> AttributeWriteResolver<'env, 'db> {
     pub(super) fn scope<R>(
-        env: &'env ProgramEnvironment<'db>,
+        env: &'env TypeOperations<'db>,
         attribute: &'env str,
         evaluate: impl FnOnce(&Self) -> R,
     ) -> R {
@@ -448,7 +454,7 @@ where
 
 fn instance_attribute_write_requirement<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
 ) -> AttributeWriteRequirement<'db> {
@@ -465,7 +471,7 @@ fn instance_attribute_write_requirement<'db>(
 /// `__setattr__`.
 fn instance_attribute_write_member_requirement<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
 ) -> InstanceAttributeWriteMember<'db> {
@@ -543,7 +549,7 @@ fn instance_attribute_write_member_requirement<'db>(
 /// declarations can be bound consistently with normal class-object member lookup.
 fn class_attribute_write_requirement<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
 ) -> AttributeWriteRequirement<'db> {
@@ -652,7 +658,7 @@ fn class_attribute_write_requirement<'db>(
 /// ```
 fn possible_class_attribute_descriptor<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     member: DefinedPlace<'db>,
 ) -> Option<Type<'db>> {
     if member.ty.is_data_descriptor(db, env) || member.ty.is_definitely_non_data_descriptor(db, env)
@@ -694,7 +700,7 @@ fn possible_class_attribute_descriptor<'db>(
 /// ordinary attribute to be treated as a data descriptor.
 fn explicit_attribute_write_requirement<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
     attr_ty: Type<'db>,
@@ -746,7 +752,7 @@ fn explicit_attribute_write_requirement<'db>(
 /// the descriptor type.
 fn shadowed_descriptor_write_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     attr_ty: Type<'db>,
 ) -> Type<'db> {
     match attr_ty {
@@ -754,7 +760,7 @@ fn shadowed_descriptor_write_type<'db>(
             union.map_leave_aliases(db, env, |ty| shadowed_descriptor_write_type(db, env, *ty))
         }
         Type::TypeAlias(alias) => {
-            let value = alias.value_type(db);
+            let value = alias.value_type(db, env);
             let write_ty = shadowed_descriptor_write_type(db, env, value);
             if write_ty == value { attr_ty } else { write_ty }
         }
@@ -771,7 +777,7 @@ fn shadowed_descriptor_write_type<'db>(
 /// assignment diagnostic layer.
 fn instance_fallback_write_requirement<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
     fallback: PlaceAndQualifiers<'db>,
@@ -796,7 +802,7 @@ fn instance_fallback_write_requirement<'db>(
 /// Convert a class-attribute fallback into a write type, binding `Self` to the class instance.
 fn class_fallback_write_requirement<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     class_attr_self_ty: Type<'db>,
     fallback: PlaceAndQualifiers<'db>,
@@ -833,7 +839,7 @@ fn class_fallback_write_requirement<'db>(
 /// `(str) -> int` converter is read as `int` but accepts `str` assignments.
 fn effective_write_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
     attr_ty: Type<'db>,
@@ -867,7 +873,7 @@ fn effective_write_type<'db>(
 /// ```
 pub(super) fn property_setter_returns_never<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     property_ty: Type<'db>,
     object_ty: Type<'db>,
     value_ty: Type<'db>,
@@ -898,7 +904,7 @@ pub(super) fn property_setter_returns_never<'db>(
 /// ```
 fn class_object_assignment_members<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
     type_member: PlaceAndQualifiers<'db>,
@@ -945,7 +951,7 @@ fn class_object_assignment_members<'db>(
 /// protocol compatibility, and `Final` validation share exactly the same lookup precedence.
 pub(super) fn assignment_attribute_members<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     object_ty: Type<'db>,
     attribute: &str,
 ) -> Option<AssignmentAttributeMembers<'db>> {
@@ -1028,7 +1034,7 @@ pub(super) fn assignment_attribute_members<'db>(
 
 fn descriptor_setter<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     descriptor_ty: Type<'db>,
 ) -> Place<'db> {
     descriptor_ty
@@ -1052,7 +1058,7 @@ pub(super) enum DescriptorSetterDomain<'db> {
 /// Derive the values accepted by every possible descriptor setter when they fit in [`Type`].
 pub(super) fn descriptor_setter_domain<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     descriptor_ty: Type<'db>,
     receiver_ty: Type<'db>,
 ) -> DescriptorSetterDomain<'db> {
@@ -1086,7 +1092,7 @@ pub(super) fn descriptor_setter_domain<'db>(
 /// Derive the values accepted by one possible runtime descriptor.
 fn single_descriptor_setter_domain<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     descriptor_ty: Type<'db>,
     receiver_ty: Type<'db>,
 ) -> DescriptorSetterDomain<'db> {
@@ -1155,7 +1161,7 @@ enum DescriptorSetterSignatureDomain<'db> {
 /// Derive the values accepted by one setter overload when they fit in [`Type`].
 fn descriptor_setter_signature_domain<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     signature: &Signature<'db>,
     self_ty: Type<'db>,
     receiver_ty: Type<'db>,
@@ -1227,7 +1233,7 @@ fn descriptor_setter_signature_domain<'db>(
 
 fn contains_signature_typevar<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     signature: &Signature<'db>,
     ty: Type<'db>,
 ) -> bool {
@@ -1258,7 +1264,7 @@ fn contains_signature_typevar<'db>(
 /// This returns the unbound `Self` and the setter definition; callers choose its receiver.
 pub(super) fn property_setter_value_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     setter: Type<'db>,
 ) -> Option<(Type<'db>, Option<Definition<'db>>)> {
     let mut set_types = Vec::new();
@@ -1282,7 +1288,7 @@ pub(super) fn property_setter_value_type<'db>(
 /// `Self` variables belong to the property, including when the property is inherited.
 fn property_set_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     property: PropertyInstanceType<'db>,
     receiver_ty: Type<'db>,
 ) -> Option<Type<'db>> {

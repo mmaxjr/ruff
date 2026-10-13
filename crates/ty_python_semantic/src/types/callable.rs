@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use itertools::Either;
 use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec_inline};
@@ -11,8 +12,8 @@ use crate::{
         ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance, ClassType,
         FindLegacyTypeVarsVisitor, FunctionType, InternedType, KnownBoundMethodType, KnownClass,
         KnownInstanceType, LiteralValueTypeKind, MemberLookupPolicy, Parameter, Parameters,
-        Signature, SubclassOfInner, Type, TypeContext, TypeMapping, TypeRecursionContext,
-        TypeVarBoundOrConstraints, UnionType,
+        Signature, SubclassOfInner, Type, TypeContext, TypeMapping, TypeVarBoundOrConstraints,
+        UnionType,
         constraints::{ConstraintSet, IteratorConstraintsExtension},
         function::OverloadLiteral,
         infer::{InferenceEnvironment, ScopeInference},
@@ -73,7 +74,7 @@ impl<'db> Type<'db> {
     pub(super) fn function_like_dunder_get(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         instance: Option<Type<'db>>,
         owner: Option<Type<'db>>,
     ) -> Option<Type<'db>> {
@@ -86,7 +87,7 @@ impl<'db> Type<'db> {
             }
             Type::TypeAlias(alias) => {
                 return alias
-                    .value_type(db)
+                    .value_type(db, env)
                     .function_like_dunder_get(db, env, instance, owner);
             }
             _ => {}
@@ -136,7 +137,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_upcast_to_callable(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<CallableTypes<'db>> {
         self.try_upcast_to_callable_with_policy(db, env, UpcastPolicy::default())
     }
@@ -144,7 +145,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_upcast_to_callable_with_recursive_fallback(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         recursive_definition: Option<Definition<'db>>,
     ) -> Option<CallableTypes<'db>> {
         self.try_upcast_to_callable_with_policy_and_context(
@@ -159,7 +160,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_upcast_to_callable_with_policy(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         policy: UpcastPolicy,
     ) -> Option<CallableTypes<'db>> {
         self.try_upcast_to_callable_with_policy_and_context(
@@ -174,7 +175,7 @@ impl<'db> Type<'db> {
     fn try_upcast_to_callable_with_policy_and_context(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         policy: UpcastPolicy,
         context: &CallableUpcastContext<'_, 'db>,
         receiver: Option<Type<'db>>,
@@ -195,7 +196,7 @@ impl<'db> Type<'db> {
     fn try_upcast_to_callable_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         policy: UpcastPolicy,
         context: &CallableUpcastContext<'_, 'db>,
         receiver: Option<Type<'db>>,
@@ -373,7 +374,7 @@ impl<'db> Type<'db> {
             },
 
             Type::TypeAlias(alias) => alias
-                .value_type(db)
+                .value_type(db, env)
                 .try_upcast_to_callable_with_policy_and_context(db, env, policy, context, receiver),
 
             Type::KnownBoundMethod(KnownBoundMethodType::DunderCall(callable)) => callable
@@ -451,10 +452,7 @@ struct CallableUpcastContext<'env, 'db> {
 }
 
 impl<'env, 'db> CallableUpcastContext<'env, 'db> {
-    fn new(
-        env: &'env ProgramEnvironment<'db>,
-        recursive_definition: Option<Definition<'db>>,
-    ) -> Self {
+    fn new(env: &'env TypeOperations<'db>, recursive_definition: Option<Definition<'db>>) -> Self {
         Self {
             recursive_definition,
             active: crate::types::CycleDetector::new(()),
@@ -775,9 +773,9 @@ pub(super) fn walk_callable_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     ty: CallableType<'db>,
     visitor: &V,
 ) {
-    if let Some(context) = visitor.lazy_type_context() {
+    if visitor.should_visit_lazy_type_attributes() {
         if ty
-            .inspect_signatures(db, context, |signatures| {
+            .inspect_signatures(db, visitor.program_environment(), |signatures| {
                 for signature in signatures {
                     walk_signature(db, signature, visitor);
                 }
@@ -832,13 +830,13 @@ impl get_size2::GetSize for LambdaSignature<'_> {}
 impl<'db> LambdaSignature<'db> {
     /// The original body is cached independently of callers. A transformed signature can depend
     /// on active recursion guards, so expand it locally when continuing an existing operation.
-    fn signature_with_recursion(
+    fn signature(
         self,
         db: &'db dyn Db,
-        context: &TypeRecursionContext<'db>,
+        env: &TypeOperations<'db>,
     ) -> Cow<'db, CallableSignature<'db>> {
         if let Some(mapping) = self.mapping(db) {
-            Cow::Owned(mapping.signature(db, context))
+            Cow::Owned(mapping.signature(db, env))
         } else {
             Cow::Borrowed(infer_lambda_signature(db, LambdaSource::of(db, self)))
         }
@@ -882,7 +880,8 @@ impl<'db> LambdaSource<'db> {
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         let source = self.input(db);
-        let env = ProgramEnvironment::from_scope(source.scope(db));
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(source.scope(db)));
         source
             .infer_body(db)
             .expression_type(source.body(db))
@@ -959,14 +958,15 @@ impl<'db> CallableType<'db> {
     pub(super) fn inspect_signatures<R>(
         self,
         db: &'db dyn Db,
-        context: &TypeRecursionContext<'db>,
+        env: &TypeOperations<'db>,
         inspect: impl FnOnce(&CallableSignature<'db>) -> R,
     ) -> Option<R> {
+        let context = env.context();
         match self.signature_source(db) {
             SignatureSource::Explicit(signatures) => Some(inspect(signatures)),
-            SignatureSource::Lambda(lambda) => context.expand_signature(db, self, || {
-                inspect(&lambda.signature_with_recursion(db, context))
-            }),
+            SignatureSource::Lambda(lambda) => {
+                context.expand_signature(db, env, self, || inspect(&lambda.signature(db, env)))
+            }
         }
     }
 
@@ -983,9 +983,9 @@ impl<'db> CallableType<'db> {
     ) -> Option<R> {
         let signatures = match self.signature_source(db) {
             SignatureSource::Explicit(signatures) => Cow::Borrowed(signatures),
-            SignatureSource::Lambda(lambda) => expansion.expand_signature(db, self, |context| {
-                lambda.signature_with_recursion(db, context)
-            })?,
+            SignatureSource::Lambda(lambda) => {
+                expansion.expand_signature(db, self, |env| lambda.signature(db, env))?
+            }
         };
         Some(inspect(&signatures))
     }
@@ -994,7 +994,7 @@ impl<'db> CallableType<'db> {
     pub(crate) fn inspect_signatures_root<R>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         inspect: impl FnOnce(&super::recursive::TypeInspector<'_, 'db>, &CallableSignature<'db>) -> R,
     ) -> Option<R> {
         super::recursive::TypeInspector::scope(env, |traversal| {
@@ -1006,13 +1006,13 @@ impl<'db> CallableType<'db> {
     pub(super) fn signature_comparison_key(
         self,
         db: &'db dyn Db,
-        context: &TypeRecursionContext<'db>,
-    ) -> Option<&'db LambdaSignatureKey<'db>> {
+        env: &TypeOperations<'db>,
+    ) -> Option<LambdaSignatureKey<'db>> {
         let SignatureSource::Lambda(lambda) = self.signature_source(db) else {
             return None;
         };
-        context
-            .expand_signature(db, self, || lambda.comparison_key(db).as_ref())
+        env.context()
+            .expand_signature(db, env, self, || lambda.comparison_key(db, env))
             .flatten()
     }
 
@@ -1020,7 +1020,7 @@ impl<'db> CallableType<'db> {
     pub(super) fn variance_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         match self.signature_source(db) {
@@ -1240,7 +1240,7 @@ impl<'db> CallableType<'db> {
     /// Returns the reduced callable produced by partially applying selected overloads.
     pub(crate) fn partially_apply(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         source: Type<'db>,
         overloads: impl IntoIterator<Item = PartialSignatureApplication<'db>>,
     ) -> Option<Self> {
@@ -1254,7 +1254,7 @@ impl<'db> CallableType<'db> {
             return Some(
                 Self::from_lambda(
                     db,
-                    lambda.with_bound_parameters(db, application.parameters(db)),
+                    lambda.with_bound_parameters(db, env, application.parameters(db)),
                 )
                 .into_regular(db),
             );
@@ -1270,11 +1270,10 @@ impl<'db> CallableType<'db> {
     pub(crate) fn into_functools_partial_instance(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        context: &TypeRecursionContext<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         let return_ty = self
-            .inspect_signatures(db, context, |signatures| {
+            .inspect_signatures(db, env, |signatures| {
                 signatures.overload_return_type_or_unknown(db, env)
             })
             .unwrap_or_else(Type::unknown);
@@ -1299,7 +1298,7 @@ impl<'db> CallableType<'db> {
     pub(super) fn bind_self(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         receiver_type: Type<'db>,
         typing_self_type: Type<'db>,
     ) -> CallableType<'db> {
@@ -1328,7 +1327,7 @@ impl<'db> CallableType<'db> {
     pub(crate) fn apply_self_with_receiver(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         receiver_type: Type<'db>,
         self_type: Type<'db>,
     ) -> CallableType<'db> {
@@ -1354,7 +1353,7 @@ impl<'db> CallableType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -1405,7 +1404,7 @@ impl<'db> CallableType<'db> {
     pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'_, 'db>,
@@ -1474,7 +1473,7 @@ impl<'db> CallableTypes<'db> {
             .flat_map(move |callable| callable.parameter_lists(db))
     }
 
-    pub(crate) fn to_type(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub(crate) fn to_type(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         assert!(!self.0.is_empty(), "CallableTypes should not be empty");
         UnionType::from_elements(db, env, self.0.iter().copied().map(Type::Callable))
     }
@@ -1487,7 +1486,7 @@ impl<'db> CallableTypes<'db> {
     pub(crate) fn into_precise_functools_partial_instance(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         wrapped: Type<'db>,
     ) -> Type<'db> {
         if let Some(callable) = self.exactly_one() {
@@ -1552,8 +1551,8 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         };
         self.materialization_visitor
             .recursion_context()
-            .expand_signature(db, source_callable, || {
-                source.has_equivalent_signature(db, *target, |left, right| {
+            .expand_signature(db, self.env, source_callable, || {
+                source.has_equivalent_signature(db, self.env, *target, |left, right| {
                     self.as_equivalence_checker()
                         .check_type_pair(db, left, right)
                         .is_always_satisfied(db, self.env, TypeVarSet::None)

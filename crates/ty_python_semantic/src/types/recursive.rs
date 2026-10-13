@@ -66,6 +66,7 @@
 //! before inspecting the values. These projections have no source alias name; ordinary union
 //! construction and type display expand their completed bodies.
 
+use crate::types::TypeOperations;
 use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -116,10 +117,10 @@ impl<'db, Mode> TypeExpansionContext<'_, '_, 'db, Mode> {
         &self,
         db: &'db dyn Db,
         callable: CallableType<'db>,
-        expand: impl FnOnce(&TypeRecursionContext<'db>) -> R,
+        expand: impl FnOnce(&TypeOperations<'db>) -> R,
     ) -> Option<R> {
         let context = self.mapping.recursion_context();
-        context.expand_signature(db, callable, || expand(context))
+        context.expand_signature(db, self.mapping.env, callable, || expand(self.mapping.env))
     }
 
     /// Inspect a deferred signature under this operation's recursion policy.
@@ -226,7 +227,9 @@ where
         mapping: &ApplyTypeMappingVisitor<'_, 'db>,
         compute: impl FnOnce(&TypeExpansionContext<'_, '_, 'db>) -> R,
     ) -> R {
-        self.visit(db, item, || compute(&TypeExpansionContext::new(mapping)))
+        self.visit(db, mapping.env, item, || {
+            compute(&TypeExpansionContext::new(mapping))
+        })
     }
 
     pub(super) fn visit_structure(
@@ -236,7 +239,7 @@ where
         mapping: &ApplyTypeMappingVisitor<'_, 'db>,
         compute: impl FnOnce(&StructuralExpansionContext<'_, '_, 'db>) -> R,
     ) -> R {
-        self.visit(db, item, || {
+        self.visit(db, mapping.env, item, || {
             compute(&StructuralExpansionContext::new(mapping))
         })
     }
@@ -249,7 +252,7 @@ where
         reuse_cached: impl FnOnce(&R) -> bool,
         compute: impl FnOnce(&TypeExpansionContext<'_, '_, 'db>) -> R,
     ) -> Result<R, (T, T)> {
-        self.try_visit(db, item, reuse_cached, || {
+        self.try_visit(db, mapping.env, item, reuse_cached, || {
             compute(&TypeExpansionContext::new(mapping))
         })
     }
@@ -266,7 +269,7 @@ where
         mapping: &ApplyTypeMappingVisitor<'_, 'db>,
         compute: impl FnOnce(Result<&TypeExpansionContext<'_, '_, 'db>, CycleKind>) -> R,
     ) -> R {
-        self.visit_active(db, item, |cycle| match cycle {
+        self.visit_active(db, mapping.env, item, |cycle| match cycle {
             Some(kind) => compute(Err(kind)),
             None => compute(Ok(&TypeExpansionContext::new(mapping))),
         })
@@ -320,7 +323,7 @@ pub(crate) struct TypeVisitorState<'env, 'db, Tag, T: HasIdentity<'db>, R, const
 impl<'env, 'db, Tag, T: HasIdentity<'db>, R, const N: usize>
     TypeVisitorState<'env, 'db, Tag, T, R, N>
 {
-    pub(super) fn new(env: &'env ProgramEnvironment<'db>, fallback: R) -> Self {
+    pub(super) fn new(env: &'env TypeOperations<'db>, fallback: R) -> Self {
         Self {
             cycles: CycleDetector::new(fallback),
             mapping: ApplyTypeMappingVisitor::new(env),
@@ -333,7 +336,7 @@ where
     T: Hash + Eq + Clone + HasIdentity<'db>,
 {
     pub(super) fn visit(&self, db: &'db dyn Db, item: T, compute: impl FnOnce() -> R) -> R {
-        self.cycles.visit(db, item, compute)
+        self.cycles.visit(db, self.mapping.env, item, compute)
     }
 
     pub(super) fn visit_with_expansion(
@@ -445,19 +448,17 @@ struct TypeTraversalTag;
 /// for operations that compute a reusable result from a type and immutable input.
 pub(crate) struct TypeTraversal<'env, 'db, O, Mode = SemanticTraversal> {
     operation: O,
-    env: &'env ProgramEnvironment<'db>,
-    recursion_context: TypeRecursionContext<'db>,
+    env: &'env TypeOperations<'db>,
     mapping: TraversalMapping<'env, 'db>,
     active: CycleDetector<'db, TypeTraversalTag, Type<'db>, (), 3>,
     mode: PhantomData<Mode>,
 }
 
 impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
-    fn new(env: &'env ProgramEnvironment<'db>, operation: O) -> Self {
+    fn new(env: &'env TypeOperations<'db>, operation: O) -> Self {
         Self {
             operation,
             env,
-            recursion_context: TypeRecursionContext::default(),
             mapping: TraversalMapping::Owned(OnceCell::new()),
             active: CycleDetector::new(()),
             mode: PhantomData,
@@ -466,49 +467,33 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
 
     /// Run an operation with one borrowed traversal for its entire recursion.
     pub(crate) fn with_root<R>(
-        env: &'env ProgramEnvironment<'db>,
+        env: &'env TypeOperations<'db>,
         operation: O,
         visit: impl FnOnce(&Self) -> R,
     ) -> R {
         visit(&Self::new(env, operation))
     }
 
-    pub(super) fn recursion_context(&self) -> &TypeRecursionContext<'db> {
-        self.mapping().recursion_context()
-    }
-
     /// Keep deferred signature expansion active while the consumer visits its contents.
-    pub(super) fn inspect_signatures<R>(
+    fn inspect_signatures<R>(
         &self,
         db: &'db dyn Db,
         callable: CallableType<'db>,
         inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
     ) -> Option<R> {
-        callable.inspect_signatures(db, self.recursion_context(), inspect)
+        callable.inspect_signatures(db, self.environment(), inspect)
     }
 
-    pub(crate) fn environment(&self) -> &ProgramEnvironment<'db> {
+    pub(crate) fn environment(&self) -> &TypeOperations<'db> {
         self.env
     }
 
     fn mapping(&self) -> &ApplyTypeMappingVisitor<'env, 'db> {
         match &self.mapping {
-            TraversalMapping::Owned(mapping) => mapping.get_or_init(|| {
-                ApplyTypeMappingVisitor::new(self.env)
-                    .with_recursion_context(&self.recursion_context)
-            }),
+            TraversalMapping::Owned(mapping) => {
+                mapping.get_or_init(|| ApplyTypeMappingVisitor::new(self.env))
+            }
             TraversalMapping::Borrowed(mapping) => mapping,
-        }
-    }
-
-    fn new_with_recursion_context(
-        env: &'env ProgramEnvironment<'db>,
-        operation: O,
-        context: &'env TypeRecursionContext<'db>,
-    ) -> Self {
-        Self {
-            recursion_context: context.clone(),
-            ..Self::new(env, operation)
         }
     }
 
@@ -520,7 +505,6 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         Self {
             operation,
             env: visitor.env,
-            recursion_context: visitor.recursion_context().clone(),
             mapping: TraversalMapping::Borrowed(visitor),
             active: CycleDetector::new(()),
             mode: PhantomData,
@@ -573,11 +557,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
                 Type::TypeAlias(alias) => {
                     self.operation
                         .visit_alias_like(db, self, ty, state, |state| {
-                            self.visit_with(
-                                db,
-                                alias.value_type_with_recursion(db, &self.recursion_context),
-                                state,
-                            )
+                            self.visit_with(db, alias.value_type(db, self.env), state)
                         })
                 }
                 Type::Union(_) if Mode::NORMALIZE_UNIONS => {
@@ -602,7 +582,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         // These outer-shape operations recurse through deferred definitions, bounds, and newtype
         // bases. Revisiting a concrete type during normalization is not a recursive unfolding.
         if needs_traversal_guard(ty) {
-            self.active.visit_active(db, ty, visit)
+            self.active.visit_active(db, self.env, ty, visit)
         } else {
             visit(None)
         }
@@ -680,7 +660,7 @@ where
 {
     traversal: TypeTraversal<'env, 'db, Q>,
     cache: RefCell<TypeQueryCache<'db, Input, Q::Output>>,
-    recursion_revision: Cell<Option<[u64; 8]>>,
+    recursion_revision: Cell<Option<super::TypeRecursionRevision>>,
     dependencies: RefCell<Vec<Type<'db>>>,
     depth: Cell<usize>,
 }
@@ -702,30 +682,15 @@ where
 
     /// Run a query with one cache and one set of guards for all recursive calls.
     pub fn with_root<R>(
-        env: &'env ProgramEnvironment<'db>,
+        env: &'env TypeOperations<'db>,
         query: Q,
         visit: impl FnOnce(&Self) -> R,
     ) -> R {
         visit(&Self::new(TypeTraversal::new(env, query)))
     }
 
-    pub(super) fn with_recursion_context<R>(
-        env: &'env ProgramEnvironment<'db>,
-        query: Q,
-        context: &'env TypeRecursionContext<'db>,
-        visit: impl FnOnce(&Self) -> R,
-    ) -> R {
-        visit(&Self::new(TypeTraversal::new_with_recursion_context(
-            env, query, context,
-        )))
-    }
-
-    pub(crate) fn environment(&self) -> &ProgramEnvironment<'db> {
+    pub(crate) fn environment(&self) -> &TypeOperations<'db> {
         self.traversal.environment()
-    }
-
-    pub(super) fn recursion_context(&self) -> &TypeRecursionContext<'db> {
-        self.traversal.recursion_context()
     }
 
     pub(super) fn inspect_signatures<R>(
@@ -734,7 +699,7 @@ where
         callable: CallableType<'db>,
         inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
     ) -> Option<R> {
-        callable.inspect_signatures(db, self.recursion_context(), inspect)
+        callable.inspect_signatures(db, self.environment(), inspect)
     }
 
     fn mapping_visitor(&self) -> &ApplyTypeMappingVisitor<'env, 'db> {
@@ -751,7 +716,10 @@ where
         let key = (ty, input.clone());
         if let Some(cached) = self.cache.borrow().get(&key)
             && cached.dependencies.iter().all(|(dependency, expected)| {
-                self.traversal.active.cycle_kind(db, dependency) == *expected
+                self.traversal
+                    .active
+                    .cycle_kind(db, self.traversal.env, dependency)
+                    == *expected
             })
         {
             self.dependencies
@@ -771,11 +739,7 @@ where
             }
             match ty {
                 Type::TypeAlias(alias) => query.visit_alias_like(db, self, ty, input, |input| {
-                    self.visit_with(
-                        db,
-                        alias.value_type_with_recursion(db, &self.traversal.recursion_context),
-                        input,
-                    )
+                    self.visit_with(db, alias.value_type(db, self.environment()), input)
                 }),
                 Type::Recursive(recursive) => {
                     query.visit_alias_like(db, self, ty, input, |input| {
@@ -804,7 +768,14 @@ where
         self.dependencies.borrow_mut().extend(&dependencies);
         let dependencies = dependencies
             .into_iter()
-            .map(|ty| (ty, self.traversal.active.cycle_kind(db, &ty)))
+            .map(|ty| {
+                (
+                    ty,
+                    self.traversal
+                        .active
+                        .cycle_kind(db, self.traversal.env, &ty),
+                )
+            })
             .collect();
         self.validate_recursion_context();
         self.cache.borrow_mut().insert(
@@ -941,10 +912,7 @@ impl<'env, 'db> TypeInspector<'env, 'db> {
         signatures.apply_type_mapping_impl(db, mapping, tcx, self.traversal.mapping())
     }
 
-    pub(super) fn scope<R>(
-        env: &'env ProgramEnvironment<'db>,
-        inspect: impl FnOnce(&Self) -> R,
-    ) -> R {
+    pub(super) fn scope<R>(env: &'env TypeOperations<'db>, inspect: impl FnOnce(&Self) -> R) -> R {
         inspect(&Self {
             traversal: StructuralTypeTraversal::new(env, InspectType),
         })
@@ -959,14 +927,14 @@ impl<'env, 'db> TypeInspector<'env, 'db> {
         })
     }
 
-    pub(super) fn environment(&self) -> &ProgramEnvironment<'db> {
+    pub(super) fn environment(&self) -> &TypeOperations<'db> {
         self.traversal.environment()
     }
 
     /// Start a complete inspection. Recursive helpers borrow the inspector passed to `inspect`.
     pub(super) fn inspect_root<R>(
         db: &'db dyn Db,
-        env: &'env ProgramEnvironment<'db>,
+        env: &'env TypeOperations<'db>,
         ty: Type<'db>,
         on_cycle: impl FnOnce(Type<'db>, CycleKind) -> R,
         inspect: impl FnOnce(&TypeInspector<'_, 'db>, Type<'db>) -> R,
@@ -1196,6 +1164,7 @@ impl<'db> RecursiveType<'db> {
     /// Close recursive occurrences after inferring an alias's constructor expression.
     pub(super) fn recover(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         definition: Definition<'db>,
         cycle: salsa::Id,
         parameters: Option<GenericContext<'db>>,
@@ -1206,19 +1175,14 @@ impl<'db> RecursiveType<'db> {
         // from the query inputs: an earlier result might not expose recursive references yet.
         Self::initial(db, definition, cycle, parameters).bind(
             db,
-            &ProgramEnvironment::from_definition(definition),
+            &env.in_environment(ProgramEnvironment::from_definition(definition)),
             result,
         )
     }
 
     /// Bind references to this alias's query cycle in a closed inference result.
     /// Each bound occurrence retains its arguments and refers to this constructor's cycle.
-    fn bind(
-        self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-        original: Type<'db>,
-    ) -> Type<'db> {
+    fn bind(self, db: &'db dyn Db, env: &TypeOperations<'db>, original: Type<'db>) -> Type<'db> {
         let body = original.apply_type_mapping_impl(
             db,
             &TypeMapping::ApplyRecursiveSubstitution(RecursiveMapping(
@@ -1261,7 +1225,7 @@ impl<'db> RecursiveType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -1344,7 +1308,9 @@ impl<'db> RecursiveType<'db> {
     ) -> UnfoldResult<'db> {
         // Materialize the original body so each recursive reference is transformed according
         // to its variance, rather than inheriting the enclosing application's materialization.
-        let unfolded = self.with_materialization(db, None).unfolded_body(db);
+        let unfolded = self
+            .with_materialization(db, None)
+            .unfolded_body(db, visitor);
         let unfolded = match self.materialization_kind(db) {
             Some(kind) => unfolded.materialize(db, kind, visitor),
             None => unfolded,
@@ -1356,13 +1322,12 @@ impl<'db> RecursiveType<'db> {
         }
     }
 
-    /// Share the closed, specialized body across mappings with different visitors.
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, _, recursive: RecursiveType<'db>| Type::Recursive(recursive),
-        heap_size=ruff_memory_usage::heap_size
-    )]
-    fn unfolded_body(self, db: &'db dyn Db) -> Type<'db> {
+    /// Close and specialize one body while retaining the enclosing operation.
+    fn unfolded_body(
+        self,
+        db: &'db dyn Db,
+        visitor: &ApplyTypeMappingVisitor<'_, 'db>,
+    ) -> Type<'db> {
         let body = match self.body(db) {
             RecursiveBody::Type(body) => body,
             RecursiveBody::TypedDictValues(origin) => {
@@ -1375,11 +1340,11 @@ impl<'db> RecursiveType<'db> {
                 // Specialize one shared constructor body. Reading each specialized schema can
                 // expose different inference approximations, so growth analysis and unfolding
                 // would follow different recursive references.
-                let body = constructor.unfolded_body(db);
+                let body = constructor.unfolded_body(db, visitor);
                 let Some(arguments) = self.arguments(db) else {
                     return body;
                 };
-                let env = self.environment(db);
+                let env = visitor.env.in_environment(self.environment(db));
                 return body.apply_type_mapping_impl(
                     db,
                     &TypeMapping::from_specialization(db, arguments, false),
@@ -1388,7 +1353,7 @@ impl<'db> RecursiveType<'db> {
                 );
             }
         };
-        let env = self.environment(db);
+        let env = visitor.env.in_environment(self.environment(db));
         let unfolded = body.apply_type_mapping_impl(
             db,
             &TypeMapping::ApplyRecursiveSubstitution(RecursiveMapping(
@@ -1527,9 +1492,10 @@ impl<'db> RecursiveType<'db> {
     pub(in crate::types) fn variance_equation(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        let env = self.environment(db);
+        let env = env.in_environment(self.environment(db));
         if let Some(arguments) = self.arguments(db) {
             let parameters = arguments.generic_context(db);
             let constructor = self.with_arguments(
@@ -1729,7 +1695,7 @@ impl<'db> VarianceInferable<'db> for RecursiveType<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        _env: &ProgramEnvironment<'db>,
+        _env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         VarianceTerm::variable(db, VarianceOrigin::Recursive(self), typevar)
@@ -2080,7 +2046,7 @@ mod query_tests {
 
         let db = setup_db();
         let env = db.program_environment();
-        let shared = TypeRecursionContext::default();
+        let shared = env.context();
         let typevar = BoundTypeVarInstance::synthetic(
             &db,
             &env,
@@ -2088,7 +2054,7 @@ mod query_tests {
             TypeVarVariance::Invariant,
         );
         let key = (env.program(&db), typevar.identity(&db));
-        TypeQueryContext::with_recursion_context(&env, HasSharedGuard(&shared), &shared, |query| {
+        TypeQueryContext::with_root(&env, HasSharedGuard(shared), |query| {
             let ty = Type::int_literal(0);
             assert!(!query.visit(&db, ty));
             shared
@@ -2149,8 +2115,9 @@ mod query_tests {
             // another operation is expanding this signature, and becomes valid again afterward.
             assert_eq!(
                 query
-                    .recursion_context()
-                    .expand_signature(&db, callable, || {
+                    .environment()
+                    .context()
+                    .expand_signature(&db, &env, callable, || {
                         assert!(!query.visit(&db, ty));
                     }),
                 Some(())

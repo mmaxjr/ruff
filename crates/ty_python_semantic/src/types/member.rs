@@ -3,6 +3,7 @@ use crate::place::{
     ConsideredDefinitions, DefinedPlace, Place, PlaceAndQualifiers, RequiresExplicitReExport,
     TypeOrigin, place_by_id, place_from_bindings, place_from_declarations,
 };
+use crate::types::TypeOperations;
 use crate::types::{ProgramEnvironment, Type, class::MroLookup, infer::nearest_enclosing_class};
 use ty_python_core::{
     place_table, scope::ScopeId, semantic_index, symbol::ScopedSymbolId, use_def_map,
@@ -103,7 +104,7 @@ pub(super) fn class_member<'db>(db: &'db dyn Db, scope: ScopeId<'db>, name: &str
                 // Otherwise, we need to check if the symbol has bindings
                 let use_def = use_def_map(db, scope);
                 let bindings = use_def.end_of_scope_symbol_bindings(symbol_id);
-                let env = ProgramEnvironment::from_scope(scope);
+                let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
                 let inferred = place_from_bindings(db, &env, bindings).place;
 
                 // TODO: we should not need to calculate inferred type second time. This is a temporary
@@ -141,7 +142,7 @@ pub(super) fn inherited_class_body_declaration<'db>(
     let table = place_table(db, scope);
     let name = table.symbol(symbol).name();
     let use_def = use_def_map(db, scope);
-    let env = ProgramEnvironment::from_scope(scope);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
     if !place_from_declarations(db, &env, use_def.end_of_scope_symbol_declarations(symbol))
         .ignore_conflicting_declarations()
         .is_undefined()
@@ -153,7 +154,7 @@ pub(super) fn inherited_class_body_declaration<'db>(
     MroLookup::new(
         db,
         &env,
-        class.identity_specialization(db).iter_mro(db).skip(1),
+        class.identity_specialization(db).iter_mro(db, &env).skip(1),
     )
     .class_body_declaration(name)
 }

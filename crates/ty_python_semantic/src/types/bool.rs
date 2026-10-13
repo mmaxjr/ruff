@@ -1,5 +1,5 @@
 use crate::Db;
-use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use crate::types::typevar::TypeVarSet;
 use ruff_db::diagnostic::{Annotation, SubDiagnostic, SubDiagnosticSeverity};
 use ruff_text_size::{Ranged, TextRange};
@@ -23,7 +23,7 @@ impl<'db> Type<'db> {
     /// Uninhabited types return [`Truthiness::Uninhabited`]: neither boolean outcome is possible.
     /// This describes the value type; a compound expression can also fail to complete because
     /// of its operands, even when its inferred result type is inhabited.
-    pub(crate) fn bool(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Truthiness {
+    pub(crate) fn bool(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Truthiness {
         TypeQueryContext::with_root(
             env,
             TryBool {
@@ -43,7 +43,7 @@ impl<'db> Type<'db> {
     pub(crate) fn try_bool(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Result<Truthiness, BoolError<'db>> {
         TypeQueryContext::with_root(
             env,
@@ -272,7 +272,10 @@ impl<'db> TypeQuery<'db> for TryBool {
                 if td.items(db).values().any(TypedDictField::is_required) {
                     Truthiness::AlwaysTrue
                 } else if td.openness(db).is_closed()
-                    && td.items(db).values().all(|field| !field.may_be_present(db))
+                    && td
+                        .items(db)
+                        .values()
+                        .all(|field| !field.may_be_present(db, env))
                 {
                     Truthiness::AlwaysFalse
                 } else {
@@ -447,11 +450,15 @@ impl<'db> BoolError<'db> {
         }
     }
 
-    pub(super) fn report_diagnostic(&self, context: &InferContext, condition: impl Ranged) {
+    pub(super) fn report_diagnostic(
+        &self,
+        context: &InferContext<'db, '_>,
+        condition: impl Ranged,
+    ) {
         self.report_diagnostic_impl(context, condition.range());
     }
 
-    fn report_diagnostic_impl(&self, context: &InferContext, condition: TextRange) {
+    fn report_diagnostic_impl(&self, context: &InferContext<'db, '_>, condition: TextRange) {
         let db = context.db();
         let Some(builder) = context.report_lint(&UNSUPPORTED_BOOL_CONVERSION, condition) else {
             return;

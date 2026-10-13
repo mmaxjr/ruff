@@ -1,5 +1,6 @@
 //! Transform lambda signatures without making their inferred return types part of their identity.
 
+use crate::types::TypeOperations;
 use std::cell::RefCell;
 
 use rustc_hash::FxHashSet;
@@ -23,7 +24,7 @@ use crate::types::visitor::{
 use crate::types::{
     ApplyTypeMappingVisitor, BindingContext, BoundTypeVarIdentity, BoundTypeVarInstance,
     MaterializationKind, Parameters, PromotionKind, PromotionMode, RecursiveType, SelfBinding,
-    Type, TypeAliasType, TypeContext, TypeMapping, TypeRecursionContext, TypeVarVariance,
+    Type, TypeAliasType, TypeContext, TypeMapping, TypeVarVariance,
 };
 use crate::{Db, FxOrderSet, Program, ProgramEnvironment};
 use ty_python_core::{scope::ScopeId, semantic_index};
@@ -33,7 +34,7 @@ impl<'db> Type<'db> {
     pub(in crate::types) fn lambda_inference_sources(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> &'db [ScopeId<'db>] {
         lambda_inference_sources(db, env.program(db), self, false)
     }
@@ -43,7 +44,7 @@ impl<'db> Type<'db> {
     pub(in crate::types) fn depends_on_lambda_inference(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         sources: &[ScopeId<'db>],
     ) -> bool {
         if sources.is_empty() {
@@ -64,19 +65,19 @@ fn lambda_inference_sources<'db>(
     include_inputs: bool,
 ) -> Box<[ScopeId<'db>]> {
     struct SourceVisitor<'db> {
-        env: ProgramEnvironment<'db>,
+        env: TypeOperations<'db>,
         include_inputs: bool,
         visited: TypeCollector<'db>,
         sources: RefCell<FxHashSet<ScopeId<'db>>>,
     }
 
     impl<'db> TypeVisitor<'db> for SourceVisitor<'db> {
-        fn program_environment(&self) -> &ProgramEnvironment<'db> {
+        fn program_environment(&self) -> &TypeOperations<'db> {
             &self.env
         }
 
-        fn lazy_type_context(&self) -> Option<&crate::types::TypeRecursionContext<'db>> {
-            None
+        fn should_visit_lazy_type_attributes(&self) -> bool {
+            false
         }
 
         fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
@@ -109,7 +110,7 @@ fn lambda_inference_sources<'db>(
     }
 
     let visitor = SourceVisitor {
-        env: ProgramEnvironment::from_program(program),
+        env: TypeOperations::for_inference(db, ProgramEnvironment::from_program(program)),
         include_inputs,
         visited: TypeCollector::default(),
         sources: RefCell::default(),
@@ -151,9 +152,8 @@ impl<'db> LambdaTransformation<'db> {
     fn parameters(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         parameters: Parameters<'db>,
-        context: &TypeRecursionContext<'db>,
     ) -> Parameters<'db> {
         let parameters = match &self.mapping {
             LambdaMapping::BindParameters(bound) => return bound.clone(),
@@ -162,7 +162,7 @@ impl<'db> LambdaTransformation<'db> {
         };
         let visitor = ApplyTypeMappingVisitor {
             materialize_typevar_bounds_and_defaults: self.materialize_typevar_bounds_and_defaults,
-            ..ApplyTypeMappingVisitor::new(env).with_recursion_context(context)
+            ..ApplyTypeMappingVisitor::new(env)
         };
         match self.mapping.as_type_mapping() {
             Some(mapping) => {
@@ -175,9 +175,8 @@ impl<'db> LambdaTransformation<'db> {
     fn signature(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         mut signature: super::CallableSignature<'db>,
-        context: &TypeRecursionContext<'db>,
     ) -> super::CallableSignature<'db> {
         match &self.mapping {
             LambdaMapping::BindParameters(parameters) => {
@@ -198,7 +197,7 @@ impl<'db> LambdaTransformation<'db> {
                 let visitor = ApplyTypeMappingVisitor {
                     materialize_typevar_bounds_and_defaults: self
                         .materialize_typevar_bounds_and_defaults,
-                    ..ApplyTypeMappingVisitor::new(env).with_recursion_context(context)
+                    ..ApplyTypeMappingVisitor::new(env)
                 };
                 match self.mapping.as_type_mapping() {
                     Some(mapping) => {
@@ -217,13 +216,13 @@ impl<'db> LambdaSignatureMapping<'db> {
     pub(super) fn signature(
         &self,
         db: &'db dyn Db,
-        context: &TypeRecursionContext<'db>,
+        env: &TypeOperations<'db>,
     ) -> super::CallableSignature<'db> {
         let source = self.source;
-        let env = ProgramEnvironment::from_scope(source.scope(db));
+        let env = env.in_environment(ProgramEnvironment::from_scope(source.scope(db)));
         self.steps.iter().fold(
             infer_lambda_signature(db, LambdaSource::of(db, source)).clone(),
-            |signature, step| step.signature(db, &env, signature, context),
+            |signature, step| step.signature(db, &env, signature),
         )
     }
 }
@@ -365,6 +364,7 @@ impl<'db> CallableType<'db> {
     pub(in crate::types) fn lambda_with_same_inputs(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         scope: ScopeId<'db>,
         parameters: &Parameters<'db>,
         environment: InferenceEnvironment<'db>,
@@ -378,7 +378,7 @@ impl<'db> CallableType<'db> {
             || lambda.parameters(db) != parameters
             || source.environment(db) != environment
             || !lambda
-                .captured_arguments(db)
+                .captured_arguments(db, env)
                 .all(|(parameter, arguments)| arguments == [Type::TypeVar(parameter); 2])
         {
             return None;
@@ -394,7 +394,7 @@ impl<'db> LambdaSignature<'db> {
     pub(super) fn variance_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         let source = LambdaSource::of(db, self);
@@ -403,26 +403,27 @@ impl<'db> LambdaSignature<'db> {
         } else {
             VarianceTerm::join(
                 db,
-                self.captured_arguments(db).map(|(parameter, arguments)| {
-                    let argument_variance = |argument| {
-                        if parameter.is_paramspec(db) {
-                            Self::paramspec_argument_variance(db, env, argument, typevar)
-                                .compose_thunk(db, || TypeVarVariance::Contravariant.into())
-                        } else {
-                            argument.variance_of(db, env, typevar)
-                        }
-                    };
-                    VarianceTerm::substitute(
-                        db,
-                        VarianceTerm::variable(
+                self.captured_arguments(db, env)
+                    .map(|(parameter, arguments)| {
+                        let argument_variance = |argument| {
+                            if parameter.is_paramspec(db) {
+                                Self::paramspec_argument_variance(db, env, argument, typevar)
+                                    .compose_thunk(db, || TypeVarVariance::Contravariant.into())
+                            } else {
+                                argument.variance_of(db, env, typevar)
+                            }
+                        };
+                        VarianceTerm::substitute(
                             db,
-                            VarianceOrigin::LambdaReturn(source),
-                            parameter.identity(db),
-                        ),
-                        argument_variance(arguments[0]),
-                        argument_variance(arguments[1]),
-                    )
-                }),
+                            VarianceTerm::variable(
+                                db,
+                                VarianceOrigin::LambdaReturn(source),
+                                parameter.identity(db),
+                            ),
+                            argument_variance(arguments[0]),
+                            argument_variance(arguments[1]),
+                        )
+                    }),
             )
         };
         VarianceTerm::join(
@@ -437,7 +438,7 @@ impl<'db> LambdaSignature<'db> {
     /// Give an unspecialized `ParamSpec` the variance of its callable parameter-list value.
     fn paramspec_argument_variance(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         argument: Type<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
@@ -458,12 +459,11 @@ impl<'db> LambdaSignature<'db> {
 
     /// Share comparisons of specialized views when the differing captures cannot affect their
     /// signatures. Computing this during construction would re-enter inference of the source.
-    #[salsa::tracked(
-        returns(ref),
-        cycle_initial=|_, _, _| None,
-        heap_size=ruff_memory_usage::heap_size,
-    )]
-    pub(super) fn comparison_key(self, db: &'db dyn Db) -> Option<LambdaSignatureKey<'db>> {
+    pub(super) fn comparison_key(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<LambdaSignatureKey<'db>> {
         // An untransformed lambda already has a single exact identity.
         let source = self.mapping(db).as_ref()?.source;
         let promotions = self.signature_promotions(db)?;
@@ -482,7 +482,7 @@ impl<'db> LambdaSignature<'db> {
         let arguments = if dependencies == TypeVarSet::None {
             Box::default()
         } else {
-            self.captured_arguments(db)
+            self.captured_arguments(db, env)
                 .filter(|(variable, _)| variable.is_inferable(db, dependencies))
                 .collect()
         };
@@ -526,6 +526,7 @@ impl<'db> LambdaSignature<'db> {
     pub(in crate::types) fn has_equivalent_signature(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         other: Self,
         equivalent: impl Fn(Type<'db>, Type<'db>) -> bool,
     ) -> bool {
@@ -571,7 +572,7 @@ impl<'db> LambdaSignature<'db> {
         }
         let arguments = |lambda: Self| {
             lambda
-                .captured_arguments(db)
+                .captured_arguments(db, env)
                 .filter(move |(variable, _)| variable.is_inferable(db, dependencies))
         };
         arguments(self).zip(arguments(other)).all(
@@ -644,12 +645,13 @@ impl<'db> LambdaSignature<'db> {
     pub(in crate::types) fn with_bound_parameters(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         parameters: Parameters<'db>,
     ) -> Self {
         if *self.parameters(db) == parameters {
             return self;
         }
-        let env = ProgramEnvironment::from_scope(self.scope(db));
+        let env = env.in_environment(ProgramEnvironment::from_scope(self.scope(db)));
         self.apply_mapping(
             db,
             LambdaMapping::BindParameters(parameters),
@@ -661,7 +663,7 @@ impl<'db> LambdaSignature<'db> {
     pub(in crate::types) fn bind_receiver(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         receiver: Type<'db>,
         typing_self_type: Type<'db>,
     ) -> Self {
@@ -679,7 +681,7 @@ impl<'db> LambdaSignature<'db> {
     pub(super) fn apply_receiver(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         receiver: Type<'db>,
         typing_self_type: Type<'db>,
     ) -> Self {
@@ -703,18 +705,18 @@ impl<'db> LambdaSignature<'db> {
     fn with_transformations(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         steps: &[LambdaTransformation<'db>],
-        context: &TypeRecursionContext<'db>,
     ) -> Self {
         let source = self.source(db);
         if steps.is_empty() {
             return source;
         }
-        let env = ProgramEnvironment::from_scope(source.scope(db));
+        let env = env.in_environment(ProgramEnvironment::from_scope(source.scope(db)));
         let parameters = steps
             .iter()
             .fold(source.parameters(db).clone(), |parameters, step| {
-                step.parameters(db, &env, parameters, context)
+                step.parameters(db, &env, parameters)
             });
         Self::new(
             db,
@@ -734,13 +736,14 @@ impl<'db> LambdaSignature<'db> {
     pub(in crate::types) fn captured_arguments(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
     ) -> impl Iterator<Item = (BoundTypeVarInstance<'db>, [Type<'db>; 2])> {
         let source = self.source(db);
         let steps = self
             .mapping(db)
             .as_ref()
             .map_or(&[][..], |plan| plan.steps.as_ref());
-        let env = ProgramEnvironment::from_scope(source.scope(db));
+        let env = env.in_environment(ProgramEnvironment::from_scope(source.scope(db)));
         source
             .captured_typevars(db)
             .variables(db)
@@ -777,7 +780,7 @@ impl<'db> LambdaSignature<'db> {
         heap_size=ruff_memory_usage::heap_size,
     )]
     pub(in crate::types) fn return_type_dependencies(self, db: &'db dyn Db) -> TypeVarSet<'db> {
-        let env = ProgramEnvironment::from_scope(self.scope(db));
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.scope(db)));
         if let Some(plan) = self.mapping(db) {
             let mut dependencies = plan.source.return_type_dependencies(db);
             for step in &plan.steps {
@@ -821,13 +824,13 @@ impl<'db> LambdaSignature<'db> {
     #[salsa::tracked(
         returns(copy),
         cycle_initial=|db, _, lambda: LambdaSignature<'db>| GenericContext::from_typevar_instances(
-            db, &ProgramEnvironment::from_scope(lambda.scope(db)), []
+            db, &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(lambda.scope(db))), []
         ),
         heap_size=ruff_memory_usage::heap_size,
     )]
     pub(in crate::types) fn captured_typevars(self, db: &'db dyn Db) -> GenericContext<'db> {
         let scope = self.scope(db);
-        let env = ProgramEnvironment::from_scope(scope);
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
         let index = semantic_index(db, scope.program_file(db));
         let source = self.source(db);
         let mappings = self
@@ -1106,11 +1109,8 @@ impl<'db> LambdaSignature<'db> {
                     specialization: *specialization,
                     specialize_self_domain: *specialize_self_domain,
                 });
-            let previous_source = source.with_transformations(
-                db,
-                &steps[..steps.len() - 1],
-                visitor.recursion_context(),
-            );
+            let previous_source =
+                source.with_transformations(db, visitor.env, &steps[..steps.len() - 1]);
             let (variables, types): (Vec<_>, Vec<_>) = previous_source
                 .captured_typevars(db)
                 .variables(db)
@@ -1160,7 +1160,7 @@ impl<'db> LambdaSignature<'db> {
                 .map_or(0, |index| index + 1);
             steps[start..].sort_by_key(key);
         }
-        source.with_transformations(db, &steps, visitor.recursion_context())
+        source.with_transformations(db, visitor.env, &steps)
     }
 }
 

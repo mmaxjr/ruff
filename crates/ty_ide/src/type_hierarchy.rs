@@ -9,7 +9,7 @@ use ty_project::parallel::ParallelIteratorExt;
 use ty_python_core::ProgramFile;
 use ty_python_semantic::TypeHierarchyClass;
 use ty_python_semantic::types::Type;
-use ty_python_semantic::{ProgramEnvironment, SemanticModel};
+use ty_python_semantic::{SemanticModel, TypeOperations};
 
 /// Represents a type hierarchy item returned by the LSP type hierarchy requests.
 #[derive(Debug, Clone)]
@@ -53,7 +53,7 @@ pub fn type_hierarchy_supertypes(
     let Some(ty) = resolve_type_at(db, file, offset) else {
         return vec![];
     };
-    let env = ProgramEnvironment::from_file(file);
+    let env = TypeOperations::for_file(db, file);
     ty_python_semantic::type_hierarchy_supertypes(db, &env, ty)
         .into_iter()
         .map(|c| type_hierarchy_class_to_item(db, c))
@@ -75,7 +75,7 @@ pub fn type_hierarchy_subtypes(
     ty_module_resolver::all_modules(db, file.resolver_environment(db))
         .into_par_iter()
         .map_with_db(db, |db, module| {
-            let env = ProgramEnvironment::from_file(file);
+            let env = TypeOperations::for_file(db, file);
             ty_python_semantic::type_hierarchy_subtypes(db, &env, ty, &[module])
                 .into_iter()
                 .map(|class| type_hierarchy_class_to_item(db, class))

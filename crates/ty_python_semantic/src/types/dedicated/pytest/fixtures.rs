@@ -42,6 +42,7 @@
 //!   available by that definition, including those reached through imports. Each exposure records the
 //!   fixture's public name, canonical declaration, and local and source bindings.
 
+use crate::types::TypeOperations;
 use std::cmp::Ordering;
 
 use itertools::Either;
@@ -1425,7 +1426,10 @@ fn is_known_class_instance(
     let Some(Type::NominalInstance(instance)) = ty else {
         return false;
     };
-    let environment = ProgramEnvironment::from_file(definition.program_file(db));
+    let environment = TypeOperations::for_inference(
+        db,
+        ProgramEnvironment::from_file(definition.program_file(db)),
+    );
     let Some(class) = instance
         .class(db, &environment)
         .class_literal(db)
@@ -1483,7 +1487,10 @@ fn statically_known_parametrize_names<'db>(
         );
     }
 
-    let environment = ProgramEnvironment::from_file(definition.program_file(db));
+    let environment = TypeOperations::for_inference(
+        db,
+        ProgramEnvironment::from_file(definition.program_file(db)),
+    );
     extract_fixed_length_iterable_element_types(db, &environment, expression, |element| {
         expression_type(element).unwrap_or_else(Type::unknown)
     })?
@@ -1551,7 +1558,8 @@ fn static_string_sequence_from_expression<'db>(
         return Some(strings);
     }
 
-    let environment = ProgramEnvironment::from_definition(definition);
+    let environment =
+        TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
     extract_fixed_length_iterable_element_types(db, &environment, expression, |element| {
         definition_expression_type(db, definition, element)
     })?

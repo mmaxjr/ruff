@@ -1,3 +1,4 @@
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -136,7 +137,7 @@ fn all_narrowing_constraints_for_pattern<'db>(
 ) -> Option<FrozenNarrowingConstraints<'db>> {
     let program_file = pattern.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), true)
         .finish()
@@ -153,7 +154,7 @@ fn all_narrowing_constraints_for_expression<'db>(
 ) -> ExpressionNarrowingConstraints<'db> {
     let program_file = expression.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     let predicate = PredicateNode::Expression {
         expression,
@@ -185,7 +186,7 @@ fn all_negative_narrowing_constraints_for_pattern<'db>(
 ) -> Option<FrozenNarrowingConstraints<'db>> {
     let program_file = pattern.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), false)
         .finish()
@@ -203,7 +204,7 @@ fn all_narrowing_constraints_for_subject_element_pattern<'db>(
 ) -> Option<FrozenNarrowingConstraints<'db>> {
     let program_file = pattern.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = ProgramEnvironment::from_file(program_file);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     NarrowingConstraintsBuilder::new(
         db,
@@ -251,7 +252,7 @@ impl<'db> PatternSuccessTypes<'db> {
     fn cycle_normalized(
         mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         previous: &Self,
         cycle: &salsa::Cycle,
     ) -> Self {
@@ -351,7 +352,7 @@ impl<'db> PatternBindingTypes<'db> {
     }
 
     /// Return the union of all contributions to this binding.
-    fn ty(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    fn ty(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         UnionType::from_elements(db, env, self.contributions.iter().map(|binding| binding.ty))
     }
 
@@ -374,7 +375,7 @@ impl<'db> PatternBindingTypes<'db> {
     }
 
     /// Return the union of the contributions that alias the current subject.
-    fn subject_ty(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    fn subject_ty(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         UnionType::from_elements(
             db,
             env,
@@ -428,7 +429,7 @@ enum PatternValueSource {
 /// preserve type variables.
 struct PatternSuccessAnalyzer<'db, 'pattern> {
     db: &'db dyn Db,
-    env: ProgramEnvironment<'db>,
+    env: TypeOperations<'db>,
     scope: ScopeId<'db>,
     /// Caches structural-pattern analysis results, including subject and binding types.
     ///
@@ -474,7 +475,7 @@ struct PatternSuccessAnalyzer<'db, 'pattern> {
     returns(ref),
     cycle_initial=|_, id, _| PatternSuccessTypes::cycle_initial(Type::divergent(id)),
     cycle_fn=|db: &'db dyn Db, cycle, previous: &PatternSuccessTypes<'db>, result: PatternSuccessTypes<'db>, pattern: PatternPredicate<'db>| {
-        let env = ProgramEnvironment::from_scope(pattern.subject(db).scope(db));
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(pattern.subject(db).scope(db)));
         result.cycle_normalized(db, &env, previous, cycle)
     },
     heap_size=ruff_memory_usage::heap_size
@@ -484,7 +485,7 @@ pub(crate) fn pattern_success_types<'db>(
     pattern: PatternPredicate<'db>,
 ) -> PatternSuccessTypes<'db> {
     let subject = pattern.subject(db);
-    let env = ProgramEnvironment::from_scope(subject.scope(db));
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(subject.scope(db)));
     let incoming_subject_ty =
         type_narrowed_by_previous_patterns(db, pattern, PatternSubjectExpansion::Raw);
     let mut analyzer = PatternSuccessAnalyzer::new(db, pattern.scope(db));
@@ -523,7 +524,7 @@ impl ClassInfoConstraintFunction {
     fn generate_constraint<'db>(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         classinfo: Type<'db>,
         is_positive: bool,
         use_generic_filtering: bool,
@@ -544,7 +545,7 @@ impl ClassInfoConstraintFunction {
 struct ClassInfoConstraint<'a, 'db> {
     mapping: ApplyTypeMappingVisitor<'a, 'db>,
     function: ClassInfoConstraintFunction,
-    env: &'a ProgramEnvironment<'db>,
+    env: &'a TypeOperations<'db>,
     is_positive: bool,
     use_generic_filtering: bool,
     visitor: CycleDetector<'db, ClassInfoConstraintFunction, Type<'db>, Option<Type<'db>>, 1>,
@@ -600,7 +601,7 @@ impl<'db> ClassInfoConstraint<'_, 'db> {
             Type::RecursiveVar(_) => {
                 unreachable!("semantic operation on an unbound recursive variable")
             }
-            Type::TypeAlias(alias) => self.generate(db, alias.value_type(db)),
+            Type::TypeAlias(alias) => self.generate(db, alias.value_type(db, env)),
             Type::Recursive(recursive) => self.generate(
                 db,
                 expansion.expand_recursive(db, recursive).into_unfolded()?,
@@ -828,7 +829,7 @@ impl<'db> Conjunctions<'db> {
         self
     }
 
-    fn evaluate_constraint_type(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    fn evaluate_constraint_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         if self.conjuncts.len() == 1 {
             return self.conjuncts[0].ty();
         }
@@ -854,7 +855,7 @@ impl<'db> Conjunctions<'db> {
 /// are still intersected with the original unknown-specialized target.
 fn filter_generic_narrowing_constraint<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     subject: Type<'db>,
     target: Type<'db>,
 ) -> Type<'db> {
@@ -917,7 +918,7 @@ fn filter_generic_narrowing_constraint<'db>(
 /// `Left[int] & Right[str]` to `Both` must infer `Both[int, str]`.
 fn specialize_narrowing_target_from_intersection<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     intersection: IntersectionType<'db>,
     target: Type<'db>,
 ) -> Option<Type<'db>> {
@@ -932,7 +933,7 @@ fn specialize_narrowing_target_from_intersection<'db>(
             let subject_class = element.nominal_class(db, env)?;
             subject_class.static_class_literal(db)?.1?;
             let target_base = target_identity
-                .iter_mro(db)
+                .iter_mro(db, env)
                 .filter_map(ClassBase::into_class)
                 .find(|base| base.class_literal(db) == subject_class.class_literal(db))?;
             Some((target_base, subject_class))
@@ -969,7 +970,7 @@ fn specialize_narrowing_target_from_intersection<'db>(
 
 fn specialize_narrowing_target<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     subject: Type<'db>,
     target: Type<'db>,
 ) -> Option<Type<'db>> {
@@ -1048,14 +1049,14 @@ fn specialize_narrowing_target<'db>(
 /// this returns the specialized class `list[int]`.
 fn specialize_generic_class_for_subject<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     target_class: ClassLiteral<'db>,
     subject_class: ClassType<'db>,
 ) -> Option<ClassType<'db>> {
     let generic_context = target_class.generic_context(db)?;
     let target_identity = target_class.identity_specialization(db);
     let target_base = target_identity
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .find(|base| base.class_literal(db) == subject_class.class_literal(db));
 
@@ -1080,7 +1081,7 @@ fn specialize_generic_class_for_subject<'db>(
 
 fn specialize_generic_class_from_solutions<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     target_class: ClassLiteral<'db>,
     solutions: Solutions<'db>,
 ) -> Option<ClassType<'db>> {
@@ -1343,7 +1344,7 @@ impl<'db> NarrowingConstraint<'db> {
     pub(crate) fn evaluate_constraint_type(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         match self.0 {
             NarrowingConstraintKind::Intersection(operation)
@@ -1519,7 +1520,7 @@ fn merge_constraints_or<'db>(
 /// value of `PatternClass` may be a subclass of `A`.
 fn positive_class_pattern_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     class_expression_ty: Type<'db>,
     use_generic_filtering: bool,
 ) -> Option<Type<'db>> {
@@ -1569,7 +1570,7 @@ fn positive_class_pattern_type<'db>(
 /// ```
 fn refine_exact_tuple_for_sequence_pattern<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     subject_ty: Type<'db>,
     pattern_element_types: &[Type<'db>],
 ) -> Option<Type<'db>> {
@@ -1603,7 +1604,7 @@ fn refine_exact_tuple_for_sequence_pattern<'db>(
 /// every value that does.
 fn necessary_match_pattern_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     pattern: &PatternPredicateKind<'db>,
 ) -> Type<'db> {
     match pattern {
@@ -1635,7 +1636,7 @@ fn necessary_match_pattern_type<'db>(
 /// Preserve the sequence element constraints that can be addressed at fixed indices.
 fn necessary_sequence_pattern_type<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     kind: &SequencePatternPredicateKind<'db>,
 ) -> Type<'db> {
     if let Some((prefix_patterns, suffix_patterns)) = kind.split_around_star() {
@@ -1715,7 +1716,7 @@ impl LengthComparison {
 
 struct NarrowingConstraintsBuilder<'db, 'ast> {
     db: &'db dyn Db,
-    env: ProgramEnvironment<'db>,
+    env: TypeOperations<'db>,
     module: &'ast ParsedModuleRef,
     predicate: PredicateNode<'db>,
     is_positive: bool,
@@ -1725,7 +1726,7 @@ struct NarrowingConstraintsBuilder<'db, 'ast> {
 impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
     fn new(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         module: &'ast ParsedModuleRef,
         predicate: PredicateNode<'db>,
         is_positive: bool,
@@ -2160,7 +2161,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
     fn new(db: &'db dyn Db, scope: ScopeId<'db>) -> Self {
         Self {
             db,
-            env: ProgramEnvironment::from_scope(scope),
+            env: TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope)),
             scope,
             successful_patterns: FxHashMap::default(),
             matched_subjects: FxHashMap::default(),
@@ -2508,9 +2509,11 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
             }
         };
         match subject_ty {
-            Type::TypeAlias(alias) => {
-                self.filter_class_pattern_subject_type(class, class_ty, alias.value_type(db))
-            }
+            Type::TypeAlias(alias) => self.filter_class_pattern_subject_type(
+                class,
+                class_ty,
+                alias.value_type(db, &self.env),
+            ),
             Type::Union(union) => union.map(db, &self.env, |element| {
                 self.filter_class_pattern_subject_type(class, class_ty, *element)
             }),
@@ -2942,7 +2945,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
         let Some(class) = subject_ty.nominal_class(db, &self.env) else {
             return false;
         };
-        for base in class.iter_mro(db) {
+        for base in class.iter_mro(db, &self.env) {
             let class = match base {
                 ClassBase::Class(class) => class,
                 ClassBase::Generic | ClassBase::Protocol => continue,
@@ -3071,13 +3074,14 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
 
     fn mapping_pattern_rest_type_for_arm(&self, subject_ty: Type<'db>) -> Type<'db> {
         let db = self.db;
-        let (key_ty, value_ty) = if subject_ty.has_outer_type(db, |ty| ty.is_typed_dict()) {
-            (KnownClass::Str.to_instance(db, &self.env), Type::object())
-        } else {
-            subject_ty
-                .unpack_keys_and_items(db, &self.env)
-                .unwrap_or_else(|| (Type::unknown(), Type::unknown()))
-        };
+        let (key_ty, value_ty) =
+            if subject_ty.has_outer_type(db, &self.env, |ty| ty.is_typed_dict()) {
+                (KnownClass::Str.to_instance(db, &self.env), Type::object())
+            } else {
+                subject_ty
+                    .unpack_keys_and_items(db, &self.env)
+                    .unwrap_or_else(|| (Type::unknown(), Type::unknown()))
+            };
         KnownClass::Dict.to_specialized_instance(db, &self.env, &[key_ty, value_ty])
     }
 
@@ -3607,7 +3611,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     ///   where the returned `Literal` types are mutually consistent in their truthiness.
     fn is_base_type_narrowable_by_len(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> bool {
         match ty {
@@ -3637,7 +3641,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     /// Returns `None` if no part of the type is narrowable.
     fn narrow_type_by_len(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         is_positive: bool,
     ) -> Option<Type<'db>> {
@@ -3706,7 +3710,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     /// because persisting an observed length would become stale after mutation.
     fn narrow_type_by_len_comparison(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         length: i64,
         comparison: LengthComparison,
@@ -3929,7 +3933,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 }
                 if let Type::Union(union) = rhs_ty
                     && union.elements(db).iter().any(|element| {
-                        element.has_outer_type(db, |ty| ty.as_string_literal().is_some())
+                        element.has_outer_type(db, &self.env, |ty| ty.as_string_literal().is_some())
                     })
                 {
                     let mut builder = UnionBuilder::new(db, &self.env);
@@ -4060,7 +4064,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 let rhs_identity_ty = rhs_ty.identity_comparison_type(db, &self.env);
                 let rhs_constraint = if rhs_identity_ty.is_singleton(db, &self.env) {
                     rhs_identity_ty
-                } else if rhs_ty.has_outer_type(db, |ty| matches!(ty, Type::TypeVar(_)))
+                } else if rhs_ty.has_outer_type(db, &self.env, |ty| matches!(ty, Type::TypeVar(_)))
                     && rhs_ty.is_singleton(db, &self.env)
                 {
                     rhs_ty
@@ -4198,7 +4202,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         /// generic class.
         fn find_underlying_class<'db>(
             db: &'db dyn Db,
-            env: &ProgramEnvironment<'db>,
+            env: &TypeOperations<'db>,
             ty: Type<'db>,
         ) -> Option<ClassLiteral<'db>> {
             match ty {
@@ -4217,7 +4221,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 Type::TypeVar(tvar) => {
                     find_underlying_class(db, env, tvar.typevar(db).upper_bound(db, env)?)
                 }
-                Type::TypeAlias(alias) => find_underlying_class(db, env, alias.value_type(db)),
+                Type::TypeAlias(alias) => find_underlying_class(db, env, alias.value_type(db, env)),
                 _ => None,
             }
         }
@@ -4510,12 +4514,13 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
 
             if is_positive == (*op == ast::CmpOp::In) {
                 let narrowed = self.narrow_with_present_key(rhs_type, key);
-                if !narrowed.is_same_resolved_type(db, rhs_type) {
+                if !narrowed.is_same_resolved_type(db, &self.env, rhs_type) {
                     apply_constraint(&mut constraints, NarrowingConstraint::replacement(narrowed));
                 }
             } else {
                 let requires_key = |td: TypedDictType<'db>| -> bool {
-                    td.key_membership_truthiness(db, key).is_always_true()
+                    td.key_membership_truthiness(db, &self.env, key)
+                        .is_always_true()
                 };
 
                 let narrowed = TypeInspector::inspect_root(
@@ -4575,7 +4580,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         // recursively inferred attributes. Other literals can encounter the same issue, but a
         // general solution would require broader changes to cycle recovery. For now, intentionally
         // preserve only `None`, whose type can be recovered directly.
-        let expression_type = |expr: &ast::Expr, env: &ProgramEnvironment<'db>| {
+        let expression_type = |expr: &ast::Expr, env: &TypeOperations<'db>| {
             if expr.is_none_literal_expr() {
                 Type::none(db, env)
             } else {
@@ -5692,7 +5697,7 @@ impl<'db> TypeQuery<'db> for NarrowWithPresentKey<'_> {
             Type::Union(union) => union.map(db, env, |element| traversal.visit(db, *element)),
             Type::TypedDict(typed_dict)
                 if typed_dict
-                    .key_membership_truthiness(db, key)
+                    .key_membership_truthiness(db, env, key)
                     .is_always_false() =>
             {
                 Type::Never
@@ -5713,7 +5718,7 @@ impl<'db> TypeQuery<'db> for NarrowWithPresentKey<'_> {
 // one `TypedDict` (even if other types are also present), or a type alias to such a type.
 fn is_or_contains_typeddict<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> bool {
     TypeQueryContext::with_root(env, ContainsTypedDict { key: None }, |root| {
@@ -5723,7 +5728,7 @@ fn is_or_contains_typeddict<'db>(
 
 fn typeddict_declares_key<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     key: &str,
 ) -> bool {
@@ -5818,7 +5823,7 @@ fn required_typeddict_key<'db>(
 /// synthesized `TypedDict` used for `TypedDict` arms.
 fn key_membership_contains_protocol<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     key: &str,
 ) -> Type<'db> {
     let signature = Signature::new(
@@ -5840,7 +5845,7 @@ fn key_membership_contains_protocol<'db>(
 /// Visit matching `TypedDict` field types, ignoring other alternatives and missing fields.
 fn visit_matching_typeddict_field_types<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
     field_name: &str,
     visit: &mut impl FnMut(Type<'db>),
@@ -5897,7 +5902,7 @@ impl<'a, 'db, F: FnMut(Type<'db>)> TypeWalk<'db, &'a mut F> for VisitTypedDictFi
 /// since a diagnostic will be emitted elsewhere for the out-of-bounds access.
 fn any_tuple_has_out_of_bounds_index<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     union: UnionType<'db>,
     index: i32,
 ) -> bool {
@@ -5911,7 +5916,7 @@ pub(crate) trait NarrowingEvaluatorExtension<'db> {
     fn narrow(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         base_type: Type<'db>,
         place: ScopedPlaceId,
     ) -> Type<'db>;
@@ -5921,7 +5926,7 @@ impl<'db> NarrowingEvaluatorExtension<'db> for NarrowingEvaluator<'_, 'db> {
     fn narrow(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         base_type: Type<'db>,
         place: ScopedPlaceId,
     ) -> Type<'db> {

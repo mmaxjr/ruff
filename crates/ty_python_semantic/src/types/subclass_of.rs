@@ -1,7 +1,7 @@
 use crate::Db;
 use crate::FxOrderSet;
-use crate::ProgramEnvironment;
 use crate::place::PlaceAndQualifiers;
+use crate::types::TypeOperations;
 use crate::types::class::{DynamicClassLiteral, metaclass_instance_type};
 use crate::types::constraints::ConstraintSet;
 use crate::types::recursive::TypeInspector;
@@ -45,7 +45,7 @@ impl<'db> SubclassOfType<'db> {
     /// between `@final` classes and other classes when dealing with [`Type::SubclassOf`] variants.
     pub(crate) fn from(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         subclass_of: impl Into<SubclassOfInner<'db>>,
     ) -> Type<'db> {
         let subclass_of = subclass_of.into();
@@ -75,7 +75,7 @@ impl<'db> SubclassOfType<'db> {
     /// Given the class object `T`, returns a [`Type`] instance representing `type[T]`.
     pub(crate) fn try_from_type(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> Option<Type<'db>> {
         let subclass_of = match ty {
@@ -102,7 +102,7 @@ impl<'db> SubclassOfType<'db> {
     /// with a fresh recursion guard. Callers interpreting annotations inspect aliases separately.
     pub(crate) fn try_from_instance(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> Result<Type<'db>, Type<'db>> {
         // Handle unions and intersections by distributing `type[]` over each element:
@@ -148,7 +148,7 @@ impl<'db> SubclassOfType<'db> {
     }
 
     /// Return a [`Type`] instance representing the type `type[object]`.
-    fn subclass_of_object(db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    fn subclass_of_object(db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         // See the documentation of `SubclassOfType::from` for details.
         KnownClass::Type.to_instance(db, env)
     }
@@ -162,7 +162,7 @@ impl<'db> SubclassOfType<'db> {
     pub(super) fn meta_write_requirement(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> Option<(Option<Type<'db>>, TypeQualifiers)> {
         let SubclassOfInner::Protocol(protocol) = self.subclass_of else {
@@ -199,7 +199,7 @@ impl<'db> SubclassOfType<'db> {
     pub(crate) fn exact_typevar_upper_bound(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<Type<'db>> {
         self.into_type_var()
             .and_then(|typevar| typevar.typevar(db).upper_bound(db, env))
@@ -255,7 +255,7 @@ impl<'db> SubclassOfType<'db> {
     pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'_, 'db>,
@@ -283,7 +283,7 @@ impl<'db> SubclassOfType<'db> {
     pub(crate) fn find_name_in_mro_with_policy(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> Option<PlaceAndQualifiers<'db>> {
@@ -314,7 +314,7 @@ impl<'db> SubclassOfType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -325,7 +325,7 @@ impl<'db> SubclassOfType<'db> {
         })
     }
 
-    pub(crate) fn to_instance(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub(crate) fn to_instance(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         match self.subclass_of {
             SubclassOfInner::Class(class) => Type::instance(db, env, class),
             SubclassOfInner::Dynamic(dynamic_type) => Type::Dynamic(dynamic_type),
@@ -338,7 +338,7 @@ impl<'db> SubclassOfType<'db> {
     pub(crate) fn to_metaclass_instance(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Type<'db> {
         // This kind of looks like a no-op, but it's not. For `type[C]` with guaranteed metaclass
         // `M`, `to_meta_type` produces `type[M]`, and then `to_instance` makes it just `M`.
@@ -354,14 +354,14 @@ impl<'db> SubclassOfType<'db> {
     /// excluding the lookup-only typeshed fallback.
     /// For `type[T]` where `T` is a `TypeVar`, this computes the metatype based on the
     /// `TypeVar`'s bounds or constraints.
-    fn to_meta_type(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    fn to_meta_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         Type::SubclassOf(self).to_meta_type(db, env)
     }
 
     pub(super) fn to_meta_type_with_recursion(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         context: &TypeRecursionContext<'db>,
     ) -> Type<'db> {
         match self
@@ -402,7 +402,7 @@ impl<'db> SubclassOfType<'db> {
         }
     }
 
-    pub(crate) fn is_typed_dict(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> bool {
+    pub(crate) fn is_typed_dict(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
         self.subclass_of
             .into_class(db, env)
             .is_some_and(|class| class.class_literal(db).is_typed_dict(db))
@@ -413,7 +413,7 @@ impl<'db> VarianceInferable<'db> for SubclassOfType<'db> {
     fn variance_of(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
         match self.subclass_of {
@@ -557,7 +557,7 @@ impl<'db> SubclassOfInner<'db> {
     pub(crate) fn into_class(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<ClassType<'db>> {
         match self {
             Self::Dynamic(_) | Self::Protocol(_) => None,
@@ -591,7 +591,7 @@ impl<'db> SubclassOfInner<'db> {
 
     fn try_from_instance(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
     ) -> Option<Self> {
         Some(match ty {
@@ -628,39 +628,44 @@ impl<'db> SubclassOfInner<'db> {
     pub(crate) fn with_transposed_type_var(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Self {
-        self.with_transposed_type_var_with_recursion(db, env, &TypeRecursionContext::default())
+        self.with_transposed_type_var_with_recursion(db, env, env.context())
     }
 
     fn with_transposed_type_var_with_recursion(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         context: &TypeRecursionContext<'db>,
     ) -> Self {
         let Some(bound_typevar) = self.into_type_var() else {
             return self;
         };
 
-        let bound_typevar = bound_typevar.map_bound_or_constraints(db, |bound_or_constraints| {
-            Some(match bound_or_constraints {
-                None => TypeVarBoundOrConstraints::UpperBound(
-                    SubclassOfType::try_from_instance(db, env, bound_typevar.domain(db).top(db))
+        let bound_typevar =
+            bound_typevar.map_bound_or_constraints(db, env, |bound_or_constraints| {
+                Some(match bound_or_constraints {
+                    None => TypeVarBoundOrConstraints::UpperBound(
+                        SubclassOfType::try_from_instance(
+                            db,
+                            env,
+                            bound_typevar.domain(db).top(db),
+                        )
                         .unwrap_or(SubclassOfType::subclass_of_unknown()),
-                ),
-                Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
-                    TypeVarBoundOrConstraints::UpperBound(
-                        bound.to_meta_type_with_recursion(db, env, context),
-                    )
-                }
-                Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
-                    TypeVarBoundOrConstraints::Constraints(constraints.map(db, |constraint| {
-                        constraint.to_meta_type_with_recursion(db, env, context)
-                    }))
-                }
-            })
-        });
+                    ),
+                    Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
+                        TypeVarBoundOrConstraints::UpperBound(
+                            bound.to_meta_type_with_recursion(db, env, context),
+                        )
+                    }
+                    Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
+                        TypeVarBoundOrConstraints::Constraints(constraints.map(db, |constraint| {
+                            constraint.to_meta_type_with_recursion(db, env, context)
+                        }))
+                    }
+                })
+            });
 
         Self::TypeVar(bound_typevar)
     }
@@ -668,7 +673,7 @@ impl<'db> SubclassOfInner<'db> {
     fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {

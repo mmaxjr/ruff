@@ -5,6 +5,7 @@
 
 mod attributes;
 
+use crate::types::TypeOperations;
 use bitflags::bitflags;
 use ruff_db::{
     diagnostic::{Annotation, Span},
@@ -90,7 +91,10 @@ pub(super) fn check_class<'db>(
     }
     let enum_info = enum_metadata(db, class.into());
 
-    let mut bases: Vec<_> = class_specialized.iter_mro(db).skip(1).collect();
+    let mut bases: Vec<_> = class_specialized
+        .iter_mro(db, context.program_environment())
+        .skip(1)
+        .collect();
     if configuration.check_liskov_violations() {
         let generic_bases: FxHashMap<_, _> = bases
             .iter()
@@ -194,7 +198,7 @@ fn check_inherited_method_conflicts<'db>(
 
     let mut mro = Vec::new();
     let mut first_dynamic_base = None;
-    for base in class_specialized.iter_mro(db).skip(1) {
+    for base in class_specialized.iter_mro(db, env).skip(1) {
         match base {
             ClassBase::Class(base) if base.is_object(db) => break,
             ClassBase::Class(base) if base.static_class_literal(db).is_some() => mro.push(base),
@@ -287,7 +291,8 @@ fn check_inherited_method_conflicts<'db>(
                 //
                 // Keep this check specific to the enum definition so conflicts between two
                 // ordinary mixins are still reported.
-                if enum_class_creation_manages_conflict(db, class, name, owner, contract_owner) {
+                if enum_class_creation_manages_conflict(db, env, class, name, owner, contract_owner)
+                {
                     continue;
                 }
 
@@ -298,7 +303,7 @@ fn check_inherited_method_conflicts<'db>(
                 // Resolve the ancestor in the parent's own MRO so that its generic specialization
                 // matches the one used by the normal Liskov check on the parent.
                 if let Some(parent_contract_owner) = owner
-                    .iter_mro(db)
+                    .iter_mro(db, env)
                     .skip(1)
                     .filter_map(ClassBase::into_class)
                     .find(|ancestor| ancestor.class_literal(db) == contract_owner.class_literal(db))
@@ -354,7 +359,7 @@ fn check_inherited_method_conflicts<'db>(
 /// Returns a source-defined method bound to the class whose MRO is being checked.
 fn source_method_contract<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     owner: ClassType<'db>,
     receiver: Type<'db>,
     name: &Name,
@@ -394,12 +399,13 @@ fn source_method_contract<'db>(
 /// conflicting contracts for the same method name.
 fn enum_class_creation_manages_conflict<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     class: StaticClassLiteral<'db>,
     name: &Name,
     selected_owner: ClassType<'db>,
     contract_owner: ClassType<'db>,
 ) -> bool {
-    let env = ProgramEnvironment::from_scope(class.body_scope(db));
+    let env = env.in_environment(ProgramEnvironment::from_scope(class.body_scope(db)));
     if !is_enum_class_by_inheritance(db, &env, class) {
         return false;
     }
@@ -432,7 +438,7 @@ fn conflicting_named_tuple_field_in_mro<'db>(
     class: StaticClassLiteral<'db>,
     field_name: &Name,
 ) -> Option<(ClassType<'db>, Option<Definition<'db>>)> {
-    for class_base in class.iter_mro(db, None).skip(1) {
+    for class_base in class.iter_mro(db).skip(1) {
         let Some(superclass) = class_base.into_class() else {
             continue;
         };
@@ -1089,7 +1095,7 @@ fn check_class_declaration<'db>(
 /// until they are bound for the override comparison.
 fn lookup_override_member<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     class: ClassType<'db>,
     name: &Name,
 ) -> PlaceAndQualifiers<'db> {
@@ -1105,7 +1111,7 @@ fn lookup_override_member<'db>(
 /// callable instance's `__call__` receiver first, as for constructor calls.
 fn bind_new_for_override<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     class: ClassType<'db>,
     name: &Name,
     ty: Type<'db>,
@@ -1135,7 +1141,7 @@ fn bind_new_for_override<'db>(
 /// combine conflicting contracts that are absent from the method-defining class's hierarchy.
 fn is_inherited_method_violation<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     bases: &[ClassBase<'db>],
     method_owner: ClassType<'db>,
     superclass: ClassType<'db>,
@@ -1149,7 +1155,7 @@ fn is_inherited_method_violation<'db>(
         .filter_map(|base| base.into_class())
         .filter(|parent| {
             parent
-                .iter_mro(db)
+                .iter_mro(db, env)
                 .any(|base| base == ClassBase::Class(method_owner))
         })
         .any(|parent| {
@@ -1170,7 +1176,7 @@ fn is_inherited_method_violation<'db>(
             // invalid when the child also inherits `Base[int]`. Include implicit ancestors such
             // as `object` and explicit inheritance paths for specializations omitted from the MRO.
             parent
-                .iter_mro(db)
+                .iter_mro(db, env)
                 .skip(1)
                 .filter_map(ClassBase::into_class)
                 .chain(parent.iter_explicit_ancestors(db, env).skip(1))
@@ -1211,7 +1217,7 @@ fn is_inherited_method_violation<'db>(
 /// ```
 fn is_assignable_method_override<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     subclass_type: Type<'db>,
     superclass_type: Type<'db>,
 ) -> bool {
@@ -1222,7 +1228,7 @@ fn is_assignable_method_override<'db>(
 
 fn method_override_types<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     subclass_type: Type<'db>,
     superclass_type: Type<'db>,
 ) -> Option<(Type<'db>, Type<'db>)> {
@@ -1242,7 +1248,7 @@ fn method_override_types<'db>(
                 _ => None,
             };
 
-            let typing_self_type = subclass_method.typing_self_type(db);
+            let typing_self_type = subclass_method.typing_self_type(db, env);
             let receiver =
                 explicit_receiver.map_or(subclass_method.self_instance(db), |receiver| {
                     let receiver = receiver.bind_self_typevars(db, env, typing_self_type);
@@ -1318,10 +1324,13 @@ pub(super) fn effective_superclass_variable_kind<'db>(
     superclass: ClassType<'db>,
     name: Name,
 ) -> Option<VariableKind> {
-    let env = &ProgramEnvironment::from_file(superclass.class_literal(db).program_file(db));
+    let env = &TypeOperations::for_inference(
+        db,
+        ProgramEnvironment::from_file(superclass.class_literal(db).program_file(db)),
+    );
     let inherited_variable_kind = || {
         superclass
-            .iter_mro(db)
+            .iter_mro(db, env)
             .skip(1)
             .filter_map(ClassBase::into_class)
             .find_map(|base| effective_superclass_variable_kind(db, base, name.clone()))
@@ -1427,7 +1436,7 @@ fn is_function_definition<'db>(
 /// Returns the variable kind for an attribute if it should participate in `ClassVar` override checks.
 fn variable_kind<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     class_member: PlaceAndQualifiers<'db>,
     instance_member: PlaceAndQualifiers<'db>,
 ) -> Option<VariableKind> {

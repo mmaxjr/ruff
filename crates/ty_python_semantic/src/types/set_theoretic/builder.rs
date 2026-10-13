@@ -39,6 +39,7 @@
 //! shares exactly the same possible super-types, and none of them are subtypes of each other
 //! (unless exactly the same literal type), we can avoid many unnecessary redundancy checks.
 
+use crate::types::TypeOperations;
 use std::convert::Infallible;
 use std::hint::cold_path;
 use std::marker::PhantomData;
@@ -72,9 +73,8 @@ use smallvec::SmallVec;
 /// This only recognizes the "single truthiness guard" forms used by truthiness narrowing.
 fn split_truthiness_guarded_intersection<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     ty: Type<'db>,
-    context: &TypeRecursionContext<'db>,
 ) -> Option<(Type<'db>, Type<'db>)> {
     let Type::Intersection(intersection) = ty else {
         return None;
@@ -91,7 +91,7 @@ fn split_truthiness_guarded_intersection<'db>(
         _ => return None,
     };
 
-    let mut core = IntersectionBuilder::new(db, env).with_recursion_context(context);
+    let mut core = IntersectionBuilder::new(db, env);
     for positive in intersection.positive(db) {
         core.add_positive_in_place(*positive);
     }
@@ -122,18 +122,18 @@ fn split_truthiness_guarded_intersection<'db>(
 /// Discussion: <https://github.com/astral-sh/ty/issues/224>
 fn merge_truthiness_guarded_pair<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     left: Type<'db>,
     right: Type<'db>,
     context: &TypeRecursionContext<'db>,
 ) -> Option<Type<'db>> {
-    let (left_core, left_guard) = split_truthiness_guarded_intersection(db, env, left, context)?;
-    let (right_core, right_guard) = split_truthiness_guarded_intersection(db, env, right, context)?;
+    let (left_core, left_guard) = split_truthiness_guarded_intersection(db, env, left)?;
+    let (right_core, right_guard) = split_truthiness_guarded_intersection(db, env, right)?;
     if left_guard == right_guard {
         return None;
     }
 
-    let visitor = ApplyTypeMappingVisitor::new(env).with_recursion_context(context);
+    let visitor = ApplyTypeMappingVisitor::new(env);
     let equivalent =
         || left_core.is_equivalent_to_with_materialization_visitor(db, right_core, &visitor);
     if context.compare_for_simplification(equivalent) {
@@ -141,13 +141,11 @@ fn merge_truthiness_guarded_pair<'db>(
     }
 
     let candidate = UnionBuilder::new(db, env)
-        .with_recursion_context(context)
         .add(left_core)
         .add(right_core)
         .build();
     let reconstruct = |guard| {
         IntersectionBuilder::new(db, env)
-            .with_recursion_context(context)
             .positive_elements([candidate, guard])
             .build()
     };
@@ -168,7 +166,7 @@ fn merge_truthiness_guarded_pair<'db>(
 /// from every exclusion unique to the other side.
 fn merge_disjoint_exclusions<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     left: Type<'db>,
     right: Type<'db>,
     context: &TypeRecursionContext<'db>,
@@ -214,9 +212,8 @@ fn merge_disjoint_exclusions<'db>(
         }
     }
 
-    let mut common = IntersectionBuilder::new(db, env)
-        .with_recursion_context(context)
-        .positive_elements(left_positive.iter().copied());
+    let mut common =
+        IntersectionBuilder::new(db, env).positive_elements(left_positive.iter().copied());
     for negative in common_negative {
         common.add_negative_in_place(negative);
     }
@@ -228,11 +225,11 @@ fn merge_disjoint_exclusions<'db>(
 ///
 /// Hashability does not obey normal inheritance rules: subclasses of hashable classes can be
 /// unhashable. Keeping the non-final type allows downstream checks to consider it independently.
-fn should_preserve_hashable_union(
-    db: &dyn Db,
-    env: &ProgramEnvironment<'_>,
-    left: Type,
-    right: Type,
+fn should_preserve_hashable_union<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    left: Type<'db>,
+    right: Type<'db>,
 ) -> bool {
     let is_hashable =
         |ty| matches!(ty, Type::ProtocolInstance(protocol) if protocol.is_hashable(db));
@@ -260,9 +257,8 @@ fn should_preserve_hashable_union(
 /// ```
 fn normalize_enum_complement_unions<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     types: &mut Vec<Type<'db>>,
-    context: &TypeRecursionContext<'db>,
 ) -> bool {
     for complement_index in 0..types.len() {
         let Type::EnumComplement(complement) = types[complement_index] else {
@@ -311,7 +307,6 @@ fn normalize_enum_complement_unions<'db>(
 
         if !remove_indices.is_empty() {
             let mut builder = IntersectionBuilder::new(db, env)
-                .with_recursion_context(context)
                 .add_positive(enum_class.to_non_generic_instance(db, env));
             for rest in complement.rest(db) {
                 builder.add_positive_in_place(*rest);
@@ -425,7 +420,7 @@ impl<'db> UnionElement<'db> {
     fn try_reduce(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         other_type: Type<'db>,
         cycle_recovery: bool,
         context: &TypeRecursionContext<'db>,
@@ -644,8 +639,7 @@ impl<'a, 'db> TypeWalk<'db, (&'a mut UnionBuilder<'db>, bool), StructuralTravers
 pub(crate) struct UnionBuilder<'db> {
     elements: Vec<UnionElement<'db>>,
     db: &'db dyn Db,
-    env: ProgramEnvironment<'db>,
-    recursion_context: TypeRecursionContext<'db>,
+    env: TypeOperations<'db>,
     unpack_aliases: bool,
     /// This is enabled when joining types in a `cycle_recovery` function. Because recovery cannot
     /// introduce a new cycle, relation-based union simplifications are skipped in this mode.
@@ -668,7 +662,7 @@ impl<'db> UnionAccumulator<'db> {
         UnionAccumulator::One(ty)
     }
 
-    pub(crate) fn add(&mut self, db: &'db dyn Db, env: &ProgramEnvironment<'db>, ty: Type<'db>) {
+    pub(crate) fn add(&mut self, db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) {
         match self {
             UnionAccumulator::One(existing) => {
                 *self = UnionAccumulator::Two(*existing, ty);
@@ -684,11 +678,7 @@ impl<'db> UnionAccumulator<'db> {
         }
     }
 
-    pub(crate) fn get_or_build(
-        &mut self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-    ) -> Type<'db> {
+    pub(crate) fn get_or_build(&mut self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         match self {
             UnionAccumulator::One(ty) => *ty,
             UnionAccumulator::Two(first, second) => {
@@ -705,7 +695,7 @@ impl<'db> UnionAccumulator<'db> {
         }
     }
 
-    pub(crate) fn into_type(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Type<'db> {
+    pub(crate) fn into_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         match self {
             UnionAccumulator::One(ty) => ty,
             UnionAccumulator::Two(first, second) => {
@@ -717,11 +707,10 @@ impl<'db> UnionAccumulator<'db> {
 }
 
 impl<'db> UnionBuilder<'db> {
-    pub(crate) fn new(db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Self {
+    pub(crate) fn new(db: &'db dyn Db, env: &TypeOperations<'db>) -> Self {
         Self {
             db,
             env: env.clone(),
-            recursion_context: TypeRecursionContext::default(),
             elements: vec![],
             unpack_aliases: true,
             cycle_recovery: false,
@@ -731,14 +720,6 @@ impl<'db> UnionBuilder<'db> {
 
     pub(crate) fn unpack_aliases(mut self, val: bool) -> Self {
         self.unpack_aliases = val;
-        self
-    }
-
-    pub(in crate::types) fn with_recursion_context(
-        mut self,
-        context: &TypeRecursionContext<'db>,
-    ) -> Self {
-        self.recursion_context = context.clone();
         self
     }
 
@@ -823,11 +804,7 @@ impl<'db> UnionBuilder<'db> {
         };
 
         let mut ty_negated_cache = None;
-        let mut ty_negated = || {
-            *ty_negated_cache.get_or_insert_with(|| {
-                ty.negate_with_recursion(db, &self.env, &self.recursion_context)
-            })
-        };
+        let mut ty_negated = || *ty_negated_cache.get_or_insert_with(|| ty.negate(db, &self.env));
 
         match ty {
             Type::Union(union) => {
@@ -890,7 +867,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         return;
                                     }
@@ -898,7 +875,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         ty,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         to_remove = Some(index);
                                         continue;
@@ -907,7 +884,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         // The type that includes both this new element, and its negation
                                         // (or a supertype of its negation), must be simply `object`.
@@ -958,7 +935,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         return;
                                     }
@@ -968,7 +945,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         ty,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         to_remove = Some(index);
                                         continue;
@@ -977,7 +954,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         // The type that includes both this new element, and its negation
                                         // (or a supertype of its negation), must be simply `object`.
@@ -1030,7 +1007,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         return;
                                     }
@@ -1040,7 +1017,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         ty,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         to_remove = Some(index);
                                         continue;
@@ -1049,7 +1026,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         // The type that includes both this new element, and its negation
                                         // (or a supertype of its negation), must be simply `object`.
@@ -1123,7 +1100,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         return;
                                     }
@@ -1133,7 +1110,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         ty,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         to_remove = Some(index);
                                         continue;
@@ -1142,7 +1119,7 @@ impl<'db> UnionBuilder<'db> {
                                         db,
                                         &self.env,
                                         *existing,
-                                        &self.recursion_context,
+                                        self.env.context(),
                                     ) {
                                         // The type that includes both this new element, and its negation
                                         // (or a supertype of its negation), must be simply `object`.
@@ -1222,7 +1199,7 @@ impl<'db> UnionBuilder<'db> {
                 &self.env,
                 ty,
                 self.cycle_recovery,
-                &self.recursion_context,
+                self.env.context(),
             ) {
                 ReduceResult::KeepIf(keep) => {
                     if !keep {
@@ -1277,7 +1254,7 @@ impl<'db> UnionBuilder<'db> {
                     &self.env,
                     ty,
                     element_type,
-                    &self.recursion_context,
+                    self.env.context(),
                 )
             {
                 to_remove.push(i);
@@ -1317,13 +1294,9 @@ impl<'db> UnionBuilder<'db> {
                 {
                     continue;
                 }
-                if let Some(merged) = merge_disjoint_exclusions(
-                    db,
-                    &self.env,
-                    ty,
-                    element_type,
-                    &self.recursion_context,
-                ) {
+                if let Some(merged) =
+                    merge_disjoint_exclusions(db, &self.env, ty, element_type, self.env.context())
+                {
                     to_remove.push(i);
                     for index in to_remove.into_iter().rev() {
                         self.elements.swap_remove(index);
@@ -1332,21 +1305,11 @@ impl<'db> UnionBuilder<'db> {
                     traversal.visit_with(db, merged, (&mut *self, false));
                     return;
                 }
-                if ty.is_redundant_with_recursion(
-                    db,
-                    &self.env,
-                    element_type,
-                    &self.recursion_context,
-                ) {
+                if ty.is_redundant_with_recursion(db, &self.env, element_type, self.env.context()) {
                     return;
                 }
 
-                if element_type.is_redundant_with_recursion(
-                    db,
-                    &self.env,
-                    ty,
-                    &self.recursion_context,
-                ) {
+                if element_type.is_redundant_with_recursion(db, &self.env, ty, self.env.context()) {
                     to_remove.push(i);
                     continue;
                 }
@@ -1356,7 +1319,7 @@ impl<'db> UnionBuilder<'db> {
                     &self.env,
                     element_type,
                     &mut ty_negated,
-                    &self.recursion_context,
+                    self.env.context(),
                 ) {
                     // We add `ty` to the union. We just checked that `~ty` is a subtype of an
                     // existing `element`. This also means that `~ty | ty` is a subtype of
@@ -1436,9 +1399,8 @@ impl<'db> UnionBuilder<'db> {
             }
         }
 
-        if normalize_enum_complement_unions(db, &self.env, &mut types, &self.recursion_context) {
+        if normalize_enum_complement_unions(db, &self.env, &mut types) {
             let builder = UnionBuilder::new(db, &self.env)
-                .with_recursion_context(&self.recursion_context)
                 .unpack_aliases(unpack_aliases)
                 .cycle_recovery(cycle_recovery)
                 .or_recursively_defined(recursively_defined);
@@ -1611,30 +1573,20 @@ pub(crate) struct IntersectionBuilder<'db> {
     // create a union of intersections.
     intersections: Vec<InnerIntersectionBuilder<'db>>,
     db: &'db dyn Db,
-    env: ProgramEnvironment<'db>,
-    recursion_context: TypeRecursionContext<'db>,
+    env: TypeOperations<'db>,
     // One disjunction does not multiply alternatives. Only subsequent distributions consume
     // the bounded constructor's budget, after impossible and redundant branches are removed.
     has_disjunction: bool,
 }
 
 impl<'db> IntersectionBuilder<'db> {
-    pub(crate) fn new(db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> Self {
+    pub(crate) fn new(db: &'db dyn Db, env: &TypeOperations<'db>) -> Self {
         Self {
             db,
             env: env.clone(),
             intersections: vec![InnerIntersectionBuilder::default()],
-            recursion_context: TypeRecursionContext::default(),
             has_disjunction: false,
         }
-    }
-
-    pub(in crate::types) fn with_recursion_context(
-        mut self,
-        context: &TypeRecursionContext<'db>,
-    ) -> Self {
-        self.recursion_context = context.clone();
-        self
     }
 
     /// Add DNF branches, dropping `Never` and duplicate branches so later distribution does not
@@ -1662,7 +1614,7 @@ impl<'db> IntersectionBuilder<'db> {
         for candidate in other.intersections {
             // Some branches only collapse during `build`, for example when a constrained
             // type variable has no remaining constraints. Those do not consume the budget.
-            let context = &self.recursion_context;
+            let context = self.env.context();
             let candidate_type = candidate.clone().build(db, env, context);
             if candidate_type.is_never()
                 || distributed.iter().any(|old| {
@@ -1689,7 +1641,7 @@ impl<'db> IntersectionBuilder<'db> {
 
     pub(super) fn bounded_from_elements<I, T>(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         elements: I,
     ) -> Option<Type<'db>>
     where
@@ -1726,7 +1678,7 @@ impl<'db> IntersectionBuilder<'db> {
     }
 
     /// Whether expanding a factor can introduce alternatives, including through De Morgan's law.
-    fn is_disjunctive(db: &'db dyn Db, env: &ProgramEnvironment<'db>, ty: Type<'db>) -> bool {
+    fn is_disjunctive(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> bool {
         TypeTraversal::with_root(env, IsDisjunctive, |root| root.visit_with(db, ty, false))
     }
 
@@ -1797,7 +1749,7 @@ impl<'db> IntersectionBuilder<'db> {
                 // If we are already a union-of-intersections, distribute the new intersected element
                 // across all of those intersections.
                 for inner in &mut self.intersections {
-                    inner.add_positive(db, &self.env, &self.recursion_context, ty);
+                    inner.add_positive(db, &self.env, self.env.context(), ty);
                 }
             }
         }
@@ -1868,7 +1820,7 @@ impl<'db> IntersectionBuilder<'db> {
             }
             _ => {
                 for inner in &mut self.intersections {
-                    inner.add_negative(db, &self.env, &self.recursion_context, ty);
+                    inner.add_negative(db, &self.env, self.env.context(), ty);
                 }
             }
         }
@@ -1888,7 +1840,7 @@ impl<'db> IntersectionBuilder<'db> {
 
     pub(crate) fn build(self) -> Type<'db> {
         let db = self.db;
-        let context = &self.recursion_context;
+        let context = self.env.context();
         let mut elements = self
             .intersections
             .into_iter()
@@ -1899,7 +1851,7 @@ impl<'db> IntersectionBuilder<'db> {
         let Some(second) = elements.next() else {
             return first;
         };
-        let mut builder = UnionBuilder::new(db, &self.env).with_recursion_context(context);
+        let mut builder = UnionBuilder::new(db, &self.env);
         for element in [first, second].into_iter().chain(elements) {
             builder.add_in_place(element);
         }
@@ -1926,7 +1878,7 @@ enum IntersectionSimplification {
 
 fn simplify_intersection_pair<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     context: &TypeRecursionContext<'db>,
     first: Type<'db>,
     second: Type<'db>,
@@ -1973,18 +1925,21 @@ fn simplify_intersection_pair<'db>(
     }
 
     if context.is_active() {
-        if !context.0.normalization.is_empty() {
+        if !context.state().normalization.is_empty() {
             return IntersectionSimplification::Unchanged;
         }
         // An unfinished comparison cannot justify removing either intersection element.
         // Keep this result local: the active expansions are not part of the Salsa query key.
         context
-            .0
+            .state()
             .intersections
             .get_or_init(|| Box::new(CycleDetector::new(())))
-            .try_visit_active(db, (first, (env.program(db), polarity), second), || {
-                compute_intersection_simplification(db, env, first, second, polarity, context)
-            })
+            .try_visit_active(
+                db,
+                env,
+                (first, (env.program(db), polarity), second),
+                || compute_intersection_simplification(db, env, first, second, polarity, context),
+            )
             .unwrap_or(IntersectionSimplification::Unchanged)
     } else {
         simplify_intersection_pair_impl(
@@ -2020,18 +1975,17 @@ fn simplify_intersection_pair_impl<'db>(
     types: TypePair<'db>,
     polarity: IntersectionPolarity,
 ) -> IntersectionSimplification {
-    let env = ProgramEnvironment::from_program(types.program(db));
+    let env =
+        TypeOperations::for_inference(db, ProgramEnvironment::from_program(types.program(db)));
     let first = types.first(db);
     let second = types.second(db);
 
-    crate::types::operations::TypeOperations::with_root(db, &env, |ops| {
-        compute_intersection_simplification(db, &env, first, second, polarity, ops.context())
-    })
+    compute_intersection_simplification(db, &env, first, second, polarity, env.context())
 }
 
 fn compute_intersection_simplification<'db>(
     db: &'db dyn Db,
-    env: &ProgramEnvironment<'db>,
+    env: &TypeOperations<'db>,
     first: Type<'db>,
     second: Type<'db>,
     polarity: IntersectionPolarity,
@@ -2101,7 +2055,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     ///     if color is not Color.RED and color is not Color.BLUE:
     ///         reveal_type(color)  # Never
     /// ```
-    fn has_empty_enum_complement(&self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> bool {
+    fn has_empty_enum_complement(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
         for positive in &self.positive {
             let Type::NominalInstance(instance) = positive else {
                 continue;
@@ -2150,7 +2104,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     fn add_positive(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         context: &TypeRecursionContext<'db>,
         mut new_positive: Type<'db>,
     ) {
@@ -2411,7 +2365,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     fn add_negative(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         context: &TypeRecursionContext<'db>,
         new_negative: Type<'db>,
     ) {
@@ -2591,7 +2545,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     fn simplify_constrained_typevars(
         &mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         context: &TypeRecursionContext<'db>,
     ) {
         let mut to_add = SmallVec::<[Type<'db>; 1]>::new();
@@ -2650,7 +2604,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
     fn build(
         mut self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         context: &TypeRecursionContext<'db>,
     ) -> Type<'db> {
         if self.has_empty_enum_complement(db, env) {
@@ -2668,13 +2622,8 @@ impl<'db> InnerIntersectionBuilder<'db> {
             .iter()
             .any(|ty| matches!(ty, Type::TypeVar(_) | Type::NewTypeInstance(_)))
         {
-            let speculative = expand_intersection_typevars_and_newtypes(
-                db,
-                env,
-                &self.positive,
-                &self.negative,
-                context,
-            );
+            let speculative =
+                expand_intersection_typevars_and_newtypes(db, env, &self.positive, &self.negative);
             if speculative.is_never() {
                 return Type::Never;
             }
@@ -3093,16 +3042,14 @@ mod tests {
                     IntersectionPolarity::Mixed,
                 ] {
                     assert_eq!(
-                        crate::types::operations::TypeOperations::with_root(db, &env, |ops| {
-                            simplify_intersection_pair(
-                                db,
-                                &env,
-                                ops.context(),
-                                first,
-                                second,
-                                polarity,
-                            )
-                        }),
+                        simplify_intersection_pair(
+                            db,
+                            &env,
+                            env.context(),
+                            first,
+                            second,
+                            polarity,
+                        ),
                         simplify_intersection_pair_impl(
                             db,
                             TypePair::new(db, env.program(db), first, second),

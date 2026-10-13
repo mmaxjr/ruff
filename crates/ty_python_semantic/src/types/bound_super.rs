@@ -1,6 +1,6 @@
 //! Logic for inferring `super()`, `super(x)` and `super(x, y)` calls.
 
-use crate::ProgramEnvironment;
+use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use itertools::{Either, Itertools};
 use ruff_db::diagnostic::Diagnostic;
@@ -43,18 +43,14 @@ impl<'db> TypeVarOwnerContext<'db> {
         self.bound_typevar().typevar(db)
     }
 
-    fn has_implicit_upper_bound(self, db: &'db dyn Db, env: &ProgramEnvironment<'db>) -> bool {
+    fn has_implicit_upper_bound(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
         self.typevar(db).bound_or_constraints(db, env).is_none()
     }
 
     /// The bound or constraints of this typevar, as a type (i.e. constraints are unioned), wrapped
     /// in `SubclassOf` if this is a `SubclassOf` context. `object` if no bound/constraints.
     /// Used for error messages.
-    fn bound_or_constraints_type(
-        self,
-        db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
-    ) -> Type<'db> {
+    fn bound_or_constraints_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         match self {
             TypeVarOwnerContext::Bare(typevar) => typevar
                 .require_bound_or_constraints(db, env)
@@ -101,7 +97,7 @@ pub(crate) enum BoundSuperError<'db> {
 }
 
 impl<'db> BoundSuperError<'db> {
-    pub(super) fn report_diagnostic(&self, context: &'db InferContext<'db, '_>, node: AnyNodeRef) {
+    pub(super) fn report_diagnostic(&self, context: &InferContext<'db, '_>, node: AnyNodeRef) {
         let db = context.db();
         match self {
             BoundSuperError::AbstractOwnerType {
@@ -204,7 +200,7 @@ impl<'db> BoundSuperError<'db> {
     /// and return the type variable's upper bound or the union of its constraints.
     fn describe_typevar(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         diagnostic: &mut Diagnostic,
         type_var_context: TypeVarOwnerContext<'db>,
     ) -> Type<'db> {
@@ -283,7 +279,7 @@ impl<'db> ResolvedSuperOwner<'db> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -301,7 +297,7 @@ impl<'db> ResolvedSuperOwner<'db> {
     fn descriptor_binding(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> (Option<Type<'db>>, Type<'db>) {
         match self.receiver {
             DescriptorReceiverKind::Class => (None, self.owner_type),
@@ -323,7 +319,7 @@ impl<'db> SuperOwnerKind<'db> {
     fn recursive_type_normalized_impl(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
@@ -341,7 +337,7 @@ impl<'db> SuperOwnerKind<'db> {
     fn iter_mro(
         &self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> impl Iterator<Item = ClassBase<'db>> + Clone {
         match self {
             SuperOwnerKind::Dynamic(dynamic) => {
@@ -351,7 +347,7 @@ impl<'db> SuperOwnerKind<'db> {
                 Either::Left(ClassBase::Divergent(*divergent).mro(db, env, None))
             }
             SuperOwnerKind::Resolved(resolved_owner) => {
-                Either::Right(resolved_owner.lookup_anchor.iter_mro(db))
+                Either::Right(resolved_owner.lookup_anchor.iter_mro(db, env))
             }
         }
     }
@@ -368,7 +364,7 @@ impl<'db> SuperOwnerKind<'db> {
     fn descriptor_binding(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
     ) -> Option<(Option<Type<'db>>, Type<'db>)> {
         match self {
             SuperOwnerKind::Dynamic(_) | SuperOwnerKind::Divergent(_) => None,
@@ -421,18 +417,22 @@ impl<'db> BoundSuperType<'db> {
             ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
             ClassBase::Class(pivot_class) => {
                 let pivot_class = pivot_class.class_literal(db);
-                class.iter_mro(db).any(|superclass| match superclass {
-                    ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
-                    ClassBase::Class(superclass) => superclass.class_literal(db) == pivot_class,
-                    ClassBase::Generic | ClassBase::Protocol | ClassBase::TypedDict(_) => false,
-                })
+                class
+                    .class_literal(db)
+                    .iter_mro(db)
+                    .any(|superclass| match superclass {
+                        ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
+                        ClassBase::Class(superclass) => superclass.class_literal(db) == pivot_class,
+                        ClassBase::Generic | ClassBase::Protocol | ClassBase::TypedDict(_) => false,
+                    })
             }
-            special_form @ (ClassBase::Generic | ClassBase::Protocol) => {
-                class.iter_mro(db).any(|superclass| match superclass {
+            special_form @ (ClassBase::Generic | ClassBase::Protocol) => class
+                .class_literal(db)
+                .iter_mro(db)
+                .any(|superclass| match superclass {
                     ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
                     _ => superclass == special_form,
-                })
-            }
+                }),
             // typing.TypedDict never stays in a runtime class' MRO
             ClassBase::TypedDict(_) => false,
         }
@@ -527,7 +527,7 @@ impl<'db> BoundSuperType<'db> {
     /// However, the checking is skipped when any of the arguments is a dynamic type.
     pub(super) fn build(
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         pivot_class_type: Type<'db>,
         owner_type: Type<'db>,
     ) -> Result<Type<'db>, BoundSuperError<'db>> {
@@ -935,7 +935,7 @@ impl<'db> BoundSuperType<'db> {
     fn skip_until_after_pivot(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         mro_iter: impl Iterator<Item = ClassBase<'db>> + Clone,
     ) -> impl Iterator<Item = ClassBase<'db>> + Clone {
         let Some(pivot_class) = self.pivot_class(db).into_class() else {
@@ -965,7 +965,7 @@ impl<'db> BoundSuperType<'db> {
     pub(super) fn try_call_dunder_get_on_attribute(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         attribute: PlaceAndQualifiers<'db>,
     ) -> Option<MemberLookupResult<'db>> {
         let (instance, owner) = self.owner(db).descriptor_binding(db, env)?;
@@ -988,7 +988,7 @@ impl<'db> BoundSuperType<'db> {
     pub(super) fn find_name_in_mro_after_pivot(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
@@ -1035,7 +1035,7 @@ impl<'db> BoundSuperType<'db> {
     pub(super) fn recursive_type_normalized_impl(
         self,
         db: &'db dyn Db,
-        env: &ProgramEnvironment<'db>,
+        env: &TypeOperations<'db>,
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
