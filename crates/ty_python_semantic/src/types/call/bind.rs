@@ -216,7 +216,9 @@ impl<'db> TypeVisitorHooks<'db> for GenericContextCollector<'_, 'db> {
         for signature in &function.signature(db).overloads {
             self.visit_signature(db, visit, signature);
         }
-        self.visit_signature(db, visit, &function.last_definition_signature(db, self.env));
+        function.inspect_last_definition_signature(db, self.env, |signatures| {
+            signatures.collect_generic_contexts(db, self, visit);
+        });
     }
 
     fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, _ty: Type<'db>) {

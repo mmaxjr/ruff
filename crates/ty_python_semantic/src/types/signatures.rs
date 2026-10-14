@@ -5787,6 +5787,15 @@ impl ParameterNamePrefix {
     }
 }
 
+/// Parameter information that can outlive signature inspection without exposing inferred types.
+pub(super) struct ParameterMetadata<'db> {
+    pub(super) definition: Option<Definition<'db>>,
+    pub(super) keyword_name: Option<Name>,
+    pub(super) has_default: bool,
+    pub(super) is_positional: bool,
+    pub(super) is_positional_only: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub struct Parameter<'db> {
     /// Annotated type of the parameter. If no annotation was provided, this is `Unknown`.
@@ -5838,6 +5847,16 @@ enum ParameterAnnotationKind {
 }
 
 impl<'db> Parameter<'db> {
+    pub(super) fn metadata(&self) -> ParameterMetadata<'db> {
+        ParameterMetadata {
+            definition: self.definition(),
+            keyword_name: self.keyword_name().cloned(),
+            has_default: self.has_default(),
+            is_positional: self.is_positional(),
+            is_positional_only: self.is_positional_only(),
+        }
+    }
+
     fn map_recursive_references(
         &self,
         db: &'db dyn Db,

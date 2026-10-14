@@ -66,7 +66,7 @@ use salsa::plumbing::AsId;
 use ty_module_resolver::{KnownModule, file_to_module};
 
 use crate::place::{DefinedPlace, Definedness, Place, place_from_bindings};
-use crate::types::callable::CallableTypeKind;
+use crate::types::callable::{CallableTypeKind, ExpandedSignatures};
 use crate::types::constraints::ConstraintSet;
 use crate::types::context::InferContext;
 
@@ -1235,33 +1235,6 @@ impl<'db> FunctionType<'db> {
             .and_then(|updated| updated.signature.as_ref())
     }
 
-    fn updated_implementation_signature(
-        self,
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-    ) -> Option<Signature<'db>> {
-        let [callable] = self.updated_implementation_callables(db)? else {
-            return None;
-        };
-        callable
-            .inspect_signatures_root(
-                db,
-                &env.in_environment(ProgramEnvironment::from_definition(self.definition(db))),
-                |_, signatures| {
-                    let mut result = DefinitionSignatures {
-                        overloads: SmallVec::new(),
-                    };
-                    signatures.collect_definition_signatures(&mut result);
-                    if result.overloads.len() == 1 {
-                        result.overloads.pop()
-                    } else {
-                        None
-                    }
-                },
-            )
-            .flatten()
-    }
-
     fn updated_implementation_callables(self, db: &'db dyn Db) -> Option<&'db [CallableType<'db>]> {
         self.updated_signatures(db)
             .as_deref()
@@ -1269,16 +1242,12 @@ impl<'db> FunctionType<'db> {
     }
 
     /// Return all effective implementation callables, falling back to the raw implementation.
-    pub(super) fn implementation_callables(
-        self,
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-    ) -> Cow<'db, [CallableType<'db>]> {
+    pub(super) fn implementation_callables(self, db: &'db dyn Db) -> Cow<'db, [CallableType<'db>]> {
         self.updated_implementation_callables(db).map_or_else(
             || {
                 Cow::Owned(vec![CallableType::single(
                     db,
-                    self.last_definition_signature(db, env).into_owned(),
+                    self.stored_last_definition_signature(db),
                 )])
             },
             Cow::Borrowed,
@@ -1313,7 +1282,7 @@ impl<'db> FunctionType<'db> {
             .with_inherited_generic_context(db, inherited_generic_context);
         let literal = self.literal(db);
         let updated_implementation_callables = literal.has_separate_implementation(db).then(|| {
-            self.implementation_callables(db, env)
+            self.implementation_callables(db)
                 .iter()
                 .map(|callable| {
                     callable
@@ -1381,7 +1350,7 @@ impl<'db> FunctionType<'db> {
                         .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
                 ),
                 literal.has_separate_implementation(db).then(|| {
-                    self.implementation_callables(db, visitor.env)
+                    self.implementation_callables(db)
                         .iter()
                         .map(|callable| {
                             callable.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
@@ -1718,40 +1687,34 @@ impl<'db> FunctionType<'db> {
         self.signature(db).variance_of(db, &env, typevar)
     }
 
-    /// Read the effective implementation signature within its consuming operation.
-    pub(crate) fn last_definition_signature(
+    /// Inspect the effective implementation while any deferred signature remains guarded.
+    /// A decorator with no single implementation signature falls back to the source declaration.
+    pub(super) fn inspect_last_definition_signature<R>(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
-    ) -> Cow<'db, Signature<'db>> {
-        env.cached_query(
-            || Cow::Borrowed(self.cached_last_definition_signature(db)),
-            || Cow::Owned(self.compute_last_definition_signature(db, env)),
-        )
+        mut inspect: impl FnMut(ExpandedSignatures<'_, 'db>) -> R,
+    ) -> R {
+        if self.literal(db).has_separate_implementation(db)
+            && let Some([callable]) = self.updated_implementation_callables(db)
+            && let Some(Some(result)) = callable.inspect_signatures(db, env, |signatures| {
+                signatures
+                    .has_single_signature()
+                    .then(|| inspect(signatures))
+            })
+        {
+            return result;
+        }
+
+        let signatures = CallableSignature::single(self.stored_last_definition_signature(db));
+        inspect(ExpandedSignatures::from_stored(&signatures, env))
     }
 
-    #[salsa::tracked(
-        returns(ref),
-        cycle_initial=|_, _, _| Signature::bottom(),
-        heap_size=ruff_memory_usage::heap_size,
-    )]
-    fn cached_last_definition_signature(self, db: &'db dyn Db) -> Signature<'db> {
-        let env = TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_definition(self.definition(db)),
-        );
-        self.compute_last_definition_signature(db, &env)
-    }
-
-    fn compute_last_definition_signature(
-        self,
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-    ) -> Signature<'db> {
+    /// Read a stored signature or source declaration without expanding a decorated callable.
+    fn stored_last_definition_signature(self, db: &'db dyn Db) -> Signature<'db> {
         let literal = self.literal(db);
         if literal.has_separate_implementation(db) {
-            self.updated_implementation_signature(db, env)
-                .unwrap_or_else(|| literal.last_definition_signature(db))
+            literal.last_definition_signature(db)
         } else {
             self.updated_signature(db)
                 .and_then(|signature| signature.overloads.last().cloned())

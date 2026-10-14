@@ -69,7 +69,7 @@ use crate::lexical_name_path::lexical_name_path_for_definition;
 use crate::place::definitions::DefinitionResolution;
 use crate::types::function::{FunctionType, KnownFunction};
 use crate::types::infer::{function_known_decorators, infer_definition_types, original_class_type};
-use crate::types::signatures::Parameter as SignatureParameter;
+use crate::types::signatures::ParameterMetadata;
 use crate::types::{
     ClassBase, ClassLiteral, KnownClass, ProgramEnvironment, Type, definition_expression_type,
     extract_fixed_length_iterable_element_types, may_exist_at_runtime,
@@ -499,30 +499,34 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
         env: &TypeOperations<'db>,
         definition: Definition<'db>,
     ) -> Option<FixtureRequest<'db>> {
-        let signature = self.function_type.last_definition_signature(db, env);
-        let signature_parameters = signature.parameters();
+        let signature_parameters =
+            self.function_type
+                .inspect_last_definition_signature(db, env, |signatures| {
+                    signatures.single_parameter_metadata()
+                })?;
         let parameter = signature_parameters
             .iter()
-            .find(|parameter| parameter.definition() == Some(definition))?;
-        let parameter_name = parameter.keyword_name()?;
+            .find(|parameter| parameter.definition == Some(definition))?;
+        let parameter_name = parameter.keyword_name.as_ref()?;
 
         // Match pytest's logic for only injecting fixtures for required
         // parameters and by keyword:
         // https://docs.pytest.org/en/9.0.x/how-to/fixtures.html#requesting-fixtures
         // https://github.com/pytest-dev/pytest/blob/9.0.1/src/_pytest/compat.py#L145-L153
-        if parameter.has_default() {
+        if parameter.has_default {
             return None;
         }
 
         if self.function_type.has_implicit_receiver(db)
             && signature_parameters
-                .get_positional(0)
-                .is_some_and(|parameter| parameter.definition() == Some(definition))
+                .iter()
+                .find(|parameter| parameter.is_positional)
+                .is_some_and(|parameter| parameter.definition == Some(definition))
         {
             return None;
         }
 
-        if self.is_mock_patch_parameter(db, env, definition) {
+        if self.is_mock_patch_parameter(db, &signature_parameters, definition) {
             return None;
         }
 
@@ -541,33 +545,32 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
     fn is_mock_patch_parameter(
         &self,
         db: &'db dyn Db,
-        env: &TypeOperations<'db>,
+        parameters: &[ParameterMetadata<'db>],
         parameter_definition: Definition<'db>,
     ) -> bool {
         if self.mock_patch_count == 0 {
             return false;
         }
 
-        let signature = self.function_type.last_definition_signature(db, env);
-        let parameters = signature.parameters();
-        let is_source_keyword_parameter = |parameter: &SignatureParameter<'db>| {
-            parameter.keyword_name().is_some()
+        let is_source_keyword_parameter = |parameter: &ParameterMetadata<'db>| {
+            parameter.keyword_name.is_some()
                 // ty applies PEP 484's legacy positional-only convention to leading `__name`
                 // parameters, but Python and pytest still inspect them as positional-or-keyword.
                 || (self.function.parameters.posonlyargs.is_empty()
-                    && parameter.is_positional_only())
+                    && parameter.is_positional_only)
         };
         let skips_receiver = self.function_type.has_implicit_receiver(db)
             && parameters
-                .get_positional(0)
+                .iter()
+                .find(|parameter| parameter.is_positional)
                 .is_some_and(is_source_keyword_parameter);
 
         parameters
             .iter()
-            .filter(|parameter| is_source_keyword_parameter(parameter) && !parameter.has_default())
+            .filter(|parameter| is_source_keyword_parameter(parameter) && !parameter.has_default)
             .skip(usize::from(skips_receiver))
             .take(self.mock_patch_count)
-            .any(|candidate| candidate.definition() == Some(parameter_definition))
+            .any(|candidate| candidate.definition == Some(parameter_definition))
     }
 
     /// Returns whether static parametrization on the function or an enclosing class prevents this

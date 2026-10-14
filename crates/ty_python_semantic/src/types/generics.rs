@@ -411,8 +411,9 @@ impl<'db> GenericContext<'db> {
                 let definition = index.expect_single_definition(function);
                 infer_definition_types(db, definition)
                     .function_type(definition)?
-                    .last_definition_signature(db, env)
-                    .generic_context
+                    .inspect_last_definition_signature(db, env, |signature| {
+                        signature.single_generic_context()
+                    })
             }
             NodeWithScopeKind::TypeAlias(type_alias) => {
                 let definition = index.expect_single_definition(type_alias);

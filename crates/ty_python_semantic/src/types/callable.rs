@@ -957,7 +957,15 @@ pub(crate) struct ExpandedSignatures<'scope, 'db> {
     env: &'scope TypeOperations<'db>,
 }
 
-impl<'db> ExpandedSignatures<'_, 'db> {
+impl<'scope, 'db> ExpandedSignatures<'scope, 'db> {
+    /// Inspect signatures already stored as finite values, without expanding a callable.
+    pub(super) fn from_stored(
+        signatures: &'scope CallableSignature<'db>,
+        env: &'scope TypeOperations<'db>,
+    ) -> Self {
+        Self { signatures, env }
+    }
+
     #[cfg(test)]
     pub(super) fn single_return_display(self, db: &'db dyn Db) -> Option<String> {
         let [signature] = self.signatures.overloads.as_slice() else {
@@ -1197,6 +1205,32 @@ impl<'db> ExpandedSignatures<'_, 'db> {
             self.signatures,
             self_ty,
             receiver_ty,
+        )
+    }
+
+    pub(super) fn has_single_signature(&self) -> bool {
+        self.signatures.overloads.len() == 1
+    }
+
+    pub(super) fn single_generic_context(self) -> Option<super::GenericContext<'db>> {
+        let [signature] = self.signatures.overloads.as_slice() else {
+            return None;
+        };
+        signature.generic_context
+    }
+
+    pub(super) fn single_parameter_metadata(
+        self,
+    ) -> Option<Vec<super::signatures::ParameterMetadata<'db>>> {
+        let [signature] = self.signatures.overloads.as_slice() else {
+            return None;
+        };
+        Some(
+            signature
+                .parameters()
+                .iter()
+                .map(Parameter::metadata)
+                .collect(),
         )
     }
 
