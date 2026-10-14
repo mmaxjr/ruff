@@ -10,7 +10,7 @@
 use crate::Db;
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
-use crate::types::{CycleKind, TypeTraversal, TypeWalk};
+use crate::types::{CycleKind, TypeQuery, TypeQueryContext, TypeTraversal, TypeWalk};
 use ty_module_resolver::KnownModule;
 use ty_python_core::{definition::Definition, use_def_map};
 
@@ -755,19 +755,55 @@ fn shadowed_descriptor_write_type<'db>(
     env: &TypeOperations<'db>,
     attr_ty: Type<'db>,
 ) -> Type<'db> {
-    match attr_ty {
-        Type::Union(union) => {
-            union.map_leave_aliases(db, env, |ty| shadowed_descriptor_write_type(db, env, *ty))
+    TypeQueryContext::with_root(env, ShadowedDescriptorWriteType, |context| {
+        context.visit(db, attr_ty)
+    })
+    .unwrap_or(attr_ty)
+}
+
+struct ShadowedDescriptorWriteType;
+
+impl<'db> TypeQuery<'db> for ShadowedDescriptorWriteType {
+    type Output = Option<Type<'db>>;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> Self::Output {
+        None
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> Self::Output {
+        match ty {
+            Type::Union(union) => {
+                let mut changed = false;
+                let elements = union
+                    .elements(db)
+                    .iter()
+                    .map(|element| {
+                        let mapped = context.visit(db, *element).unwrap_or(*element);
+                        changed |= mapped != *element;
+                        mapped
+                    })
+                    .collect::<Vec<_>>();
+                changed.then(|| {
+                    UnionType::from_elements_leave_aliases(db, context.environment(), elements)
+                })
+            }
+            _ if ty.function_like_kind(db) == Some(CallableTypeKind::StaticMethodLike) => {
+                Some(ty.underlying_function(db))
+            }
+            _ => None,
         }
-        Type::TypeAlias(alias) => {
-            let value = alias.value_type(db, env);
-            let write_ty = shadowed_descriptor_write_type(db, env, value);
-            if write_ty == value { attr_ty } else { write_ty }
-        }
-        _ if attr_ty.function_like_kind(db) == Some(CallableTypeKind::StaticMethodLike) => {
-            attr_ty.underlying_function(db)
-        }
-        _ => attr_ty,
     }
 }
 

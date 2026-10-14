@@ -9,11 +9,11 @@ use crate::{
     Db, FxOrderSet,
     place::Place,
     types::{
-        ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance, ClassType,
+        ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance, ClassType, CycleKind,
         FindLegacyTypeVarsVisitor, FunctionType, InternedType, KnownBoundMethodType, KnownClass,
         KnownInstanceType, LiteralValueTypeKind, MemberLookupPolicy, Parameter, Parameters,
-        Signature, SubclassOfInner, Type, TypeContext, TypeMapping, TypeVarBoundOrConstraints,
-        UnionType,
+        Signature, SubclassOfInner, Type, TypeContext, TypeMapping, TypeQuery, TypeQueryContext,
+        TypeVarBoundOrConstraints, UnionType,
         function::OverloadLiteral,
         infer::{InferenceEnvironment, ScopeInference},
         known_instance::{FunctoolsPartialInstance, MethodWrapperKind},
@@ -30,6 +30,58 @@ use ty_python_core::{ExpressionNodeKey, scope::ScopeId};
 mod lambda;
 pub(in crate::types) use lambda::LambdaSignatureKey;
 use lambda::{LambdaMapping, LambdaSignatureMapping};
+
+struct FunctionDescriptorGet<'db> {
+    instance: Option<Type<'db>>,
+    owner: Option<Type<'db>>,
+}
+
+impl<'db> TypeQuery<'db> for FunctionDescriptorGet<'db> {
+    type Output = Option<Type<'db>>;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> Self::Output {
+        None
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> Self::Output {
+        let env = context.environment();
+        if let Type::Union(union) = ty {
+            return union.try_map(db, env, |alternative| context.visit(db, *alternative));
+        }
+        let kind = ty.function_like_kind(db)?;
+        let receiver = match kind {
+            CallableTypeKind::StaticMethodLike => return Some(ty.underlying_function(db)),
+            CallableTypeKind::ClassMethodLike => self
+                .owner
+                .filter(|owner| !owner.is_none(db))
+                .or_else(|| self.instance.map(|instance| instance.to_meta_type(db, env))),
+            _ => self.instance,
+        };
+        Some(receiver.map_or_else(
+            || ty.underlying_function(db),
+            |receiver| {
+                Type::BoundMethod(super::BoundMethodType::from_callable(
+                    db,
+                    ty,
+                    env.program(db),
+                    receiver,
+                ))
+            },
+        ))
+    }
+}
 
 impl<'db> Type<'db> {
     pub(super) fn function_like_kind(self, db: &'db dyn Db) -> Option<CallableTypeKind> {
@@ -76,39 +128,9 @@ impl<'db> Type<'db> {
         instance: Option<Type<'db>>,
         owner: Option<Type<'db>>,
     ) -> Option<Type<'db>> {
-        // ParamSpec specialization can produce a union of function descriptors.
-        match self {
-            Type::Union(union) => {
-                return union.try_map(db, env, |alternative| {
-                    alternative.function_like_dunder_get(db, env, instance, owner)
-                });
-            }
-            Type::TypeAlias(alias) => {
-                return alias
-                    .value_type(db, env)
-                    .function_like_dunder_get(db, env, instance, owner);
-            }
-            _ => {}
-        }
-        let kind = self.function_like_kind(db)?;
-        let receiver = match kind {
-            CallableTypeKind::StaticMethodLike => return Some(self.underlying_function(db)),
-            CallableTypeKind::ClassMethodLike => owner
-                .filter(|owner| !owner.is_none(db))
-                .or_else(|| instance.map(|instance| instance.to_meta_type(db, env))),
-            _ => instance,
-        };
-        Some(receiver.map_or_else(
-            || self.underlying_function(db),
-            |receiver| {
-                Type::BoundMethod(super::BoundMethodType::from_callable(
-                    db,
-                    self,
-                    env.program(db),
-                    receiver,
-                ))
-            },
-        ))
+        TypeQueryContext::with_root(env, FunctionDescriptorGet { instance, owner }, |context| {
+            context.visit(db, self)
+        })
     }
 
     /// Create a callable type with a single non-overloaded signature.
@@ -371,9 +393,9 @@ impl<'db> Type<'db> {
                 _ => None,
             },
 
-            Type::TypeAlias(alias) => alias
-                .value_type(db, env)
-                .try_upcast_to_callable_with_policy_and_context(db, env, policy, context, receiver),
+            Type::TypeAlias(alias) => expansion
+                .alias_body(db, alias)
+                .upcast_to_callable(db, policy, context, receiver),
 
             Type::KnownBoundMethod(KnownBoundMethodType::DunderCall(callable)) => callable
                 .inner(db)
@@ -443,13 +465,29 @@ impl<'db> Type<'db> {
     }
 }
 
-struct CallableUpcastContext<'env, 'db> {
+pub(super) struct CallableUpcastContext<'env, 'db> {
     recursive_definition: Option<Definition<'db>>,
     active: crate::types::CycleDetector<'db, (), Type<'db>, (), 3>,
     mapping: ApplyTypeMappingVisitor<'env, 'db>,
 }
 
 impl<'env, 'db> CallableUpcastContext<'env, 'db> {
+    pub(super) fn check(
+        &self,
+        db: &'db dyn Db,
+        ty: Type<'db>,
+        policy: UpcastPolicy,
+        receiver: Option<Type<'db>>,
+    ) -> Option<CallableTypes<'db>> {
+        ty.try_upcast_to_callable_with_policy_and_context(
+            db,
+            self.mapping.env,
+            policy,
+            self,
+            receiver,
+        )
+    }
+
     fn new(env: &'env TypeOperations<'db>, recursive_definition: Option<Definition<'db>>) -> Self {
         Self {
             recursive_definition,

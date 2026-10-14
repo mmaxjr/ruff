@@ -1007,59 +1007,46 @@ pub(super) fn any_over_type_expanding_aliases<'db>(
     ty: Type<'db>,
     query: impl Fn(Type<'db>) -> bool,
 ) -> bool {
-    fn search<'db>(
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-        ty: Type<'db>,
-        query: &impl Fn(Type<'db>) -> bool,
-        active_aliases: &ActiveRecursionDetector<TypeIdentity<'db>>,
-        mapping: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> bool {
-        any_over_type(db, env, ty, false, |nested| {
-            query(nested)
+    AliasSearch {
+        env,
+        query: &query,
+        active_aliases: ActiveRecursionDetector::default(),
+        mapping: ApplyTypeMappingVisitor::new(env),
+    }
+    .search(db, ty)
+}
+
+/// An alias search shares its guards while keeping each body's structural cache local.
+pub(super) struct AliasSearch<'a, 'db> {
+    env: &'a TypeOperations<'db>,
+    query: &'a dyn Fn(Type<'db>) -> bool,
+    active_aliases: ActiveRecursionDetector<TypeIdentity<'db>>,
+    mapping: ApplyTypeMappingVisitor<'a, 'db>,
+}
+
+impl<'db> AliasSearch<'_, 'db> {
+    pub(super) fn search(&self, db: &'db dyn Db, ty: Type<'db>) -> bool {
+        any_over_type(db, self.env, ty, false, |nested| {
+            (self.query)(nested)
                 || match nested {
-                    Type::TypeAlias(alias) => active_aliases.visit(
+                    Type::TypeAlias(alias) => self.active_aliases.visit_structure(
                         &nested.to_type_identity(db),
+                        &self.mapping,
                         || true,
-                        || {
-                            search(
-                                db,
-                                env,
-                                alias.value_type(db, env),
-                                query,
-                                active_aliases,
-                                mapping,
-                            )
-                        },
+                        |expansion| expansion.alias_body(db, alias).search_aliases(db, self),
                     ),
-                    Type::Recursive(recursive) => active_aliases.visit_structure(
+                    Type::Recursive(recursive) => self.active_aliases.visit_structure(
                         &nested.to_type_identity(db),
-                        mapping,
+                        &self.mapping,
                         || true,
                         |expansion| {
-                            search(
-                                db,
-                                env,
-                                expansion.recursive_body(db, recursive).into_type(),
-                                query,
-                                active_aliases,
-                                mapping,
-                            )
+                            self.search(db, expansion.recursive_body(db, recursive).into_type())
                         },
                     ),
                     _ => false,
                 }
         })
     }
-
-    search(
-        db,
-        env,
-        ty,
-        &query,
-        &ActiveRecursionDetector::default(),
-        &ApplyTypeMappingVisitor::new(env),
-    )
 }
 
 /// Recurse into a type and calls the passed-in closure on every nested type

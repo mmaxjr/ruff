@@ -7,7 +7,7 @@ use ruff_text_size::Ranged;
 use crate::Db;
 use crate::place::place_from_declarations;
 use crate::types::infer::nearest_enclosing_function;
-use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
+use crate::types::{CycleKind, TypeQuery, TypeQueryContext, TypeTraversal, TypeWalk};
 use crate::{
     TypeQualifiers,
     types::{
@@ -317,39 +317,68 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         attribute: &str,
     ) -> bool {
         let db = self.db();
-        // Check each possible receiver type separately. If one of them makes the
-        // attribute `Final`, another type must not make it writable.
-        match object_ty {
-            Type::TypeAlias(alias) => {
-                return self.validate_final_attribute_assignment(
-                    target,
-                    alias.value_type(db, self.program_environment()),
-                    attribute,
-                );
-            }
+        let env = self.program_environment().clone();
+        TypeTraversal::with_root(
+            &env,
+            FinalAttributeAssignment { target, attribute },
+            |traversal| traversal.visit_with(db, object_ty, self),
+        )
+    }
+}
+
+struct FinalAttributeAssignment<'a> {
+    target: &'a ast::ExprAttribute,
+    attribute: &'a str,
+}
+
+impl<'db, 'ast> TypeWalk<'db, &mut TypeInferenceBuilder<'db, 'ast>>
+    for FinalAttributeAssignment<'_>
+{
+    type Output = bool;
+
+    fn on_cycle(
+        &self,
+        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        _builder: &mut TypeInferenceBuilder<'db, 'ast>,
+    ) -> bool {
+        false
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        traversal: &TypeTraversal<'_, 'db, Self>,
+        ty: Type<'db>,
+        builder: &mut TypeInferenceBuilder<'db, 'ast>,
+    ) -> bool {
+        // Any receiver with a Final declaration prevents the assignment.
+        match ty {
             Type::Union(union) => {
-                return union.elements(db).iter().any(|element| {
-                    self.validate_final_attribute_assignment(target, *element, attribute)
-                });
+                return union
+                    .elements(db)
+                    .iter()
+                    .any(|element| traversal.visit_with(db, *element, &mut *builder));
             }
             Type::Intersection(intersection) => {
-                return intersection.positive(db).iter().any(|element| {
-                    self.validate_final_attribute_assignment(target, *element, attribute)
-                });
+                return intersection
+                    .positive(db)
+                    .iter()
+                    .any(|element| traversal.visit_with(db, *element, &mut *builder));
             }
             _ => {}
         }
         let Some(members) =
-            assignment_attribute_members(db, self.program_environment(), object_ty, attribute)
+            assignment_attribute_members(db, traversal.environment(), ty, self.attribute)
         else {
             return false;
         };
-
         members.effective_members().any(|member| {
-            self.invalid_assignment_to_final_attribute(
-                object_ty,
-                target,
-                attribute,
+            builder.invalid_assignment_to_final_attribute(
+                ty,
+                self.target,
+                self.attribute,
                 member.qualifiers,
             )
         })

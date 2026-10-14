@@ -560,14 +560,14 @@ fn typed_dict_subscript<'db>(
 
 /// A subscript operation keeps both operands in its recursion key. Expanding either operand
 /// can revisit the pair, and alias normalization must reuse the same mapping state.
-struct SubscriptChecker<'env, 'db> {
+pub(super) struct SubscriptChecker<'env, 'db> {
     mapping: ApplyTypeMappingVisitor<'env, 'db>,
     expr_context: ast::ExprContext,
     active: CycleDetector<'db, ast::ExprContext, (Type<'db>, Type<'db>), (), 1>,
 }
 
 impl<'db> SubscriptChecker<'_, 'db> {
-    fn check(
+    pub(super) fn check(
         &self,
         db: &'db dyn Db,
         value_ty: Type<'db>,
@@ -597,12 +597,12 @@ impl<'db> SubscriptChecker<'_, 'db> {
                             .expand_recursive(db, recursive)
                             .map(|body| self.check(db, value_ty, body))
                             .unwrap_or(Ok(value_ty)),
-                        (Type::TypeAlias(alias), _) => {
-                            self.check(db, alias.value_type(db, self.mapping.env), slice_ty)
-                        }
-                        (_, Type::TypeAlias(alias)) => {
-                            self.check(db, value_ty, alias.value_type(db, self.mapping.env))
-                        }
+                        (Type::TypeAlias(alias), _) => expansion
+                            .alias_body(db, alias)
+                            .subscript_as_value(db, self, slice_ty),
+                        (_, Type::TypeAlias(alias)) => expansion
+                            .alias_body(db, alias)
+                            .subscript_as_index(db, self, value_ty),
                         _ => value_ty.subscript_impl(db, self, slice_ty),
                     },
                 }

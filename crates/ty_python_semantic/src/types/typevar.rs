@@ -456,147 +456,19 @@ impl<'db> TypeVarInstance<'db> {
         ty: Type<'db>,
         visitor: &TypeVarDefaultVisitor<'db>,
     ) -> bool {
-        type SeenTypes<'db> = SmallVec<[TypeIdentity<'db>; 1]>;
-
-        #[derive(Copy, Clone)]
-        struct State<'db, 'a> {
-            db: &'db dyn Db,
-            env: &'a TypeOperations<'db>,
-            visitor: &'a TypeVarDefaultVisitor<'db>,
-            seen_typevars: &'a RefCell<FxHashSet<TypeVarInstance<'db>>>,
-            seen_types: &'a RefCell<SeenTypes<'db>>,
-            recursive:
-                &'a crate::types::recursive::TypeVisitorState<'a, 'db, (), Type<'db>, bool, 1>,
-        }
-
-        fn typevar_default_is_self_referential<'db>(
-            state: State<'db, '_>,
-            typevar: TypeVarInstance<'db>,
-            self_identity: TypeVarIdentity<'db>,
-        ) -> bool {
-            let db = state.db;
-
-            if typevar.identity(db) == self_identity {
-                return true;
-            }
-
-            if !state.seen_typevars.borrow_mut().insert(typevar) {
-                return false;
-            }
-
-            typevar
-                .default_type_impl(db, state.env, state.visitor)
-                .is_some_and(|default_ty| {
-                    type_is_self_referential_impl(state, default_ty, self_identity)
-                })
-        }
-
-        fn type_alias_is_self_referential<'db>(
-            state: State<'db, '_>,
-            type_alias: TypeAliasType<'db>,
-            self_identity: TypeVarIdentity<'db>,
-        ) -> bool {
-            let db = state.db;
-            let specialization = type_alias.specialization(db);
-            // A nested specialization can contain self even when its alias body was already visited.
-            if let Some(specialization) = specialization {
-                if specialization
-                    .types(db)
-                    .iter()
-                    .any(|ty| type_is_self_referential_impl(state, *ty, self_identity))
-                {
-                    return true;
-                }
-            } else if let Some(generic_context) = type_alias.generic_context(db)
-                && generic_context.variables(db).any(|typevar| {
-                    typevar_default_is_self_referential(state, typevar.typevar(db), self_identity)
-                })
-            {
-                return true;
-            }
-
-            {
-                let mut seen_types = state.seen_types.borrow_mut();
-                // The shared recursive identity also stops specializations that keep growing.
-                let identity = Type::TypeAlias(type_alias).to_type_identity(db);
-                if seen_types.contains(&identity) {
-                    return false;
-                }
-                seen_types.push(identity);
-            }
-
-            let value_type = if specialization.is_some() {
-                type_alias.value_type(db, state.env)
-            } else {
-                type_alias.raw_value_type(db)
-            };
-            type_is_self_referential_impl(state, value_type, self_identity)
-        }
-
-        fn type_is_self_referential_impl<'db>(
-            state: State<'db, '_>,
-            ty: Type<'db>,
-            self_identity: TypeVarIdentity<'db>,
-        ) -> bool {
-            let db = state.db;
-            any_over_type(db, state.env, ty, false, |inner_ty| match inner_ty {
-                Type::TypeVar(bound_typevar) => typevar_default_is_self_referential(
-                    state,
-                    bound_typevar.typevar(db),
-                    self_identity,
-                ),
-                Type::KnownInstance(KnownInstanceType::TypeVar(typevar)) => {
-                    typevar_default_is_self_referential(state, typevar, self_identity)
-                }
-                Type::TypeAlias(alias) => {
-                    type_alias_is_self_referential(state, alias, self_identity)
-                }
-                Type::Recursive(recursive) => {
-                    if recursive.arguments(db).is_some_and(|arguments| {
-                        arguments
-                            .types(db)
-                            .iter()
-                            .any(|ty| type_is_self_referential_impl(state, *ty, self_identity))
-                    }) {
-                        return true;
-                    }
-                    {
-                        let mut seen_types = state.seen_types.borrow_mut();
-                        let identity = Type::Recursive(recursive).to_type_identity(db);
-                        if seen_types.contains(&identity) {
-                            return false;
-                        }
-                        seen_types.push(identity);
-                    }
-                    state.recursive.visit_structure(db, inner_ty, |expansion| {
-                        type_is_self_referential_impl(
-                            state,
-                            expansion.recursive_body(db, recursive).into_type(),
-                            self_identity,
-                        )
-                    })
-                }
-                Type::KnownInstance(KnownInstanceType::TypeAliasType(alias)) => {
-                    type_alias_is_self_referential(state, alias, self_identity)
-                }
-                _ => false,
-            })
-        }
-
         let seen_typevars = RefCell::new(FxHashSet::default());
-        let seen_types = RefCell::new(SeenTypes::new());
-
+        let seen_types = RefCell::new(SmallVec::new());
         let recursive = crate::types::recursive::TypeVisitorState::new(env, false);
-        let state = State {
-            recursive: &recursive,
+        TypeVarDefaultSearch {
             db,
             env,
             visitor,
+            target: self.identity(db),
             seen_typevars: &seen_typevars,
             seen_types: &seen_types,
-        };
-
-        type_is_self_referential_impl(state, ty, self.identity(db))
+            recursive: &recursive,
+        }
+        .visit(ty)
     }
 
     /// Returns the "unchecked" upper bound of a type variable instance.
@@ -2548,5 +2420,98 @@ mod tests {
                 .without_paramspec_attr(db)
                 .is_inferable(db, paramspec_only)
         );
+    }
+}
+
+/// Search the defaults reachable from one type variable without replacing the active traversal.
+#[derive(Clone, Copy)]
+pub(super) struct TypeVarDefaultSearch<'db, 'a> {
+    db: &'db dyn Db,
+    env: &'a TypeOperations<'db>,
+    visitor: &'a TypeVarDefaultVisitor<'db>,
+    target: TypeVarIdentity<'db>,
+    seen_typevars: &'a RefCell<FxHashSet<TypeVarInstance<'db>>>,
+    seen_types: &'a RefCell<SmallVec<[TypeIdentity<'db>; 1]>>,
+    recursive: &'a crate::types::recursive::TypeVisitorState<'a, 'db, (), Type<'db>, bool, 1>,
+}
+
+impl<'db> TypeVarDefaultSearch<'db, '_> {
+    fn visit_default(self, typevar: TypeVarInstance<'db>) -> bool {
+        if typevar.identity(self.db) == self.target {
+            return true;
+        }
+        if !self.seen_typevars.borrow_mut().insert(typevar) {
+            return false;
+        }
+        typevar
+            .default_type_impl(self.db, self.env, self.visitor)
+            .is_some_and(|default| self.visit(default))
+    }
+
+    fn visit_alias(self, alias: TypeAliasType<'db>) -> bool {
+        let db = self.db;
+        let specialization = alias.specialization(db);
+        // Arguments can mention the target even after this alias's body has been visited.
+        if let Some(specialization) = specialization {
+            if specialization.types(db).iter().any(|ty| self.visit(*ty)) {
+                return true;
+            }
+        } else if let Some(parameters) = alias.generic_context(db)
+            && parameters
+                .variables(db)
+                .any(|typevar| self.visit_default(typevar.typevar(db)))
+        {
+            return true;
+        }
+        {
+            let mut seen = self.seen_types.borrow_mut();
+            let identity = Type::TypeAlias(alias).to_type_identity(db);
+            if seen.contains(&identity) {
+                return false;
+            }
+            seen.push(identity);
+        }
+        if specialization.is_some() {
+            self.recursive
+                .visit_structure(db, Type::TypeAlias(alias), |expansion| {
+                    expansion
+                        .alias_body(db, alias)
+                        .references_typevar_default(self)
+                })
+        } else {
+            self.visit(alias.raw_value_type(db))
+        }
+    }
+
+    pub(super) fn visit(self, ty: Type<'db>) -> bool {
+        let db = self.db;
+        any_over_type(db, self.env, ty, false, |inner| match inner {
+            Type::TypeVar(typevar) => self.visit_default(typevar.typevar(db)),
+            Type::KnownInstance(KnownInstanceType::TypeVar(typevar)) => self.visit_default(typevar),
+            Type::TypeAlias(alias)
+            | Type::KnownInstance(KnownInstanceType::TypeAliasType(alias)) => {
+                self.visit_alias(alias)
+            }
+            Type::Recursive(recursive) => {
+                if recursive
+                    .arguments(db)
+                    .is_some_and(|arguments| arguments.types(db).iter().any(|ty| self.visit(*ty)))
+                {
+                    return true;
+                }
+                {
+                    let mut seen = self.seen_types.borrow_mut();
+                    let identity = Type::Recursive(recursive).to_type_identity(db);
+                    if seen.contains(&identity) {
+                        return false;
+                    }
+                    seen.push(identity);
+                }
+                self.recursive.visit_structure(db, inner, |expansion| {
+                    self.visit(expansion.recursive_body(db, recursive).into_type())
+                })
+            }
+            _ => false,
+        })
     }
 }

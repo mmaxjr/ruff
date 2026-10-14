@@ -1,6 +1,5 @@
 //! Display implementations for types.
 
-use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
 use crate::types::typevar::TypeVarSet;
 use std::borrow::Cow;
@@ -38,8 +37,8 @@ use crate::types::{
     ApplyTypeMappingVisitor, CallableType, IntersectionType, KnownBoundMethodType, KnownClass,
     KnownInstanceType, KnownUnion, LiteralValueType, LiteralValueTypeKind, MaterializationKind,
     PropertyInstanceClass, PropertyInstanceType, Protocol, SpecialFormType, SubclassOfInner,
-    SubclassOfType, Type, TypeAliasType, TypeGuardLike, TypeRecursionContext, TypedDictType,
-    TypingModule, UnionBuilder, UnionType, WrapperDescriptorKind, visitor,
+    SubclassOfType, Type, TypeAliasType, TypeGuardLike, TypedDictType, TypingModule, UnionBuilder,
+    UnionType, WrapperDescriptorKind, visitor,
 };
 use ty_python_core::ProgramFile;
 use ty_python_core::definition::Definition;
@@ -304,7 +303,6 @@ pub struct TypeDisplayDetails<'db> {
 struct TypeWriter<'a, 'b, 'db> {
     output: TypeOutput<'a, 'b, 'db>,
     signatures: Rc<ActiveRecursionDetector<DisplayedSignature<'db>>>,
-    recursion: TypeRecursionContext<'db>,
 }
 
 enum TypeOutput<'a, 'b, 'db> {
@@ -334,12 +332,11 @@ struct TypeDetailsWriter<'db> {
 
 impl<'db> TypeDetailsWriter<'db> {
     /// Buffer a display once so label comparisons can reuse its text and navigation ranges.
-    fn render(env: &TypeOperations<'db>, value: &impl FmtDetailed<'db>) -> Self {
+    fn render(value: &impl FmtDetailed<'db>) -> Self {
         let mut details = Self::new();
         let mut writer = TypeWriter {
             output: TypeOutput::Details(&mut details),
             signatures: Rc::default(),
-            recursion: env.context().clone(),
         };
         value.fmt_detailed(&mut writer).unwrap();
         details
@@ -396,11 +393,10 @@ impl<'db> TypeDetailsWriter<'db> {
 }
 
 impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
-    fn new(formatter: &'a mut Formatter<'b>, env: &TypeOperations<'db>) -> Self {
+    fn new(formatter: &'a mut Formatter<'b>) -> Self {
         Self {
             output: TypeOutput::Formatter(formatter),
             signatures: Rc::default(),
-            recursion: env.context().clone(),
         }
     }
 
@@ -446,7 +442,6 @@ impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
             value.fmt_detailed(&mut TypeWriter {
                 output: TypeOutput::Details(&mut details),
                 signatures: Rc::clone(&self.signatures),
-                recursion: self.recursion.clone(),
             })?;
             Ok(BufferedTypeDisplay::Details(details.finish_type_details()))
         } else {
@@ -459,7 +454,6 @@ impl<'a, 'b, 'db> TypeWriter<'a, 'b, 'db> {
         value.fmt_detailed(&mut TypeWriter {
             output: TypeOutput::Text(&mut label),
             signatures: Rc::clone(&self.signatures),
-            recursion: self.recursion.clone(),
         })?;
         Ok(label)
     }
@@ -891,7 +885,7 @@ impl<'db> DisplayType<'_, 'db> {
     }
 
     pub fn to_string_parts(&self) -> TypeDisplayDetails<'db> {
-        TypeDetailsWriter::render(self.env, self).finish_type_details()
+        TypeDetailsWriter::render(self).finish_type_details()
     }
 }
 
@@ -920,7 +914,7 @@ impl<'db> FmtDetailed<'db> for DisplayType<'_, 'db> {
 
 impl Display for DisplayType<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::new(f, self.env))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -1044,11 +1038,7 @@ impl<'db> FmtDetailed<'db> for ClassDisplay<'db> {
 
 impl Display for ClassDisplay<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let env = TypeOperations::for_inference(
-            self.db,
-            ProgramEnvironment::from_file(self.class.program_file(self.db)),
-        );
-        self.fmt_detailed(&mut TypeWriter::new(f, &env))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -1231,7 +1221,7 @@ impl<'db> FmtDetailed<'db> for DisplayTypeAliasDeclaration<'_, 'db> {
 
 impl Display for DisplayTypeAliasDeclaration<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::new(f, self.env))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -2284,7 +2274,7 @@ impl<'db> FmtDetailed<'db> for DisplayGenericAlias<'_, 'db> {
 
 impl Display for DisplayGenericAlias<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::new(f, self.env))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -2746,7 +2736,7 @@ impl DisplaySignature<'_, '_> {
 
     /// Get detailed display information including component ranges
     pub(crate) fn to_string_parts(&self) -> SignatureDisplayDetails {
-        TypeDetailsWriter::render(self.env, self).finish_signature_details()
+        TypeDetailsWriter::render(self).finish_signature_details()
     }
 
     fn should_hide_self_from_display(&self) -> bool {
@@ -2841,7 +2831,7 @@ impl<'db> FmtDetailed<'db> for DisplaySignature<'_, 'db> {
 
 impl Display for DisplaySignature<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::new(f, self.env))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 
@@ -3882,7 +3872,7 @@ impl<'db> KnownInstanceType<'db> {
 
 impl Display for DisplayKnownInstanceRepr<'_, '_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.fmt_detailed(&mut TypeWriter::new(f, self.env))
+        self.fmt_detailed(&mut TypeWriter::new(f))
     }
 }
 

@@ -194,7 +194,7 @@
 //! [bdd]: https://en.wikipedia.org/wiki/Binary_decision_diagram
 
 use crate::ProgramEnvironment;
-use crate::types::TypeOperations;
+use crate::types::{CycleKind, TypeOperations, TypeQuery, TypeQueryContext};
 use std::cell::RefCell;
 
 use crate::{
@@ -352,48 +352,50 @@ fn enum_literal_subject_names<'db>(
     env: &TypeOperations<'db>,
     subject_ty: Type<'db>,
 ) -> Option<(EnumClassLiteral<'db>, FxHashSet<Name>)> {
-    fn add_enum_literal<'db>(
+    TypeQueryContext::with_root(env, EnumLiteralSubjectNames, |context| {
+        context.visit(db, subject_ty)
+    })
+}
+
+struct EnumLiteralSubjectNames;
+
+impl<'db> TypeQuery<'db> for EnumLiteralSubjectNames {
+    type Output = Option<(EnumClassLiteral<'db>, FxHashSet<Name>)>;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> Self::Output {
+        None
+    }
+
+    fn visit(
+        &self,
         db: &'db dyn Db,
-        enum_class: &mut Option<EnumClassLiteral<'db>>,
-        names: &mut FxHashSet<Name>,
+        context: &TypeQueryContext<'_, 'db, Self>,
         ty: Type<'db>,
-    ) -> Option<()> {
-        let enum_literal = ty.as_enum_literal()?;
-        let class = enum_literal.enum_class_literal(db);
-
-        if let Some(existing_class) = *enum_class {
-            if existing_class != class {
-                return None;
+        (): (),
+    ) -> Self::Output {
+        if let Type::Union(union) = ty {
+            let mut elements = union.elements(db).iter();
+            let (class, mut names) = context.visit(db, *elements.next()?)?;
+            for element in elements {
+                let (other_class, other_names) = context.visit(db, *element)?;
+                if class != other_class {
+                    return None;
+                }
+                names.extend(other_names);
             }
-        } else {
-            *enum_class = Some(class);
+            return Some((class, names));
         }
-
-        let name = enum_literal.name(db);
-        let canonical_name = class.resolve_member(db, name)?;
-        names.insert(canonical_name.clone());
-        Some(())
+        let literal = ty.as_enum_literal()?;
+        let class = literal.enum_class_literal(db);
+        let name = class.resolve_member(db, literal.name(db))?;
+        Some((class, [name.clone()].into_iter().collect()))
     }
-
-    let mut enum_class = None;
-    let mut names = FxHashSet::default();
-
-    match subject_ty {
-        Type::LiteralValue(_) => {
-            add_enum_literal(db, &mut enum_class, &mut names, subject_ty)?;
-        }
-        Type::Union(union) => {
-            for element in union.elements(db) {
-                add_enum_literal(db, &mut enum_class, &mut names, *element)?;
-            }
-        }
-        Type::TypeAlias(alias) => {
-            return enum_literal_subject_names(db, env, alias.value_type(db, env));
-        }
-        _ => return None,
-    }
-
-    Some((enum_class?, names))
 }
 
 /// Return the canonical enum-member name matched by a single value pattern.

@@ -116,7 +116,7 @@ mod stable {
             let negated = s.negate(db, env);
             let mut cache = None;
             [t, u].into_iter().all(|target| {
-                s.negation_is_subtype_of_cached(db, env, target, &mut cache, env.context())
+                s.negation_is_subtype_of_cached(db, env, target, &mut cache)
                     == negated.is_subtype_of(db, env, target)
             })
         }

@@ -95,6 +95,37 @@ pub enum MethodWrapperKind {
     Classmethod,
 }
 
+struct MethodDescriptor<'db> {
+    db: &'db dyn Db,
+    kind: MethodWrapperKind,
+}
+
+impl<'db> super::TypeQuery<'db> for MethodDescriptor<'db> {
+    type Output = Type<'db>;
+
+    fn on_cycle(
+        &self,
+        _context: &super::TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        _kind: super::CycleKind,
+        (): (),
+    ) -> Self::Output {
+        Type::KnownInstance(KnownInstanceType::MethodWrapper(MethodWrapper::new(
+            self.db, ty, self.kind,
+        )))
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &super::TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> Self::Output {
+        MethodWrapper::wrap_body(db, context, ty, self.kind)
+    }
+}
+
 impl<'db> MethodWrapper<'db> {
     /// Construct a method descriptor, retaining function and callable representations that
     /// already encode the matching descriptor binding. Other callables need a separate wrapper
@@ -105,6 +136,18 @@ impl<'db> MethodWrapper<'db> {
         wrapped: Type<'db>,
         kind: MethodWrapperKind,
     ) -> Type<'db> {
+        super::TypeQueryContext::with_root(env, MethodDescriptor { db, kind }, |context| {
+            context.visit(db, wrapped)
+        })
+    }
+
+    fn wrap_body(
+        db: &'db dyn Db,
+        context: &super::TypeQueryContext<'_, 'db, MethodDescriptor<'db>>,
+        wrapped: Type<'db>,
+        kind: MethodWrapperKind,
+    ) -> Type<'db> {
+        let env = context.environment();
         match wrapped {
             // Descriptor access can expose the ordinary function while retaining its declaration
             // metadata. Reapplying the declared wrapper restores its descriptor state.
@@ -142,8 +185,7 @@ impl<'db> MethodWrapper<'db> {
             {
                 wrapped
             }
-            Type::Union(union) => union.map(db, env, |element| Self::wrap(db, env, *element, kind)),
-            Type::TypeAlias(alias) => Self::wrap(db, env, alias.value_type(db, env), kind),
+            Type::Union(union) => union.map(db, env, |element| context.visit(db, *element)),
             _ => Type::KnownInstance(KnownInstanceType::MethodWrapper(Self::new(
                 db, wrapped, kind,
             ))),

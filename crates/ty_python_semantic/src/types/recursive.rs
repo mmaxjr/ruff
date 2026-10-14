@@ -76,14 +76,21 @@ use salsa::plumbing::AsId;
 use ty_python_core::definition::Definition;
 use ty_python_core::place_table;
 
+use super::call::bind::{ClassInfoCheck, ClassInfoValidator};
+use super::callable::{CallableTypes, CallableUpcastContext, UpcastPolicy};
 use super::constraints::{ConstraintSet, IteratorConstraintsExtension};
 use super::cyclic::{
     ActiveRecursionDetector, CycleDetector, CycleDetectorCache, CycleKind, HasIdentity,
     TypeTransformer,
 };
 use super::generics::{ApplySpecialization, Specialization};
-use super::relation::{TypeRelation, TypeRelationChecker};
+use super::generics::{InferSpecializationVisitor, SpecializationBuilder, SpecializationError};
+use super::infer::{BinaryOperand, IdentityUpcast, IdentityUpcastResult};
+use super::narrow::ClassInfoConstraint;
+use super::relation::{DisjointnessChecker, TypeRelation, TypeRelationChecker};
+use super::subscript::{SubscriptChecker, SubscriptError};
 use super::type_alias::AliasCycleSummary;
+use super::typevar::TypeVarDefaultSearch;
 use super::variance::{VarianceInferable, VarianceOrigin};
 use super::{
     ApplyTypeMappingVisitor, BoundTypeVarIdentity, CallableType, ClassLiteral, ClassType,
@@ -102,6 +109,202 @@ pub(super) struct TypeExpansionContext<'a, 'env, 'db, Mode = SemanticTraversal> 
     mode: PhantomData<Mode>,
 }
 
+/// Permission to compute a deferred body inside a guarded semantic operation.
+/// Only the operation implementations in this module can construct this token.
+pub(super) struct BodyAccess<'scope, 'db> {
+    env: &'scope TypeOperations<'db>,
+}
+
+impl<'db> BodyAccess<'_, 'db> {
+    pub(super) fn environment(&self) -> &TypeOperations<'db> {
+        self.env
+    }
+}
+
+/// A deferred body borrowed by the operation that opened it.
+///
+/// This view has no raw-type accessor. Its consuming operations keep the enclosing guard alive.
+pub(super) struct ExpandedType<'scope, 'db> {
+    ty: Type<'db>,
+    mapping: &'scope ApplyTypeMappingVisitor<'scope, 'db>,
+}
+
+impl<'db> ExpandedType<'_, 'db> {
+    pub(super) fn search_aliases(
+        self,
+        db: &'db dyn Db,
+        search: &super::visitor::AliasSearch<'_, 'db>,
+    ) -> bool {
+        search.search(db, self.ty)
+    }
+
+    pub(super) fn identity_projection(
+        self,
+        db: &'db dyn Db,
+        upcast: &IdentityUpcast<'_, 'db>,
+    ) -> IdentityUpcastResult<'db> {
+        upcast.check(db, self.ty)
+    }
+
+    pub(super) fn references_typevar_default(self, search: TypeVarDefaultSearch<'db, '_>) -> bool {
+        search.visit(self.ty)
+    }
+
+    pub(super) fn infer_binary(self, operand: BinaryOperand<'_, 'db, '_>) -> Option<Type<'db>> {
+        operand.infer(self.ty)
+    }
+
+    pub(super) fn validate_classinfo(
+        self,
+        db: &'db dyn Db,
+        checker: &ClassInfoValidator<'_, 'db>,
+        mode: ClassInfoCheck,
+    ) -> bool {
+        checker.validate_with_mode(db, self.ty, mode)
+    }
+
+    pub(super) fn infer_as_formal(
+        self,
+        builder: &mut SpecializationBuilder<'db, '_>,
+        actual: Type<'db>,
+        polarity: super::TypeVarVariance,
+        visitor: &InferSpecializationVisitor<'_, 'db>,
+    ) -> Result<(), SpecializationError<'db>> {
+        builder.infer_map_impl(self.ty, actual, polarity, visitor)
+    }
+
+    pub(super) fn infer_as_actual(
+        self,
+        builder: &mut SpecializationBuilder<'db, '_>,
+        formal: Type<'db>,
+        polarity: super::TypeVarVariance,
+        visitor: &InferSpecializationVisitor<'_, 'db>,
+    ) -> Result<(), SpecializationError<'db>> {
+        builder.infer_map_impl(formal, self.ty, polarity, visitor)
+    }
+
+    pub(super) fn classinfo_constraint(
+        self,
+        db: &'db dyn Db,
+        constraint: &ClassInfoConstraint<'_, 'db>,
+    ) -> Option<Type<'db>> {
+        constraint.generate(db, self.ty)
+    }
+
+    pub(super) fn map_type(
+        self,
+        db: &'db dyn Db,
+        mapping: &TypeMapping<'_, 'db>,
+        context: TypeContext<'db>,
+    ) -> Type<'db> {
+        self.ty
+            .apply_type_mapping_impl(db, mapping, context, self.mapping)
+    }
+
+    pub(super) fn map_alias_value(
+        self,
+        db: &'db dyn Db,
+        alias: super::TypeAliasType<'db>,
+        mapping: &TypeMapping<'_, 'db>,
+        context: TypeContext<'db>,
+    ) -> Type<'db> {
+        let mapped = self
+            .ty
+            .apply_type_mapping_impl(db, mapping, context, self.mapping);
+        if mapped == Type::TypeAlias(alias) || mapped == self.ty {
+            Type::TypeAlias(alias)
+        } else if let TypeMapping::Materialize(kind) = mapping
+            && alias.is_recursive(db)
+        {
+            Type::TypeAlias(alias.with_materialization_kind(db, Some(*kind)))
+        } else {
+            mapped
+        }
+    }
+
+    pub(super) fn collect_legacy_typevars(
+        self,
+        db: &'db dyn Db,
+        binding: Option<Definition<'db>>,
+        typevars: &mut crate::FxOrderSet<super::BoundTypeVarInstance<'db>>,
+        visitor: &super::FindLegacyTypeVarsVisitor<'_, 'db>,
+    ) {
+        self.ty
+            .find_legacy_typevars_impl(db, self.mapping.env, binding, typevars, visitor);
+    }
+
+    pub(super) fn alternatives(
+        self,
+        expander: &super::type_expansion::TypeExpander<'_, 'db>,
+    ) -> Option<Vec<Type<'db>>> {
+        expander.expand(self.ty)
+    }
+
+    pub(super) fn upcast_to_callable(
+        self,
+        db: &'db dyn Db,
+        policy: UpcastPolicy,
+        context: &CallableUpcastContext<'_, 'db>,
+        receiver: Option<Type<'db>>,
+    ) -> Option<CallableTypes<'db>> {
+        context.check(db, self.ty, policy, receiver)
+    }
+
+    pub(super) fn subscript_as_value(
+        self,
+        db: &'db dyn Db,
+        checker: &SubscriptChecker<'_, 'db>,
+        slice: Type<'db>,
+    ) -> Result<Type<'db>, SubscriptError<'db>> {
+        checker.check(db, self.ty, slice)
+    }
+
+    pub(super) fn subscript_as_index(
+        self,
+        db: &'db dyn Db,
+        checker: &SubscriptChecker<'_, 'db>,
+        value: Type<'db>,
+    ) -> Result<Type<'db>, SubscriptError<'db>> {
+        checker.check(db, value, self.ty)
+    }
+
+    pub(super) fn relate_as_source<'c>(
+        self,
+        db: &'db dyn Db,
+        checker: &TypeRelationChecker<'_, 'c, 'db>,
+        target: Type<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        checker.check_type_pair(db, self.ty, target)
+    }
+
+    pub(super) fn relate_as_target<'c>(
+        self,
+        db: &'db dyn Db,
+        checker: &TypeRelationChecker<'_, 'c, 'db>,
+        source: Type<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        checker.check_type_pair(db, source, self.ty)
+    }
+
+    pub(super) fn disjoint_as_source<'c>(
+        self,
+        db: &'db dyn Db,
+        checker: &DisjointnessChecker<'_, 'c, 'db>,
+        target: Type<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        checker.check_type_pair(db, self.ty, target)
+    }
+
+    pub(super) fn disjoint_as_target<'c>(
+        self,
+        db: &'db dyn Db,
+        checker: &DisjointnessChecker<'_, 'c, 'db>,
+        source: Type<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        checker.check_type_pair(db, source, self.ty)
+    }
+}
+
 impl<'a, 'env, 'db, Mode> TypeExpansionContext<'a, 'env, 'db, Mode> {
     fn new(mapping: &'a ApplyTypeMappingVisitor<'env, 'db>) -> Self {
         Self {
@@ -112,6 +315,20 @@ impl<'a, 'env, 'db, Mode> TypeExpansionContext<'a, 'env, 'db, Mode> {
 }
 
 impl<'db, Mode> TypeExpansionContext<'_, '_, 'db, Mode> {
+    pub(super) fn alias_body(
+        &self,
+        db: &'db dyn Db,
+        alias: super::TypeAliasType<'db>,
+    ) -> ExpandedType<'_, 'db> {
+        let access = BodyAccess {
+            env: self.mapping.env,
+        };
+        ExpandedType {
+            ty: alias.resolve_body(db, &access),
+            mapping: self.mapping,
+        }
+    }
+
     /// Guard signature substitution while the caller keeps its operation guard active.
     pub(super) fn expand_signature<R>(
         &self,
@@ -440,6 +657,103 @@ pub(crate) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTra
 
 struct TypeTraversalTag;
 
+struct LiteralArgument;
+
+impl<'db> TypeQuery<'db> for LiteralArgument {
+    type Output = Option<Type<'db>>;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> Self::Output {
+        None
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> Self::Output {
+        ty.is_literal_or_union_of_literals(db, context.environment())
+            .then_some(ty)
+    }
+}
+
+impl<'db> Type<'db> {
+    /// Resolve an alias used as a `Literal` argument, retaining only literal value types.
+    pub(super) fn literal_argument_type(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<Type<'db>> {
+        TypeQueryContext::with_root(env, LiteralArgument, |context| context.visit(db, self))
+    }
+}
+
+struct WalkDeferredBody;
+
+impl<'db, V: super::visitor::TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, StructuralTraversal>
+    for WalkDeferredBody
+{
+    type Output = ();
+
+    fn on_cycle(
+        &self,
+        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        visitor: &V,
+    ) {
+        visitor.notify_skipped_lazy_type_attributes();
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        ty: Type<'db>,
+        visitor: &V,
+    ) {
+        if matches!(ty, Type::Recursive(_)) {
+            visitor.notify_skipped_lazy_type_attributes();
+        } else {
+            visitor.visit_type(db, ty);
+        }
+    }
+
+    fn visit_recursive_body(
+        &self,
+        db: &'db dyn Db,
+        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        body: Type<'db>,
+        visitor: &V,
+    ) {
+        visitor.visit_type(db, body);
+    }
+}
+
+impl<'db> super::TypeAliasType<'db> {
+    /// Walk an alias within the visitor's operation, retaining the guard through the walk.
+    pub(super) fn walk_body<V: super::visitor::TypeVisitor<'db> + ?Sized>(
+        self,
+        db: &'db dyn Db,
+        visitor: &V,
+    ) {
+        StructuralTypeTraversal::with_root(
+            visitor.program_environment(),
+            WalkDeferredBody,
+            |traversal| {
+                traversal.visit_with(db, Type::TypeAlias(self), visitor);
+            },
+        );
+    }
+}
+
 /// Owns the recursion and materialization state for one type operation.
 ///
 /// A recursive body can expose a union that contains the same recursive type again. The guard
@@ -557,7 +871,8 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
                 Type::TypeAlias(alias) => {
                     self.operation
                         .visit_alias_like(db, self, ty, state, |state| {
-                            self.visit_with(db, alias.value_type(db, self.env), state)
+                            let access = BodyAccess { env: self.env };
+                            self.visit_with(db, alias.resolve_body(db, &access), state)
                         })
                 }
                 Type::Union(_) if Mode::NORMALIZE_UNIONS => {
@@ -739,7 +1054,10 @@ where
             }
             match ty {
                 Type::TypeAlias(alias) => query.visit_alias_like(db, self, ty, input, |input| {
-                    self.visit_with(db, alias.value_type(db, self.environment()), input)
+                    let access = BodyAccess {
+                        env: self.environment(),
+                    };
+                    self.visit_with(db, alias.resolve_body(db, &access), input)
                 }),
                 Type::Recursive(recursive) => {
                     query.visit_alias_like(db, self, ty, input, |input| {

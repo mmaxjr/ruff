@@ -3098,8 +3098,9 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 match subscript_ty {
                     // type aliases to literal types
                     Type::KnownInstance(KnownInstanceType::TypeAliasType(type_alias)) => {
-                        let value_ty = type_alias.value_type(db, env);
-                        if value_ty.is_literal_or_union_of_literals(db, env) {
+                        if let Some(value_ty) =
+                            Type::TypeAlias(type_alias).literal_argument_type(db, env)
+                        {
                             return Ok(value_ty);
                         }
                     }

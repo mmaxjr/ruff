@@ -11,8 +11,7 @@ use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance, ClassLiteral, ClassType,
     DynamicType, FindLegacyTypeVarsVisitor, IntersectionBuilder, KnownClass, MaterializationKind,
     MemberLookupPolicy, ProtocolInstanceType, SpecialFormType, Type, TypeContext, TypeMapping,
-    TypeQualifiers, TypeRecursionContext, TypeVarBoundOrConstraints, TypedDictType, UnionBuilder,
-    todo_type,
+    TypeQualifiers, TypeVarBoundOrConstraints, TypedDictType, UnionBuilder, todo_type,
 };
 use ty_python_core::definition::Definition;
 
@@ -358,16 +357,12 @@ impl<'db> SubclassOfType<'db> {
         Type::SubclassOf(self).to_meta_type(db, env)
     }
 
-    pub(super) fn to_meta_type_with_recursion(
+    pub(super) fn metaclass_upper_bound(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
-        context: &TypeRecursionContext<'db>,
     ) -> Type<'db> {
-        match self
-            .subclass_of
-            .with_transposed_type_var_with_recursion(db, env, context)
-        {
+        match self.subclass_of.with_transposed_type_var(db, env) {
             SubclassOfInner::Dynamic(dynamic) => {
                 SubclassOfType::from(db, env, SubclassOfInner::Dynamic(dynamic))
             }
@@ -378,7 +373,7 @@ impl<'db> SubclassOfType<'db> {
                 .inferred_metaclass(db, env)
                 .for_inheritance(db, env)
                 .to_instance_approximation(db, env)
-                .map(|instance| instance.to_meta_type_with_recursion(db, env, context))
+                .map(|instance| instance.to_meta_type(db, env))
                 .unwrap_or(SubclassOfType::subclass_of_unknown()),
             // Structural implementations of a protocol can have arbitrary metaclasses. The only
             // guaranteed upper bound is therefore `type`, not the protocol origin's metaclass.
@@ -392,11 +387,11 @@ impl<'db> SubclassOfType<'db> {
                     // `with_transposed_type_var` always adds a bound for unbounded TypeVars
                     None => unreachable!(),
                     Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
-                        bound.to_meta_type_with_recursion(db, env, context)
+                        bound.to_meta_type(db, env)
                     }
-                    Some(TypeVarBoundOrConstraints::Constraints(constraints)) => constraints
-                        .as_type(db, env)
-                        .to_meta_type_with_recursion(db, env, context),
+                    Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
+                        constraints.as_type(db, env).to_meta_type(db, env)
+                    }
                 }
             }
         }
@@ -630,15 +625,6 @@ impl<'db> SubclassOfInner<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
     ) -> Self {
-        self.with_transposed_type_var_with_recursion(db, env, env.context())
-    }
-
-    fn with_transposed_type_var_with_recursion(
-        self,
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-        context: &TypeRecursionContext<'db>,
-    ) -> Self {
         let Some(bound_typevar) = self.into_type_var() else {
             return self;
         };
@@ -655,14 +641,12 @@ impl<'db> SubclassOfInner<'db> {
                         .unwrap_or(SubclassOfType::subclass_of_unknown()),
                     ),
                     Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
-                        TypeVarBoundOrConstraints::UpperBound(
-                            bound.to_meta_type_with_recursion(db, env, context),
-                        )
+                        TypeVarBoundOrConstraints::UpperBound(bound.to_meta_type(db, env))
                     }
                     Some(TypeVarBoundOrConstraints::Constraints(constraints)) => {
-                        TypeVarBoundOrConstraints::Constraints(constraints.map(db, |constraint| {
-                            constraint.to_meta_type_with_recursion(db, env, context)
-                        }))
+                        TypeVarBoundOrConstraints::Constraints(
+                            constraints.map(db, |constraint| constraint.to_meta_type(db, env)),
+                        )
                     }
                 })
             });

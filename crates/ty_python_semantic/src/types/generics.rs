@@ -819,7 +819,7 @@ impl<'db> GenericContext<'db> {
                 self.active_aliases.visit(
                     &Type::TypeAlias(type_alias).to_type_identity(db),
                     || (),
-                    || self.visit_type(db, type_alias.value_type(db, self.env)),
+                    || type_alias.walk_body(db, self),
                 );
             }
 
@@ -2489,7 +2489,7 @@ type InferSpecializationCycles<'db> = CycleDetector<
     1,
 >;
 
-struct InferSpecializationVisitor<'env, 'db> {
+pub(super) struct InferSpecializationVisitor<'env, 'db> {
     cycles: InferSpecializationCycles<'db>,
     mapping: ApplyTypeMappingVisitor<'env, 'db>,
 }
@@ -4060,7 +4060,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         )
     }
 
-    fn infer_map_impl(
+    pub(super) fn infer_map_impl(
         &mut self,
         formal: Type<'db>,
         actual: Type<'db>,
@@ -4163,12 +4163,9 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             // Expand type aliases in the formal type.
             // This is necessary for solving generics like `def head[T](my_list: MyList[T]) -> T`.
             (Type::TypeAlias(alias), _) => {
-                return self.infer_map_impl(
-                    alias.value_type(db, self.env),
-                    actual,
-                    polarity,
-                    visitor,
-                );
+                return expansion
+                    .alias_body(db, alias)
+                    .infer_as_formal(self, actual, polarity, visitor);
             }
             (Type::Recursive(recursive), _) => {
                 return self.infer_map_impl(
@@ -4905,12 +4902,9 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             // when it can be matched directly against a type variable in the formal type,
             // e.g., `reveal_type(alias)` should reveal the type alias, not its value type.
             (formal, Type::TypeAlias(alias)) => {
-                return self.infer_map_impl(
-                    formal,
-                    alias.value_type(db, self.env),
-                    polarity,
-                    visitor,
-                );
+                return expansion
+                    .alias_body(db, alias)
+                    .infer_as_actual(self, formal, polarity, visitor);
             }
             (formal, Type::Recursive(recursive)) => {
                 return self.infer_map_impl(

@@ -5,7 +5,8 @@
 //! methods.
 
 use crate::types::TypeOperations;
-use crate::types::recursive::TypeInspector;
+use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal, TypeInspector};
+use crate::types::{CycleKind, TypeWalk};
 use ty_python_core::definition::Definition;
 
 use crate::{AnalysisSettings, Db, place::PlaceAndQualifiers};
@@ -1123,60 +1124,82 @@ pub(super) fn is_same_enum_domain<'db>(
     ty: Type<'db>,
     right: EnumLiteralType<'db>,
 ) -> bool {
-    // A proof made while another alias is active can still be disproved by a later union arm, so
-    // completed visits must not be cached.
-    #[derive(Default)]
-    struct EnumDomainVisitor<'db> {
-        active_specializations: ActiveRecursionDetector<Type<'db>>,
-        active_definitions: ActiveRecursionDetector<Definition<'db>>,
+    StructuralTypeTraversal::with_root(
+        env,
+        EnumDomain {
+            right,
+            active_definitions: ActiveRecursionDetector::default(),
+        },
+        |traversal| traversal.visit(db, ty),
+    )
+}
+
+// A proof made under an active alias may be disproved by another union arm. This is a walk,
+// so completed answers cannot outlive the recursive assumptions under which they were made.
+struct EnumDomain<'db> {
+    right: EnumLiteralType<'db>,
+    active_definitions: ActiveRecursionDetector<Definition<'db>>,
+}
+
+impl<'db> TypeWalk<'db, (), StructuralTraversal> for EnumDomain<'db> {
+    type Output = bool;
+
+    fn on_cycle(
+        &self,
+        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _ty: Type<'db>,
+        kind: CycleKind,
+        (): (),
+    ) -> bool {
+        matches!(kind, CycleKind::Exact)
     }
 
-    fn visit<'db>(
+    fn visit_alias_like(
+        &self,
         db: &'db dyn Db,
-        env: &TypeOperations<'db>,
+        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
         ty: Type<'db>,
-        right: EnumLiteralType<'db>,
-        visitor: &EnumDomainVisitor<'db>,
+        (): (),
+        visit_body: impl FnOnce(()) -> bool,
     ) -> bool {
-        match ty {
-            // The same specialization preserves the domain; different arguments can introduce
-            // values outside it even when the alias definition is the same.
-            Type::TypeAlias(alias) => visitor.active_specializations.visit(
-                &ty,
-                || true,
-                || {
-                    visitor.active_definitions.visit(
-                        &alias.definition(db),
-                        || false,
-                        || visit(db, env, alias.value_type(db, env), right, visitor),
-                    )
-                },
-            ),
-            Type::LiteralValue(literal) => matches!(
-                literal.kind(),
-                LiteralValueTypeKind::Enum(left)
-                    if left.enum_class(db) == right.enum_class(db)
-            ),
-            Type::Union(union) => union
-                .elements(db)
-                .iter()
-                .all(|&element| visit(db, env, element, right, visitor)),
-            Type::NewTypeInstance(newtype) => {
-                visit(db, env, newtype.concrete_base_type(db), right, visitor)
-            }
-            Type::NominalInstance(instance) => {
-                instance.class_literal(db, env) == right.enum_class(db)
-            }
-            Type::EnumComplement(complement) => complement.enum_class(db) == right.enum_class(db),
-            Type::Intersection(intersection) => intersection
-                .positive(db)
-                .iter()
-                .any(|&element| visit(db, env, element, right, visitor)),
-            _ => false,
+        if let Type::TypeAlias(alias) = ty {
+            self.active_definitions
+                .visit(&alias.definition(db), || false, || visit_body(()))
+        } else {
+            visit_body(())
         }
     }
 
-    visit(db, env, ty, right, &EnumDomainVisitor::default())
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> bool {
+        let env = traversal.environment();
+        match ty {
+            Type::LiteralValue(literal) => {
+                matches!(literal.kind(), LiteralValueTypeKind::Enum(left) if left.enum_class(db) == self.right.enum_class(db))
+            }
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .all(|element| traversal.visit(db, *element)),
+            Type::NewTypeInstance(newtype) => traversal.visit(db, newtype.concrete_base_type(db)),
+            Type::NominalInstance(instance) => {
+                instance.class_literal(db, env) == self.right.enum_class(db)
+            }
+            Type::EnumComplement(complement) => {
+                complement.enum_class(db) == self.right.enum_class(db)
+            }
+            Type::Intersection(intersection) => intersection
+                .positive(db)
+                .iter()
+                .any(|element| traversal.visit(db, *element)),
+            _ => false,
+        }
+    }
 }
 
 /// Evaluate each alternative of the union being constrained and combine their branch results.

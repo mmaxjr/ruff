@@ -34,8 +34,9 @@ impl<'a, 'c, 'db> GuardedRelation<'a, 'c, 'db> {
         source: TypeAliasType<'db>,
         target: Type<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        self.checker
-            .check_type_pair(db, source.value_type(db, self.checker.env), target)
+        self.expansion
+            .alias_body(db, source)
+            .relate_as_source(db, self.checker, target)
     }
 
     pub(super) fn compare_target_alias(
@@ -44,8 +45,9 @@ impl<'a, 'c, 'db> GuardedRelation<'a, 'c, 'db> {
         source: Type<'db>,
         target: TypeAliasType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        self.checker
-            .check_type_pair(db, source, target.value_type(db, self.checker.env))
+        self.expansion
+            .alias_body(db, target)
+            .relate_as_target(db, self.checker, source)
     }
 
     pub(super) fn compare_source_recursive(
@@ -125,8 +127,9 @@ impl<'a, 'c, 'db> GuardedDisjointness<'a, 'c, 'db> {
         source: TypeAliasType<'db>,
         target: Type<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        self.checker
-            .check_type_pair(db, source.value_type(db, self.checker.env), target)
+        self.expansion
+            .alias_body(db, source)
+            .disjoint_as_source(db, self.checker, target)
     }
 
     pub(super) fn compare_target_alias(
@@ -135,8 +138,9 @@ impl<'a, 'c, 'db> GuardedDisjointness<'a, 'c, 'db> {
         source: Type<'db>,
         target: TypeAliasType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        self.checker
-            .check_type_pair(db, source, target.value_type(db, self.checker.env))
+        self.expansion
+            .alias_body(db, target)
+            .disjoint_as_target(db, self.checker, source)
     }
 
     pub(super) fn compare_source_recursive(

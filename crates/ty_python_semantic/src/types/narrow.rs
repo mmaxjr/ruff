@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, btree_map::Entry as BTreeEntry, hash_map::Entry};
@@ -542,7 +543,7 @@ impl ClassInfoConstraintFunction {
 }
 
 /// Collect the classes reachable through one class-info argument.
-struct ClassInfoConstraint<'a, 'db> {
+pub(super) struct ClassInfoConstraint<'a, 'db> {
     mapping: ApplyTypeMappingVisitor<'a, 'db>,
     function: ClassInfoConstraintFunction,
     env: &'a TypeOperations<'db>,
@@ -552,7 +553,7 @@ struct ClassInfoConstraint<'a, 'db> {
 }
 
 impl<'db> ClassInfoConstraint<'_, 'db> {
-    fn generate(&self, db: &'db dyn Db, classinfo: Type<'db>) -> Option<Type<'db>> {
+    pub(super) fn generate(&self, db: &'db dyn Db, classinfo: Type<'db>) -> Option<Type<'db>> {
         // Revisiting a finite tuple tree adds no classes. Growing arguments can add
         // new classes at each depth, so no finite narrowing constraint covers them.
         self.visitor
@@ -601,7 +602,9 @@ impl<'db> ClassInfoConstraint<'_, 'db> {
             Type::RecursiveVar(_) => {
                 unreachable!("semantic operation on an unbound recursive variable")
             }
-            Type::TypeAlias(alias) => self.generate(db, alias.value_type(db, env)),
+            Type::TypeAlias(alias) => expansion
+                .alias_body(db, alias)
+                .classinfo_constraint(db, self),
             Type::Recursive(recursive) => self.generate(
                 db,
                 expansion.expand_recursive(db, recursive).into_unfolded()?,
@@ -2500,6 +2503,24 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
         class_ty: Type<'db>,
         subject_ty: Type<'db>,
     ) -> Type<'db> {
+        StructuralTypeTraversal::with_root(
+            &self.env,
+            ClassPatternSubject {
+                analyzer: self,
+                class,
+                class_ty,
+            },
+            |traversal| traversal.visit(self.db, subject_ty),
+        )
+    }
+
+    fn filter_class_pattern_subject_type_inner(
+        &self,
+        class: Option<ClassLiteral<'db>>,
+        class_ty: Type<'db>,
+        subject_ty: Type<'db>,
+        traversal: &StructuralTypeTraversal<'_, 'db, ClassPatternSubject<'_, 'db, 'pattern>>,
+    ) -> Type<'db> {
         let db = self.db;
         let intersect = |subject_ty| {
             if self.use_generic_filtering() {
@@ -2509,21 +2530,12 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
             }
         };
         match subject_ty {
-            Type::TypeAlias(alias) => self.filter_class_pattern_subject_type(
-                class,
-                class_ty,
-                alias.value_type(db, &self.env),
-            ),
-            Type::Union(union) => union.map(db, &self.env, |element| {
-                self.filter_class_pattern_subject_type(class, class_ty, *element)
-            }),
+            Type::Union(union) => union.map(db, &self.env, |element| traversal.visit(db, *element)),
             Type::Intersection(intersection) if intersection.positive(db).is_empty() => {
                 intersect(subject_ty)
             }
             Type::Intersection(intersection) => {
-                intersection.map_positive(db, &self.env, |positive| {
-                    self.filter_class_pattern_subject_type(class, class_ty, *positive)
-                })
+                intersection.map_positive(db, &self.env, |positive| traversal.visit(db, *positive))
             }
             Type::NominalInstance(instance) => {
                 let Some(class) = class else {
@@ -4205,25 +4217,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
             env: &TypeOperations<'db>,
             ty: Type<'db>,
         ) -> Option<ClassLiteral<'db>> {
-            match ty {
-                Type::ClassLiteral(class) => Some(class),
-                Type::SubclassOf(subclass_of) => {
-                    match subclass_of.subclass_of().with_transposed_type_var(db, env) {
-                        SubclassOfInner::Class(ClassType::NonGeneric(class)) => Some(class),
-                        SubclassOfInner::Class(ClassType::Generic(_))
-                        | SubclassOfInner::Dynamic(_)
-                        | SubclassOfInner::Protocol(_) => None,
-                        SubclassOfInner::TypeVar(tvar) => {
-                            find_underlying_class(db, env, tvar.typevar(db).upper_bound(db, env)?)
-                        }
-                    }
-                }
-                Type::TypeVar(tvar) => {
-                    find_underlying_class(db, env, tvar.typevar(db).upper_bound(db, env)?)
-                }
-                Type::TypeAlias(alias) => find_underlying_class(db, env, alias.value_type(db, env)),
-                _ => None,
-            }
+            TypeQueryContext::with_root(env, RuntimeClass, |context| context.visit(db, ty))
         }
 
         /// Return the expression being tested by an exact runtime-class check.
@@ -5931,5 +5925,80 @@ impl<'db> NarrowingEvaluatorExtension<'db> for NarrowingEvaluator<'_, 'db> {
         place: ScopedPlaceId,
     ) -> Type<'db> {
         narrow_type_by_constraint(db, env, self, base_type, place)
+    }
+}
+
+struct ClassPatternSubject<'a, 'db, 'pattern> {
+    analyzer: &'a PatternSuccessAnalyzer<'db, 'pattern>,
+    class: Option<ClassLiteral<'db>>,
+    class_ty: Type<'db>,
+}
+
+impl<'db> TypeWalk<'db, (), StructuralTraversal> for ClassPatternSubject<'_, 'db, '_> {
+    type Output = Type<'db>;
+
+    fn on_cycle(
+        &self,
+        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> Type<'db> {
+        ty
+    }
+
+    fn visit(
+        &self,
+        _db: &'db dyn Db,
+        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> Type<'db> {
+        self.analyzer.filter_class_pattern_subject_type_inner(
+            self.class,
+            self.class_ty,
+            ty,
+            traversal,
+        )
+    }
+}
+
+struct RuntimeClass;
+
+impl<'db> TypeQuery<'db> for RuntimeClass {
+    type Output = Option<ClassLiteral<'db>>;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> Self::Output {
+        None
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> Self::Output {
+        let env = context.environment();
+        match ty {
+            Type::ClassLiteral(class) => Some(class),
+            Type::SubclassOf(subclass) => {
+                match subclass.subclass_of().with_transposed_type_var(db, env) {
+                    SubclassOfInner::Class(ClassType::NonGeneric(class)) => Some(class),
+                    SubclassOfInner::TypeVar(typevar) => {
+                        context.visit(db, typevar.typevar(db).upper_bound(db, env)?)
+                    }
+                    _ => None,
+                }
+            }
+            Type::TypeVar(typevar) => context.visit(db, typevar.typevar(db).upper_bound(db, env)?),
+            _ => None,
+        }
     }
 }

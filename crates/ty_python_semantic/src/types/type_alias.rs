@@ -432,7 +432,7 @@ pub(super) fn walk_type_alias_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
         visitor.notify_skipped_lazy_type_attributes();
         return;
     }
-    visitor.visit_type(db, type_alias.value_type(db, visitor.program_environment()));
+    type_alias.walk_body(db, visitor);
 }
 
 #[salsa::tracked]
@@ -481,7 +481,12 @@ impl<'db> TypeAliasType<'db> {
 
     /// Resolve the alias body in the current operation. Only the unspecialized source body is
     /// shared across operations; specialization and materialization can depend on active guards.
-    pub(crate) fn value_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
+    pub(super) fn resolve_body(
+        self,
+        db: &'db dyn Db,
+        access: &super::recursive::BodyAccess<'_, 'db>,
+    ) -> Type<'db> {
+        let env = access.environment();
         let env = env.in_environment(ProgramEnvironment::from_definition(self.definition(db)));
         match self.materialization_kind(db) {
             None => self.specialized_value_type(db, &env),
@@ -551,7 +556,7 @@ impl<'db> TypeAliasType<'db> {
         }
     }
 
-    fn with_materialization_kind(
+    pub(super) fn with_materialization_kind(
         self,
         db: &'db dyn Db,
         materialization_kind: Option<MaterializationKind>,
@@ -616,9 +621,13 @@ impl<'db> TypeAliasType<'db> {
                 Type::TypeAlias(self.map_stored_specialization(db, type_mapping, visitor))
             }
             TypeMapping::Materialize(_) if self.materialization_kind(db).is_some() => ty,
-            TypeMapping::EagerExpansion if self.materialization_kind(db).is_some() => self
-                .value_type(db, visitor.env)
-                .expand_eagerly(db, visitor.env),
+            TypeMapping::EagerExpansion if self.materialization_kind(db).is_some() => visitor
+                .transformer(type_mapping)
+                .visit_type_with_expansion(db, ty, visitor, |expansion| {
+                    expansion
+                        .alias_body(db, self)
+                        .map_type(db, type_mapping, tcx)
+                }),
             // For EagerExpansion, expand the raw value type. This path relies on Salsa's cycle
             // detection rather than the visitor's cycle detection, because the visitor tracks
             // Type values and `RecursiveList` is different from `RecursiveList[T]`.
@@ -652,27 +661,16 @@ impl<'db> TypeAliasType<'db> {
                 // IMPORTANT: All processing must happen inside a single visitor.visit() call so that if we encounter
                 // this same TypeAlias again (e.g., in `type RecursiveT = int | tuple[RecursiveT, ...]`), the visitor
                 // will detect the cycle and return the fallback value.
-                let mapped = visitor.visit(db, ty, type_mapping, || {
-                    self.value_type(db, visitor.env).apply_type_mapping_impl(
-                        db,
-                        type_mapping,
-                        tcx,
-                        visitor,
-                    )
-                });
-
-                // If the type mapping does not result in any change to this type alias, keep the
-                // alias node instead of eagerly expanding it. A recursive backedge also returns
-                // the alias itself, and fully static aliases must retain their original identity.
-                if mapped == ty || self.value_type(db, visitor.env) == mapped {
-                    ty
-                } else if let TypeMapping::Materialize(materialization_kind) = type_mapping
-                    && self.is_recursive(db)
-                {
-                    Type::TypeAlias(self.with_materialization_kind(db, Some(*materialization_kind)))
-                } else {
-                    mapped
-                }
+                visitor.transformer(type_mapping).visit_type_with_expansion(
+                    db,
+                    ty,
+                    visitor,
+                    |expansion| {
+                        expansion
+                            .alias_body(db, self)
+                            .map_alias_value(db, self, type_mapping, tcx)
+                    },
+                )
             }
         }
     }
@@ -762,7 +760,7 @@ impl<'db> TypeAliasType<'db> {
             ProgramEnvironment::from_definition(self.definition(db)),
         );
         let Some(generic_context) = self.generic_context(db) else {
-            return self.value_type(db, &env).variance_of(db, &env, typevar);
+            return self.raw_value_type(db).variance_of(db, &env, typevar);
         };
 
         // Applying specialization here can re-enter variance inference for the same alias.

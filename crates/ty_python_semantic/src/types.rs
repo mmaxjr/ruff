@@ -708,7 +708,7 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
     }
 
     fn project_meta_type(&self, db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
-        ty.to_meta_type_with_recursion(db, self.env, self.recursion_context())
+        ty.to_meta_type(db, self.env)
     }
 
     fn materialization_equivalence(&self) -> &MaterializationEquivalenceVisitor<'db> {
@@ -8831,16 +8831,7 @@ impl<'db> Type<'db> {
     /// See `Self::dunder_class` for more details.
     #[must_use]
     fn to_meta_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
-        self.to_meta_type_with_recursion(db, env, env.context())
-    }
-
-    fn to_meta_type_with_recursion(
-        self,
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-        context: &TypeRecursionContext<'db>,
-    ) -> Type<'db> {
-        TypeQueryContext::with_root(env, ProjectMetaType { db, env, context }, |root| {
+        TypeQueryContext::with_root(env, ProjectMetaType { db, env }, |root| {
             root.visit(db, self)
         })
     }
@@ -9682,10 +9673,9 @@ impl<'db> Type<'db> {
             }
 
             Type::TypeAlias(alias) => {
-                visitor.visit(db, self, || {
-                    alias.value_type(db, env).find_legacy_typevars_impl(
+                visitor.visit_with_expansion(db, self, |expansion| {
+                    expansion.alias_body(db, alias).collect_legacy_typevars(
                         db,
-                        env,
                         binding_context,
                         typevars,
                         visitor,
@@ -10215,7 +10205,6 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         target: Type<'db>,
         negated_cache: &mut Option<Type<'db>>,
-        context: &TypeRecursionContext<'db>,
     ) -> bool {
         if negated_cache.is_none()
             && let (Type::NominalInstance(source), Type::NominalInstance(target)) = (self, target)
@@ -10227,11 +10216,11 @@ impl<'db> Type<'db> {
 
         match self {
             Type::Intersection(intersection) => {
-                intersection.negation_is_subtype_of(db, env, target, context)
+                intersection.negation_is_subtype_of(db, env, target)
             }
             _ => {
                 let negated = negated_cache.get_or_insert_with(|| self.negate(db, env));
-                negated.is_subtype_of_with_recursion(db, env, target, context)
+                negated.is_subtype_of_for_simplification(db, env, target)
             }
         }
     }
@@ -10698,7 +10687,6 @@ impl<'db> CollectBindings<'_, 'db> {
 struct ProjectMetaType<'a, 'db> {
     db: &'db dyn Db,
     env: &'a TypeOperations<'db>,
-    context: &'a TypeRecursionContext<'db>,
 }
 
 impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
@@ -10730,7 +10718,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
             return project();
         };
         let env = self.env;
-        let context = self.context;
+        let context = env.context();
         // Direct recursive references add no new classes; the traversal handles those cycles.
         // Re-entering through another projection can introduce metaclasses, so retain the guards
         // shared with specialization and materialization as well.
@@ -10762,7 +10750,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
         _state: (),
     ) -> Type<'db> {
         let env = traversal.environment();
-        let context = self.context;
+        let context = env.context();
         match ty {
             Type::Recursive(_) | Type::TypeAlias(_) => ty,
             Type::RecursiveVar(_) => {
@@ -10817,12 +10805,10 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
                 context.meta_type().typevars.visit(
                     &(env.program(db), typevar.identity(db)),
                     || KnownClass::Type.to_instance(db, env),
-                    || subclass_of_ty.to_meta_type_with_recursion(db, env, context),
+                    || subclass_of_ty.metaclass_upper_bound(db, env),
                 )
             }
-            Type::SubclassOf(subclass_of_ty) => {
-                subclass_of_ty.to_meta_type_with_recursion(db, env, context)
-            }
+            Type::SubclassOf(subclass_of_ty) => subclass_of_ty.metaclass_upper_bound(db, env),
             Type::Dynamic(dynamic) => {
                 SubclassOfType::from(db, env, SubclassOfInner::Dynamic(dynamic))
             }
@@ -11295,16 +11281,15 @@ impl<'db> IntersectionType<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
         target: Type<'db>,
-        context: &TypeRecursionContext<'db>,
     ) -> bool {
         self.positive(db).iter().all(|positive| {
             positive
                 .negate(db, env)
-                .is_subtype_of_with_recursion(db, env, target, context)
+                .is_subtype_of_for_simplification(db, env, target)
         }) && self
             .negative(db)
             .iter()
-            .all(|negative| negative.is_subtype_of_with_recursion(db, env, target, context))
+            .all(|negative| negative.is_subtype_of_for_simplification(db, env, target))
     }
 
     // Calls the dunder on each element separately before combining the results.

@@ -1,5 +1,4 @@
 use crate::Db;
-use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::{
     CallArguments, DataclassParams, KnownClass, KnownInstanceType, SpecialFormType,
@@ -12,6 +11,7 @@ use crate::types::{
     },
     special_form::TypeQualifier,
 };
+use crate::types::{CycleKind, TypeOperations, TypeQuery, TypeQueryContext};
 use ruff_python_ast::{self as ast, helpers::any_over_expr};
 use ty_module_resolver::{ImportingFile, KnownModule, file_to_module};
 use ty_python_core::{definition::Definition, scope::NodeWithScopeRef};
@@ -548,37 +548,14 @@ fn class_decorator_preserves_class_binding<'db>(
     original_class: Type<'db>,
     decorated_class: Type<'db>,
 ) -> bool {
-    let Type::ClassLiteral(original_literal) = original_class else {
-        return false;
-    };
-
-    match decorated_class {
-        Type::ClassLiteral(decorated_literal) => {
-            let decorated_definition = decorated_literal.definition(db);
-            decorated_literal == original_literal
-                || decorated_definition.is_some()
-                    && decorated_definition == original_literal.definition(db)
-        }
-        Type::SubclassOf(subclass_of) => subclass_of
-            .subclass_of()
-            .into_class(db, env)
-            .is_some_and(|class| class == original_literal.default_specialization(db)),
-        // A provisional decorator result does not establish that the class is preserved.
-        // Keep its cycle marker so recursive return types can be normalized.
-        Type::Divergent(_) => false,
-        Type::Union(union) => union.elements(db).iter().all(|element| {
-            class_decorator_preserves_class_binding(db, env, original_class, *element)
-        }),
-        Type::TypeAlias(alias) => class_decorator_preserves_class_binding(
-            db,
-            env,
+    TypeQueryContext::with_root(
+        env,
+        ClassBinding {
             original_class,
-            alias.value_type(db, env),
-        ),
-        _ => SubclassOfType::try_from_type(db, env, original_class).is_some_and(
-            |original_meta_type| decorated_class.is_equivalent_to(db, env, original_meta_type),
-        ),
-    }
+            allow_intersections: false,
+        },
+        |context| context.visit(db, decorated_class),
+    )
 }
 
 /// Return true if a type still contains the original class object, even if it also carries extra
@@ -589,19 +566,68 @@ fn type_retains_original_class<'db>(
     original_class: Type<'db>,
     decorated_class: Type<'db>,
 ) -> bool {
-    match decorated_class {
-        Type::Intersection(intersection) => intersection
-            .positive(db)
-            .iter()
-            .any(|element| type_retains_original_class(db, env, original_class, *element)),
-        Type::Union(union) => union
-            .elements(db)
-            .iter()
-            .all(|element| type_retains_original_class(db, env, original_class, *element)),
-        Type::TypeAlias(alias) => {
-            type_retains_original_class(db, env, original_class, alias.value_type(db, env))
+    TypeQueryContext::with_root(
+        env,
+        ClassBinding {
+            original_class,
+            allow_intersections: true,
+        },
+        |context| context.visit(db, decorated_class),
+    )
+}
+
+struct ClassBinding<'db> {
+    original_class: Type<'db>,
+    allow_intersections: bool,
+}
+
+impl<'db> TypeQuery<'db> for ClassBinding<'db> {
+    type Output = bool;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> bool {
+        false
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> bool {
+        let env = context.environment();
+        let Type::ClassLiteral(original) = self.original_class else {
+            return false;
+        };
+        match ty {
+            Type::ClassLiteral(decorated) => {
+                let definition = decorated.definition(db);
+                decorated == original
+                    || definition.is_some() && definition == original.definition(db)
+            }
+            Type::SubclassOf(subclass) => subclass
+                .subclass_of()
+                .into_class(db, env)
+                .is_some_and(|class| class == original.default_specialization(db)),
+            // A provisional decorator result cannot establish that the class is preserved.
+            Type::Divergent(_) => false,
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .all(|element| context.visit(db, *element)),
+            Type::Intersection(intersection) if self.allow_intersections => intersection
+                .positive(db)
+                .iter()
+                .any(|element| context.visit(db, *element)),
+            _ => SubclassOfType::try_from_type(db, env, self.original_class)
+                .is_some_and(|original_meta_type| ty.is_equivalent_to(db, env, original_meta_type)),
         }
-        _ => class_decorator_preserves_class_binding(db, env, original_class, decorated_class),
     }
 }
 

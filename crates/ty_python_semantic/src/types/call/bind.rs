@@ -10508,7 +10508,7 @@ fn all_arguments_range(node: AnyNodeRef) -> TextRange {
 }
 
 /// Validate class-info values, including typing special forms in nested tuples.
-struct ClassInfoValidator<'a, 'db> {
+pub(in crate::types) struct ClassInfoValidator<'a, 'db> {
     mapping: ApplyTypeMappingVisitor<'a, 'db>,
     env: &'a TypeOperations<'db>,
     expected: Type<'db>,
@@ -10516,7 +10516,25 @@ struct ClassInfoValidator<'a, 'db> {
     constructors: CycleDetector<'db, KnownFunction, Type<'db>, bool, 1>,
 }
 
+#[derive(Clone, Copy)]
+pub(in crate::types) enum ClassInfoCheck {
+    Value,
+    Constructor,
+}
+
 impl<'db> ClassInfoValidator<'_, 'db> {
+    pub(in crate::types) fn validate_with_mode(
+        &self,
+        db: &'db dyn Db,
+        ty: Type<'db>,
+        mode: ClassInfoCheck,
+    ) -> bool {
+        match mode {
+            ClassInfoCheck::Value => self.validate(db, ty),
+            ClassInfoCheck::Constructor => self.validate_constructor(db, ty),
+        }
+    }
+
     fn validate(&self, db: &'db dyn Db, ty: Type<'db>) -> bool {
         self.visitor
             .try_visit_with_expansion(
@@ -10524,7 +10542,7 @@ impl<'db> ClassInfoValidator<'_, 'db> {
                 ty,
                 &self.mapping,
                 |_| true,
-                |expansion| self.validate_impl(db, ty, expansion, |ty| self.validate(db, ty)),
+                |expansion| self.validate_impl(db, ty, expansion, ClassInfoCheck::Value),
             )
             .unwrap_or_else(|(ty, _)| self.validate_constructor(db, ty))
     }
@@ -10548,7 +10566,7 @@ impl<'db> ClassInfoValidator<'_, 'db> {
             };
         self.constructors
             .visit_with_expansion(db, ty, &self.mapping, |expansion| {
-                self.validate_impl(db, ty, expansion, |ty| self.validate_constructor(db, ty))
+                self.validate_impl(db, ty, expansion, ClassInfoCheck::Constructor)
             })
     }
 
@@ -10557,12 +10575,15 @@ impl<'db> ClassInfoValidator<'_, 'db> {
         db: &'db dyn Db,
         ty: Type<'db>,
         expansion: &crate::types::recursive::TypeExpansionContext<'_, '_, 'db>,
-        mut validate: impl FnMut(Type<'db>) -> bool,
+        mode: ClassInfoCheck,
     ) -> bool {
+        let validate = |ty| self.validate_with_mode(db, ty, mode);
         match ty {
             Type::SpecialForm(special) if special.is_valid_isinstance_target() => true,
             Type::Union(union) => union.elements(db).iter().copied().all(validate),
-            Type::TypeAlias(alias) => validate(alias.value_type(db, self.env)),
+            Type::TypeAlias(alias) => expansion
+                .alias_body(db, alias)
+                .validate_classinfo(db, self, mode),
             Type::Recursive(recursive) => expansion
                 .expand_recursive(db, recursive)
                 .is_unfolded_and(validate),

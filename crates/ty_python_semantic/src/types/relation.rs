@@ -24,8 +24,7 @@ use crate::types::{
     ApplyTypeMappingVisitor, CallableType, ClassBase, ClassLiteral, ClassType, CycleDetector,
     IntersectionType, KnownBoundMethodType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
     MemberLookupPolicy, NominalInstanceType, PropertyInstanceType, ProtocolInstanceType,
-    SubclassOfInner, SubclassOfType, TypeRecursionContext, TypeVarBoundOrConstraints, UnionType,
-    UpcastPolicy,
+    SubclassOfInner, SubclassOfType, TypeVarBoundOrConstraints, UnionType, UpcastPolicy,
 };
 use crate::{
     Db,
@@ -388,14 +387,13 @@ impl<'db> Type<'db> {
     }
 
     /// Continue a normalization check without losing its active signature expansions.
-    pub(super) fn is_subtype_of_with_recursion(
+    pub(super) fn is_subtype_of_for_simplification(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
         target: Type<'db>,
-        context: &TypeRecursionContext<'db>,
     ) -> bool {
-        self.is_related_to_with_recursion(db, env, target, TypeRelation::Subtyping, context)
+        self.is_related_for_simplification(db, env, target, TypeRelation::Subtyping)
     }
 
     pub(super) fn when_constraint_set_subtype_of<'c>(
@@ -695,41 +693,29 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
-        self.is_redundant_with_recursion(db, env, other, env.context())
-    }
-
-    /// Preserve active comparisons across normalization and signature expansion. Results from
-    /// this context remain local to the operation instead of entering the global query cache.
-    pub(super) fn is_redundant_with_recursion(
-        self,
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-        other: Type<'db>,
-        context: &TypeRecursionContext<'db>,
-    ) -> bool {
+        let context = env.context();
         if self == other {
             return true;
         }
         context.check_redundancy(db, env, self, other, || {
-            self.is_related_to_with_recursion(
+            self.is_related_for_simplification(
                 db,
                 env,
                 other,
                 TypeRelation::Redundancy { pure: false },
-                context,
             )
         })
     }
 
     /// Compare types locally when the result depends on an enclosing normalization operation.
-    fn is_related_to_with_recursion(
+    fn is_related_for_simplification(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
         other: Type<'db>,
         relation: TypeRelation,
-        context: &TypeRecursionContext<'db>,
     ) -> bool {
+        let context = env.context();
         context.compare_for_simplification(|| {
             let constraints = ConstraintSetBuilder::new();
             let relation_visitor = HasRelationToVisitor::default(&constraints);
@@ -1000,13 +986,13 @@ impl<'db> Type<'db> {
     }
 
     /// Preserve the normalization context when proving that an intersection is empty.
-    pub(super) fn is_disjoint_from_with_recursion(
+    pub(super) fn is_disjoint_from_for_simplification(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
         other: Type<'db>,
-        context: &TypeRecursionContext<'db>,
     ) -> bool {
+        let context = env.context();
         context.compare_for_simplification(|| {
             let constraints = ConstraintSetBuilder::new();
             let relation_visitor = HasRelationToVisitor::default(&constraints);

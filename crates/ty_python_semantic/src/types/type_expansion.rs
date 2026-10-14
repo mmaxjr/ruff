@@ -47,7 +47,7 @@ pub(crate) fn expand_elements<'db>(
 
 /// Expand recursive aliases once per active specialization. A back-edge remains a tuple
 /// element so argument expansion does not enumerate an infinite recursive unfolding.
-struct TypeExpander<'a, 'db> {
+pub(super) struct TypeExpander<'a, 'db> {
     db: &'db dyn Db,
     env: &'a TypeOperations<'db>,
     mapping: ApplyTypeMappingVisitor<'a, 'db>,
@@ -77,7 +77,7 @@ impl<'db> TypeExpander<'_, 'db> {
         Some(per_element.into_iter().multi_cartesian_product().collect())
     }
 
-    fn expand(&self, ty: Type<'db>) -> Option<Vec<Type<'db>>> {
+    pub(super) fn expand(&self, ty: Type<'db>) -> Option<Vec<Type<'db>>> {
         let db = self.db;
         let env = self.env;
         match ty {
@@ -139,9 +139,12 @@ impl<'db> TypeExpander<'_, 'db> {
                     .collect(),
             ),
             // For type aliases, expand the underlying value type.
-            Type::TypeAlias(alias) => self
-                .visitor
-                .visit(db, env, ty, || self.expand(alias.value_type(db, env))),
+            Type::TypeAlias(alias) => {
+                self.visitor
+                    .visit_with_expansion(db, ty, &self.mapping, |expansion| {
+                        expansion.alias_body(db, alias).alternatives(self)
+                    })
+            }
             Type::Recursive(recursive) => {
                 self.visitor
                     .visit_with_expansion(db, ty, &self.mapping, |expansion| {

@@ -1,5 +1,7 @@
 use super::context::InferContext;
-use super::{ClassType, Signature, Type, TypeContext, UnionType};
+use super::{
+    ClassType, CycleKind, Signature, Type, TypeContext, TypeQuery, TypeQueryContext, UnionType,
+};
 use crate::Db;
 use crate::place::Provenance;
 use crate::types::TypeOperations;
@@ -41,11 +43,38 @@ enum ReflectedMethodPriority {
 /// This is intentionally conservative: a false negative only widens a binary operation's result,
 /// while a false positive could discard a valid normal-method result.
 fn has_exact_runtime_class<'db>(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> bool {
-    match ty {
-        Type::ClassLiteral(_) | Type::LiteralValue(_) => true,
-        Type::NominalInstance(instance) => instance.class(db, env).is_final(db),
-        Type::TypeAlias(alias) => has_exact_runtime_class(db, env, alias.value_type(db, env)),
-        _ => false,
+    TypeQueryContext::with_root(env, HasExactRuntimeClass, |query| query.visit(db, ty))
+}
+
+struct HasExactRuntimeClass;
+
+impl<'db> TypeQuery<'db> for HasExactRuntimeClass {
+    type Output = bool;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> bool {
+        false
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> bool {
+        match ty {
+            Type::ClassLiteral(_) | Type::LiteralValue(_) => true,
+            Type::NominalInstance(instance) => {
+                instance.class(db, context.environment()).is_final(db)
+            }
+            _ => false,
+        }
     }
 }
 

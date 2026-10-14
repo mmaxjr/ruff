@@ -68,7 +68,9 @@ use crate::types::{
 use crate::{Db, FxIndexSet};
 
 use builder::TypeInferenceBuilder;
+pub(super) use builder::binary_expressions::BinaryOperand;
 pub(super) use comparisons::UnsupportedComparisonError;
+pub(super) use comparisons::{IdentityUpcast, IdentityUpcastResult};
 use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_core::expression::Expression;
 use ty_python_core::scope::{NodeWithScopeKind, ScopeId};

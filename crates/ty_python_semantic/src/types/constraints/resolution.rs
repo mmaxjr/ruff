@@ -244,7 +244,7 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
     fn visit_bound_type_var_type(&self, _db: &'db dyn Db, _typevar: BoundTypeVarInstance<'db>) {}
 
     fn visit_type_alias_type(&self, db: &'db dyn Db, alias: TypeAliasType<'db>) {
-        self.visit_type(db, alias.value_type(db, self.env));
+        alias.walk_body(db, self);
     }
 
     fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {

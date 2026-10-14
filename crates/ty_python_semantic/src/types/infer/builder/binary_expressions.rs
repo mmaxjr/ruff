@@ -34,6 +34,38 @@ type BinaryExpressionVisitor<'env, 'db> = TypeVisitorState<
     1,
 >;
 
+/// The inference state borrowed while an alias supplies one binary operand.
+pub(in crate::types) struct BinaryOperand<'a, 'db, 'ast> {
+    builder: &'a mut TypeInferenceBuilder<'db, 'ast>,
+    node: AnyNodeRef<'a>,
+    other: OtherOperand<'db>,
+    op: ast::Operator,
+    visitor: &'a BinaryExpressionVisitor<'a, 'db>,
+    state: &'a mut BinaryInferenceState<'db>,
+}
+
+enum OtherOperand<'db> {
+    Left(Type<'db>),
+    Right(Type<'db>),
+}
+
+impl<'db> BinaryOperand<'_, 'db, '_> {
+    pub(in crate::types) fn infer(self, expanded: Type<'db>) -> Option<Type<'db>> {
+        let (left, right) = match self.other {
+            OtherOperand::Left(left) => (left, expanded),
+            OtherOperand::Right(right) => (expanded, right),
+        };
+        self.builder.infer_binary_expression_type_impl(
+            self.node,
+            left,
+            right,
+            self.op,
+            self.visitor,
+            self.state,
+        )
+    }
+}
+
 fn is_union_type_operand(ty: Type<'_>) -> bool {
     matches!(
         ty,
@@ -540,27 +572,31 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 })
             }
 
-            (Type::TypeAlias(alias), rhs, _) => visitor.visit(db, (left_ty, op, right_ty), || {
-                self.infer_binary_expression_type_impl(
-                    node,
-                    alias.value_type(db, env),
-                    rhs,
-                    op,
-                    visitor,
-                    state,
-                )
-            }),
+            (Type::TypeAlias(alias), rhs, _) => {
+                visitor.visit_with_expansion(db, (left_ty, op, right_ty), |expansion| {
+                    expansion.alias_body(db, alias).infer_binary(BinaryOperand {
+                        builder: self,
+                        node,
+                        other: OtherOperand::Right(rhs),
+                        op,
+                        visitor,
+                        state,
+                    })
+                })
+            }
 
-            (lhs, Type::TypeAlias(alias), _) => visitor.visit(db, (left_ty, op, right_ty), || {
-                self.infer_binary_expression_type_impl(
-                    node,
-                    lhs,
-                    alias.value_type(db, env),
-                    op,
-                    visitor,
-                    state,
-                )
-            }),
+            (lhs, Type::TypeAlias(alias), _) => {
+                visitor.visit_with_expansion(db, (left_ty, op, right_ty), |expansion| {
+                    expansion.alias_body(db, alias).infer_binary(BinaryOperand {
+                        builder: self,
+                        node,
+                        other: OtherOperand::Left(lhs),
+                        op,
+                        visitor,
+                        state,
+                    })
+                })
+            }
 
             (Type::TypedDict(left_typed_dict), rhs, ast::Operator::BitOr)
                 if rhs.is_assignable_to(db, env, Type::TypedDict(left_typed_dict)) =>

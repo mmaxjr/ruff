@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::{TypeTraversal, TypeWalk};
 use std::cell::{OnceCell, RefCell};
 use std::collections::hash_map;
 use std::convert::Infallible;
@@ -163,7 +164,7 @@ use ty_python_core::{ExpressionNodeKey, Statement};
 mod annotation_expression;
 mod attribute_assignment;
 mod awaitable;
-mod binary_expressions;
+pub(super) mod binary_expressions;
 mod class;
 mod dict;
 mod dynamic_class;
@@ -11805,6 +11806,20 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         unary: &ast::ExprUnaryOp,
     ) -> Type<'db> {
         let db = self.db();
+        let env = self.program_environment().clone();
+        TypeTraversal::with_root(&env, UnaryExpression { op, unary }, |traversal| {
+            traversal.visit_with(db, operand_type, self)
+        })
+    }
+
+    fn infer_unary_expression_type_inner(
+        &mut self,
+        op: ast::UnaryOp,
+        operand_type: Type<'db>,
+        unary: &ast::ExprUnaryOp,
+        traversal: &TypeTraversal<'_, 'db, UnaryExpression<'_>>,
+    ) -> Type<'db> {
+        let db = self.db();
         let env = self.program_environment();
         let fallback_unary_expression_type = || {
             let unary_dunder_method = match op {
@@ -11855,10 +11870,6 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             (ast::UnaryOp::Invert | ast::UnaryOp::UAdd | ast::UnaryOp::USub, Type::Dynamic(_))
             | (_, Type::Divergent(_)) => operand_type,
             (_, Type::Never) => Type::Never,
-
-            (_, Type::TypeAlias(alias)) => {
-                self.infer_unary_expression_type(op, alias.value_type(db, env), unary)
-            }
 
             (ast::UnaryOp::UAdd, Type::LiteralValue(literal)) => match literal.kind() {
                 LiteralValueTypeKind::Int(value) => Type::int_literal(value.as_i64()),
@@ -12016,7 +12027,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     // For bounded TypeVars with union bounds (like `bound=float` which becomes
                     // `int | float`), we need to delegate to the bound type.
                     Some(TypeVarBoundOrConstraints::UpperBound(bound)) => {
-                        self.infer_unary_expression_type(op, bound, unary)
+                        traversal.visit_with(db, bound, self)
                     }
                     // For unconstrained TypeVars, fall through to default handling.
                     None => {
@@ -12072,6 +12083,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 | Type::TypeGuard(_)
                 | Type::TypeForm(_)
                 | Type::TypedDict(_)
+                | Type::TypeAlias(_)
                 | Type::NewTypeInstance(_),
             ) => fallback_unary_expression_type(),
         }
@@ -13783,4 +13795,33 @@ impl<'db, 'ast> AddBinding<'db, 'ast> {
 enum BoundOrConstraintsNodes<'ast> {
     Bound(&'ast ast::Expr),
     Constraints(&'ast [ast::Expr]),
+}
+
+struct UnaryExpression<'a> {
+    op: ast::UnaryOp,
+    unary: &'a ast::ExprUnaryOp,
+}
+
+impl<'db, 'ast> TypeWalk<'db, &mut TypeInferenceBuilder<'db, 'ast>> for UnaryExpression<'_> {
+    type Output = Type<'db>;
+
+    fn on_cycle(
+        &self,
+        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        _builder: &mut TypeInferenceBuilder<'db, 'ast>,
+    ) -> Type<'db> {
+        Type::unknown()
+    }
+
+    fn visit(
+        &self,
+        _db: &'db dyn Db,
+        traversal: &TypeTraversal<'_, 'db, Self>,
+        ty: Type<'db>,
+        builder: &mut TypeInferenceBuilder<'db, 'ast>,
+    ) -> Type<'db> {
+        builder.infer_unary_expression_type_inner(self.op, ty, self.unary, traversal)
+    }
 }
