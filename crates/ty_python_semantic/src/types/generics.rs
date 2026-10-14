@@ -1337,7 +1337,7 @@ impl<'db> Specialization<'db> {
             if !any_over_type_expanding_aliases(db, &env, ty, |ty| ty.is_dynamic()) {
                 return ty;
             }
-            let Some(upper_bound) = typevar.top_materialized_upper_bound(db) else {
+            let Some(upper_bound) = typevar.top_materialized_upper_bound(db, &env) else {
                 return ty;
             };
             IntersectionType::from_two_elements(db, &env, ty, upper_bound)
@@ -1692,7 +1692,8 @@ impl<'db> Specialization<'db> {
                         vartype.materialize(db, effective_materialization_kind, visitor);
 
                     if effective_materialization_kind == MaterializationKind::Top
-                        && let Some(upper_bound) = bound_typevar.top_materialized_upper_bound(db)
+                        && let Some(upper_bound) =
+                            bound_typevar.top_materialized_upper_bound(db, visitor.env)
                         && *has_dynamic_type
                     {
                         IntersectionType::from_two_elements(

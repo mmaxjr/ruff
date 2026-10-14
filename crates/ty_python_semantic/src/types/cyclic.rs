@@ -1651,6 +1651,52 @@ impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
     }
 }
 
+/// Reject a result if computing it revisits any active key in this operation.
+///
+/// Returning a fallback only for the repeated call can leave enclosing computations with a
+/// partially expanded result. This guard propagates incompleteness through every enclosing visit,
+/// including mutually recursive keys. Later independent visits can still complete normally.
+pub(super) struct AcyclicRecursionDetector<T> {
+    active: ActiveRecursionDetector<T>,
+    cycles: Cell<u64>,
+}
+
+impl<T> Default for AcyclicRecursionDetector<T> {
+    fn default() -> Self {
+        Self {
+            active: ActiveRecursionDetector::default(),
+            cycles: Cell::new(0),
+        }
+    }
+}
+
+impl<T: Hash + Eq + Clone> AcyclicRecursionDetector<T> {
+    pub(super) fn revision(&self) -> u64 {
+        self.active.revision().wrapping_add(self.cycles.get())
+    }
+
+    pub(super) fn visit<R>(
+        &self,
+        env: &TypeOperations<'_>,
+        item: &T,
+        compute: impl FnOnce() -> R,
+    ) -> Option<R> {
+        let cycles = self.cycles.get();
+        self.active.visit(
+            env,
+            item,
+            || {
+                self.cycles.set(self.cycles.get().wrapping_add(1));
+                None
+            },
+            || {
+                let result = compute();
+                (self.cycles.get() == cycles).then_some(result)
+            },
+        )
+    }
+}
+
 struct ActiveRecursionGuard<'a, 'db, T: Hash + Eq> {
     _scope: RecursiveOperationScope<'a, 'db>,
     seen: &'a RefCell<FxHashSet<T>>,
@@ -1670,8 +1716,9 @@ mod tests {
     use std::assert_matches;
 
     use super::{
-        CycleDetector, CycleDetectorVisit, CycleKind, Db, FlowEdge, FlowKind, HasIdentity,
-        RecursiveDefinition, SpecializationFlowGraph, TypeIdentity, TypeTransformer,
+        AcyclicRecursionDetector, CycleDetector, CycleDetectorVisit, CycleKind, Db, FlowEdge,
+        FlowKind, HasIdentity, RecursiveDefinition, SpecializationFlowGraph, TypeIdentity,
+        TypeTransformer,
     };
     use crate::TypeOperations;
     use crate::db::tests::setup_db;
@@ -1685,6 +1732,21 @@ mod tests {
     use ty_python_core::ProgramFile;
 
     struct TestVisit;
+
+    #[test]
+    fn incomplete_results_invalidate_enclosing_visits() {
+        let db = setup_db();
+        let env = db.program_environment();
+        let detector = AcyclicRecursionDetector::default();
+
+        let incomplete = detector.visit(&env, &1, || {
+            detector
+                .visit(&env, &2, || detector.visit(&env, &1, || 10).unwrap_or(20))
+                .unwrap_or(30)
+        });
+        assert_eq!(incomplete, None);
+        assert_eq!(detector.visit(&env, &1, || 40), Some(40));
+    }
 
     #[test]
     fn guards_transformations_before_resolving_identity() {

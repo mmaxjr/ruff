@@ -1288,7 +1288,7 @@ impl<'db> BoundTypeVarInstance<'db> {
                                 mapped,
                                 materialized,
                             )
-                            && let Some(upper_bound) = self.top_materialized_upper_bound(db)
+                            && let Some(upper_bound) = self.top_materialized_upper_bound(db, env)
                         {
                             IntersectionType::from_two_elements(db, env, materialized, upper_bound)
                         } else {
@@ -1359,7 +1359,11 @@ impl<'db> BoundTypeVarInstance<'db> {
     /// valid conservative upper bound. A bound may recursively refer to its own generic class,
     /// either directly or through other bounds. Such a bound has no finite static top
     /// materialization, so recover from its cycle without applying an upper bound.
-    pub(super) fn top_materialized_upper_bound(self, db: &'db dyn Db) -> Option<Type<'db>> {
+    pub(super) fn top_materialized_upper_bound(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<Type<'db>> {
         #[salsa::tracked(
             returns(copy),
             cycle_result=|_, _, _| None,
@@ -1374,17 +1378,36 @@ impl<'db> BoundTypeVarInstance<'db> {
                 ProgramEnvironment::from_program(bound_typevar.binding_context(db).program(db)),
             );
 
-            bound_typevar
-                .typevar(db)
-                .bound_or_constraints(db, &env)
-                .map(|bound_or_constraints| {
-                    bound_or_constraints
-                        .as_type(db, &env)
-                        .top_materialization(db, &env)
-                })
+            compute(db, &env, bound_typevar)
         }
 
-        top_materialized_upper_bound_inner(db, self)
+        fn compute<'db>(
+            db: &'db dyn Db,
+            env: &TypeOperations<'db>,
+            bound_typevar: BoundTypeVarInstance<'db>,
+        ) -> Option<Type<'db>> {
+            env.context()
+                .state()
+                .materialized_bounds
+                .visit(env, &bound_typevar, || {
+                    bound_typevar.typevar(db).bound_or_constraints(db, env).map(
+                        |bound_or_constraints| {
+                            bound_or_constraints
+                                .as_type(db, env)
+                                .top_materialization(db, env)
+                        },
+                    )
+                })
+                .flatten()
+        }
+
+        let env = env.in_environment(ProgramEnvironment::from_program(
+            self.binding_context(db).program(db),
+        ));
+        env.cached_query(
+            || top_materialized_upper_bound_inner(db, self),
+            || compute(db, &env, self),
+        )
     }
 }
 

@@ -2,10 +2,12 @@
 
 use crate::types::TypeOperations;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::fmt::{Debug, Display};
 
 use itertools::Either;
+use salsa::plumbing::AsId;
 
 use crate::types::constraints::variables::{
     ConcreteEquivalenceBound, ConcreteLowerBound, ConcreteUpperBound, Constraint,
@@ -49,11 +51,9 @@ impl get_size2::GetSize for InternedSequentConstraint<'_> {}
 /// include sequents for the constraints that are actually encountered. However, we also don't want
 /// to perform duplicate work if we perform multiple BDD walks on the same constraint set. The
 /// [`for_constraint`][Self::for_constraint] and [`for_constraint_pair`][Self::for_constraint_pair]
-/// methods are salsa-tracked, to ensure that we only perform them once for any particular
-/// constraint or pair of constraints. `PathAssignments` invokes these methods when it encounters a
-/// new constraint, and then merges those cached sequents into its own sequent map. (That means we
-/// also share the work of calculating the sequent map across `PathAssignments` for _different_
-/// constraint sets.)
+/// methods cache deductions that are independent of an enclosing operation. Nested deductions
+/// retain that operation's recursion guards and remain local to it. `PathAssignments` invokes
+/// these methods when it encounters a new constraint, then merges the sequents into its own map.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
 pub(super) struct SequentMap<'db> {
     /// The sequents that were discovered while creating this sequent map. Some of those sequents
@@ -365,15 +365,14 @@ impl<'db> SequentMapBuilder<'db> {
 
 impl<'db> SequentMap<'db> {
     /// Returns a sequent map containing the sequents that we can infer from a single constraint in
-    /// isolation. This method is cached so that we only perform this work once per
-    /// constraint.
+    /// isolation. Deductions made outside another recursive operation are cached.
     ///
     /// Returns `None` without caching if we can quickly determine that there are no sequents.
     pub(super) fn for_constraint(
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
         constraint: Constraint<'db>,
-    ) -> Option<&'db Self> {
+    ) -> Option<Cow<'db, Self>> {
         // Most individual constraints produce no sequents. Avoid interning the query arguments
         // and retaining an empty Salsa result for those cases. Keep the checks in sync with the
         // single-constraint `add_sequents` methods below.
@@ -405,7 +404,14 @@ impl<'db> SequentMap<'db> {
             constraint: InternedSequentConstraint<'db>,
         ) -> SequentMap<'db> {
             let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            let constraint = constraint.constraint(db);
+            compute(db, env, constraint.constraint(db))
+        }
+
+        fn compute<'db>(
+            db: &'db dyn Db,
+            env: &TypeOperations<'db>,
+            constraint: Constraint<'db>,
+        ) -> SequentMap<'db> {
             tracing::trace!(
                 target: "ty_python_semantic::types::constraints::SequentMap",
                 constraint = %constraint.display(db, env, Some(true)),
@@ -416,15 +422,22 @@ impl<'db> SequentMap<'db> {
             map.finish()
         }
 
-        Some(for_constraint_inner(
-            db,
-            env.program(db),
-            InternedSequentConstraint::new(db, constraint),
+        let interned = InternedSequentConstraint::new(db, constraint);
+        Some(env.cached_query(
+            || Cow::Borrowed(for_constraint_inner(db, env.program(db), interned)),
+            || {
+                Cow::Owned(env.context().state().sequent_derivation.visit(
+                    env,
+                    &(env.program(db), interned.as_id(), None),
+                    Self::default,
+                    || compute(db, env, constraint),
+                ))
+            },
         ))
     }
 
     /// Returns a sequent map containing the sequents that we can infer from a pair of constraints.
-    /// This method is cached so that we only perform this work once per constraint pair.
+    /// Deductions made outside another recursive operation are cached.
     ///
     /// Returns `None` without caching if we can quickly determine that there are no sequents.
     ///
@@ -436,7 +449,7 @@ impl<'db> SequentMap<'db> {
         env: &TypeOperations<'db>,
         left: Constraint<'db>,
         right: Constraint<'db>,
-    ) -> Option<&'db Self> {
+    ) -> Option<Cow<'db, Self>> {
         // Currently, the only pattern we look for is when two concrete lower-bound constraints
         // have disjoint bounds. Given `l₁ ≤ T ∧ l₂ ≤ T`, the only sequent we could theoretically
         // produce is `(l₁ | l₂) ≤ T`. But we don't store that as a single constraint; we always
@@ -470,8 +483,15 @@ impl<'db> SequentMap<'db> {
             right: InternedSequentConstraint<'db>,
         ) -> SequentMap<'db> {
             let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            let left = left.constraint(db);
-            let right = right.constraint(db);
+            compute(db, env, left.constraint(db), right.constraint(db))
+        }
+
+        fn compute<'db>(
+            db: &'db dyn Db,
+            env: &TypeOperations<'db>,
+            left: Constraint<'db>,
+            right: Constraint<'db>,
+        ) -> SequentMap<'db> {
             tracing::trace!(
                 target: "ty_python_semantic::types::constraints::SequentMap",
                 left = %left.display(db, env, Some(true)),
@@ -483,11 +503,29 @@ impl<'db> SequentMap<'db> {
             map.finish()
         }
 
-        Some(for_constraint_pair_inner(
-            db,
-            env.program(db),
-            InternedSequentConstraint::new(db, left),
-            InternedSequentConstraint::new(db, right),
+        let interned_left = InternedSequentConstraint::new(db, left);
+        let interned_right = InternedSequentConstraint::new(db, right);
+        Some(env.cached_query(
+            || {
+                Cow::Borrowed(for_constraint_pair_inner(
+                    db,
+                    env.program(db),
+                    interned_left,
+                    interned_right,
+                ))
+            },
+            || {
+                Cow::Owned(env.context().state().sequent_derivation.visit(
+                    env,
+                    &(
+                        env.program(db),
+                        interned_left.as_id(),
+                        Some(interned_right.as_id()),
+                    ),
+                    Self::default,
+                    || compute(db, env, left, right),
+                ))
+            },
         ))
     }
 }
