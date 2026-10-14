@@ -2382,8 +2382,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     fn check_type_alias_cycle(&mut self, name: &str, value: &ast::Expr) {
         let db = self.db();
         let value_ty = self.expression_type(value);
-        let expanded = value_ty.expand_eagerly(db, self.program_environment());
-        if (expanded.is_recursive_divergent()
+        let divergence = value_ty.divergence_after_aliases(db, self.program_environment());
+        if (divergence.is_some_and(|ty| Type::Divergent(ty).is_recursive_divergent())
             || value_ty.has_unguarded_alias_cycle(db, self.program_environment()))
             && let Some(builder) = self
                 .context
@@ -2393,10 +2393,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 "Type alias `{name}` has a circular definition"
             ));
         }
-        if expanded.is_divergent() {
-            // Preserve the dynamic recovery type for aliases that cannot be expanded at all.
+        if let Some(divergence) = divergence {
             // Union cycles retain their non-recursive members for recovery.
-            self.expressions.insert(value.into(), expanded);
+            self.expressions
+                .insert(value.into(), Type::Divergent(divergence));
         }
     }
 

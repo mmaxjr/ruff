@@ -175,6 +175,10 @@ impl<'scope, 'db> ExpandedRecursive<'scope, 'db> {
 }
 
 impl<'db> ExpandedType<'_, 'db> {
+    pub(super) fn divergence(&self) -> Option<super::DivergentType> {
+        self.ty.as_divergent()
+    }
+
     pub(super) fn narrow_identity_comparison(
         self,
         builder: &super::narrow::NarrowingConstraintsBuilder<'db, '_>,
@@ -1345,16 +1349,6 @@ impl<'db> ExpandedType<'_, 'db> {
         constraint: &ClassInfoConstraint<'_, 'db>,
     ) -> Option<Type<'db>> {
         constraint.generate(db, self.ty)
-    }
-
-    pub(super) fn map_type(
-        self,
-        db: &'db dyn Db,
-        mapping: &TypeMapping<'_, 'db>,
-        context: TypeContext<'db>,
-    ) -> Type<'db> {
-        self.ty
-            .apply_type_mapping_impl(db, mapping, context, self.mapping)
     }
 
     pub(super) fn map_alias_value(
@@ -2884,23 +2878,7 @@ impl<'db> RecursiveType<'db> {
                     }
                 })
             }
-            TypeMapping::EagerExpansion => {
-                visitor.visit(db, Type::Recursive(self), mapping, || {
-                    // Expand arguments only where the body exposes them. Expanding stored arguments
-                    // first can feed a recursive alias's previous approximation into its own arguments.
-                    self.unfold(db, visitor)
-                        .map(|unfolded| {
-                            let mapped =
-                                unfolded.apply_type_mapping_impl(db, mapping, tcx, visitor);
-                            if mapped == unfolded {
-                                Type::Recursive(self)
-                            } else {
-                                mapped
-                            }
-                        })
-                        .into_type()
-                })
-            }
+
             _ => visitor.visit(db, Type::Recursive(self), mapping, || {
                 // Map arguments before unfolding so recursive backedges retain their mapped
                 // arguments. Keep the application's materialization throughout the traversal.

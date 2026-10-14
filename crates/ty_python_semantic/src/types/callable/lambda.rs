@@ -257,7 +257,7 @@ pub(super) enum LambdaMapping<'db> {
     ReplaceSelf(Type<'db>),
     Materialize(MaterializationKind),
     ReplaceParameterDefaults,
-    EagerExpansion,
+
     /// The exposed parameters have been bound; the source still determines the return type.
     BindParameters(Parameters<'db>),
     /// Bind a receiver without expanding the source signature.
@@ -323,7 +323,7 @@ impl<'db> LambdaMapping<'db> {
             TypeMapping::ReplaceSelf { new_upper_bound } => Self::ReplaceSelf(*new_upper_bound),
             TypeMapping::Materialize(kind) => Self::Materialize(*kind),
             TypeMapping::ReplaceParameterDefaults => Self::ReplaceParameterDefaults,
-            TypeMapping::EagerExpansion => Self::EagerExpansion,
+
             TypeMapping::RescopeReturnCallables(_) => {
                 return None;
             }
@@ -363,7 +363,7 @@ impl<'db> LambdaMapping<'db> {
             },
             Self::Materialize(kind) => TypeMapping::Materialize(*kind),
             Self::ReplaceParameterDefaults => TypeMapping::ReplaceParameterDefaults,
-            Self::EagerExpansion => TypeMapping::EagerExpansion,
+
             Self::BindParameters(_) => return None,
             Self::BindReceiver { self_binding, .. } | Self::ApplyReceiver { self_binding, .. } => {
                 TypeMapping::BindSelf(self_binding.clone())
@@ -439,8 +439,7 @@ impl<'db> LambdaSignature<'db> {
                         | LambdaMapping::BindLegacyTypevars(_)
                         | LambdaMapping::FreshenBoundTypeVars(..)
                         | LambdaMapping::Materialize(_)
-                        | LambdaMapping::ReplaceParameterDefaults
-                        | LambdaMapping::EagerExpansion => {}
+                        | LambdaMapping::ReplaceParameterDefaults => {}
                     }
                     step.context = step
                         .context
@@ -1157,7 +1156,6 @@ impl<'db> LambdaSignature<'db> {
                     | LambdaMapping::BindLegacyTypevars(_)
                     | LambdaMapping::ReplaceSelf(_)
                     | LambdaMapping::ReplaceParameterDefaults
-                    | LambdaMapping::EagerExpansion
                     | LambdaMapping::BindParameters(_)
                     | LambdaMapping::ApplyReceiver { .. }
             )

@@ -2714,10 +2714,8 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 }
                 _ => {
                     let narrowed = self.infer_type_expression(arguments_slice);
-                    let expanded = narrowed.expand_eagerly(db, env);
-
-                    if expanded.is_divergent() {
-                        expanded
+                    if let Some(divergence) = narrowed.divergence_after_aliases(db, env) {
+                        Type::Divergent(divergence)
                     } else {
                         TypeIsType::from_type_expression(self.db(), narrowed)
                     }

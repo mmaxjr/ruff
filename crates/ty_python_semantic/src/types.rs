@@ -2939,7 +2939,13 @@ impl<'db> Type<'db> {
     /// e.g., nominal instances of a generic class, or callables.
     fn may_prefer_declared_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
         self.class_specialization(db, env).is_some()
-            || self.expand_eagerly(db, env).is_callable_type()
+            || TypeInspector::inspect_root(
+                db,
+                env,
+                self,
+                |_, _| false,
+                |_, ty| ty.matches(|ty| ty.is_callable_type()),
+            )
     }
 
     /// Returns the top materialization (or upper bound materialization) of this type, which is the
@@ -9193,7 +9199,6 @@ impl<'db> Type<'db> {
                 | TypeMapping::ReplaceSelf { .. }
                 | TypeMapping::Materialize(_)
                 | TypeMapping::ReplaceParameterDefaults
-                | TypeMapping::EagerExpansion
                 | TypeMapping::RescopeReturnCallables(_)
                 | TypeMapping::Promote(PromotionMode::Off, _)
                 | TypeMapping::Promote(
@@ -9214,7 +9219,6 @@ impl<'db> Type<'db> {
                 | TypeMapping::ReplaceSelf { .. }
                 | TypeMapping::Promote(..)
                 | TypeMapping::ReplaceParameterDefaults
-                | TypeMapping::EagerExpansion
                 | TypeMapping::RescopeReturnCallables(_) => self,
                 TypeMapping::Materialize(materialization_kind) => match materialization_kind {
                     MaterializationKind::Top => Type::object(),
@@ -9654,27 +9658,18 @@ impl<'db> Type<'db> {
         )
     }
 
-    /// Returns the eagerly expanded type.
-    /// In the case of recursive type aliases, this will diverge, so that part will be replaced with `Divergent`.
-    fn expand_eagerly(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
-        self.expand_eagerly_(db, env.program(db))
-    }
-
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, id, _, _| Type::divergent(id),
-        cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, program| {
-            value.cycle_normalized_impl(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program)), *previous, cycle)
-        },
-        heap_size=ruff_memory_usage::heap_size
-    )]
-    fn expand_eagerly_(self, db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
-        let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-        self.apply_type_mapping(
+    /// Read a divergent recovery marker after resolving only outer aliases.
+    fn divergence_after_aliases(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<DivergentType> {
+        TypeInspector::inspect_root(
             db,
             env,
-            &TypeMapping::EagerExpansion,
-            TypeContext::default(),
+            self,
+            |ty, _| ty.as_divergent(),
+            |_, ty| ty.divergence(),
         )
     }
 
@@ -11581,9 +11576,6 @@ pub enum TypeMapping<'a, 'db> {
     /// Replace default types in parameters of callables with `Unknown`. This is used to avoid infinite
     /// recursion when the type of the default value of a parameter depends on the callable itself.
     ReplaceParameterDefaults,
-    /// Apply eager expansion to the type.
-    /// In the case of recursive type aliases, this will diverge, so that part will be replaced with `Divergent`.
-    EagerExpansion,
 
     /// Updates any `Callable` types in a function signature return type to be generic if possible.
     RescopeReturnCallables(&'a FxHashMap<CallableType<'db>, CallableType<'db>>),
@@ -11664,7 +11656,6 @@ impl<'db> TypeMapping<'_, 'db> {
             | TypeMapping::BindLegacyTypevars(_)
             | TypeMapping::Materialize(_)
             | TypeMapping::ReplaceParameterDefaults
-            | TypeMapping::EagerExpansion
             | TypeMapping::RescopeReturnCallables(_) => context,
             TypeMapping::BindSelf(binding) => {
                 if binding.binding_context().is_some() {
@@ -11711,7 +11702,6 @@ impl<'db> TypeMapping<'_, 'db> {
             | TypeMapping::BindSelf(..)
             | TypeMapping::ReplaceSelf { .. }
             | TypeMapping::ReplaceParameterDefaults
-            | TypeMapping::EagerExpansion
             | TypeMapping::RescopeReturnCallables(_) => self.clone(),
         }
     }

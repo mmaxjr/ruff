@@ -706,7 +706,6 @@ impl<'db> KnownInstanceType<'db> {
                 | TypeMapping::ReplaceSelf { .. }
                 | TypeMapping::Materialize(_)
                 | TypeMapping::ReplaceParameterDefaults
-                | TypeMapping::EagerExpansion
                 | TypeMapping::RescopeReturnCallables(_) => Type::KnownInstance(self),
             },
             KnownInstanceType::UnionType(instance) => {
