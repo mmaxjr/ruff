@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use std::borrow::Cow;
 
@@ -1003,8 +1004,14 @@ impl<'db> DynamicTypedDictLiteral<'db> {
     /// [self, `TypedDict`, object]
     #[salsa::tracked(returns(ref), heap_size = ruff_memory_usage::heap_size)]
     pub(crate) fn mro(self, db: &'db dyn Db) -> Mro<'db> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.mro_from_source(db, source_operation)
+        })
+    }
+
+    fn mro_from_source(self, db: &'db dyn Db, source_operation: &SourceTypeQuery<'db>) -> Mro<'db> {
         let self_base = ClassBase::Class(ClassType::NonGeneric(self.into()));
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.scope(db)));
         let object_class = ClassType::object(db, &env);
         Mro::from([
             self_base,

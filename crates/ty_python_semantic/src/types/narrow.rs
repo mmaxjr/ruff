@@ -1,7 +1,10 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use crate::types::recursive::{StructuralTypeVisit, TypeQueryVisit, TypeWalkVisit};
+use crate::types::recursive::{TypeQueryKey, TypeWalkKey};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, btree_map::Entry as BTreeEntry, hash_map::Entry};
@@ -137,9 +140,19 @@ fn all_narrowing_constraints_for_pattern<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
+    SourceTypeQuery::run(db, (pattern,), |db, source_operation, (pattern,)| {
+        all_narrowing_constraints_for_pattern_from_source(db, source_operation, pattern)
+    })
+}
+
+fn all_narrowing_constraints_for_pattern_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    pattern: PatternPredicate<'db>,
+) -> Option<FrozenNarrowingConstraints<'db>> {
     let program_file = pattern.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), true)
         .finish()
@@ -154,9 +167,19 @@ fn all_narrowing_constraints_for_expression<'db>(
     db: &'db dyn Db,
     expression: Expression<'db>,
 ) -> ExpressionNarrowingConstraints<'db> {
+    SourceTypeQuery::run(db, (expression,), |db, source_operation, (expression,)| {
+        all_narrowing_constraints_for_expression_from_source(db, source_operation, expression)
+    })
+}
+
+fn all_narrowing_constraints_for_expression_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    expression: Expression<'db>,
+) -> ExpressionNarrowingConstraints<'db> {
     let program_file = expression.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     let predicate = PredicateNode::Expression {
         expression,
@@ -186,9 +209,19 @@ fn all_negative_narrowing_constraints_for_pattern<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
+    SourceTypeQuery::run(db, (pattern,), |db, source_operation, (pattern,)| {
+        all_negative_narrowing_constraints_for_pattern_from_source(db, source_operation, pattern)
+    })
+}
+
+fn all_negative_narrowing_constraints_for_pattern_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    pattern: PatternPredicate<'db>,
+) -> Option<FrozenNarrowingConstraints<'db>> {
     let program_file = pattern.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), false)
         .finish()
@@ -204,9 +237,29 @@ fn all_narrowing_constraints_for_subject_element_pattern<'db>(
     pattern: PatternPredicate<'db>,
     target: ExpressionNodeKey,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
+    SourceTypeQuery::run(
+        db,
+        (pattern, target),
+        |db, source_operation, (pattern, target)| {
+            all_narrowing_constraints_for_subject_element_pattern_from_source(
+                db,
+                source_operation,
+                pattern,
+                target,
+            )
+        },
+    )
+}
+
+fn all_narrowing_constraints_for_subject_element_pattern_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    pattern: PatternPredicate<'db>,
+    target: ExpressionNodeKey,
+) -> Option<FrozenNarrowingConstraints<'db>> {
     let program_file = pattern.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     NarrowingConstraintsBuilder::new(
         db,
@@ -476,21 +529,31 @@ pub(super) struct PatternSuccessAnalyzer<'db, 'pattern> {
 #[salsa::tracked(
     returns(ref),
     cycle_initial=|_, id, _| PatternSuccessTypes::cycle_initial(Type::divergent(id)),
-    cycle_fn=|db: &'db dyn Db, cycle, previous: &PatternSuccessTypes<'db>, result: PatternSuccessTypes<'db>, pattern: PatternPredicate<'db>| {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(pattern.subject(db).scope(db)));
+    cycle_fn=|db: &'db dyn Db, cycle, previous: &PatternSuccessTypes<'db>, result: PatternSuccessTypes<'db>, pattern: PatternPredicate<'db>| SourceTypeQuery::run(db, (cycle, previous, result, pattern), |db, source_operation, (cycle, previous, result, pattern)| {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(pattern.subject(db).scope(db)));
         result.cycle_normalized(db, &env, previous, cycle)
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 pub(crate) fn pattern_success_types<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> PatternSuccessTypes<'db> {
+    SourceTypeQuery::run(db, (pattern,), |db, source_operation, (pattern,)| {
+        pattern_success_types_from_source(db, source_operation, pattern)
+    })
+}
+
+fn pattern_success_types_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    pattern: PatternPredicate<'db>,
+) -> PatternSuccessTypes<'db> {
     let subject = pattern.subject(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(subject.scope(db)));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(subject.scope(db)));
     let incoming_subject_ty =
         type_narrowed_by_previous_patterns(db, pattern, PatternSubjectExpansion::Raw);
-    let mut analyzer = PatternSuccessAnalyzer::new(db, pattern.scope(db));
+    let mut analyzer = PatternSuccessAnalyzer::new(db, &env, pattern.scope(db));
     let result = analyzer.analyze_successful_pattern(pattern.kind(db), incoming_subject_ty);
     PatternSuccessTypes {
         bindings: result
@@ -2152,7 +2215,7 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
                 Some(constraint)
             }
             _ => {
-                let matched_subject_ty = PatternSuccessAnalyzer::new(db, self.scope())
+                let matched_subject_ty = PatternSuccessAnalyzer::new(db, &self.env, self.scope())
                     .matched_subject_type(pattern, subject_ty);
                 (!matched_subject_ty.is_equivalent_to(db, &self.env, subject_ty))
                     .then(|| NarrowingConstraint::intersection(matched_subject_ty))
@@ -2162,10 +2225,10 @@ impl<'db, 'ast> NarrowingConstraintsBuilder<'db, 'ast> {
 }
 
 impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
-    fn new(db: &'db dyn Db, scope: ScopeId<'db>) -> Self {
+    fn new(db: &'db dyn Db, env: &crate::types::TypeOperations<'db>, scope: ScopeId<'db>) -> Self {
         Self {
             db,
-            env: TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope)),
+            env: env.in_environment(ProgramEnvironment::from_scope(scope)),
             scope,
             successful_patterns: FxHashMap::default(),
             matched_subjects: FxHashMap::default(),
@@ -2721,6 +2784,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::ClassPatternContexts,
             class_expr_ty,
             |ty, _| smallvec![context(ty)],
             |_, class_expr_ty| class_expr_ty.class_pattern_contexts(db, self, kind),
@@ -2871,6 +2935,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::MappingPatternValueTypeForArm,
             subject_ty,
             |_, _| Some(Type::unknown()),
             |inspector, subject_ty| subject_ty.mapping_pattern_value(self, inspector, key_ty),
@@ -3360,6 +3425,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::PreserveOriginalSubjectType,
             original_subject_ty,
             |_, _| filtered_ty,
             |_, resolved| {
@@ -3385,6 +3451,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
         TypeInspector::inspect_root(
             self.db,
             &self.env,
+            TypeInspectionKey::MatchPatternSubjectArms,
             subject_ty,
             |ty, _| smallvec![(ty, ty)],
             |inspector, ty| ty.pattern_subject_arms(self.db, inspector),
@@ -3586,9 +3653,13 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         length: i64,
         comparison: LengthComparison,
     ) -> Type<'db> {
-        TypeInspector::scope(env, |inspector| {
-            Self::narrow_type_by_len_comparison_in(db, inspector, ty, length, comparison)
-        })
+        TypeInspector::scope(
+            env,
+            TypeInspectionKey::NarrowTypeByLenComparison,
+            |inspector| {
+                Self::narrow_type_by_len_comparison_in(db, inspector, ty, length, comparison)
+            },
+        )
     }
 
     fn narrow_type_by_len_comparison_in(
@@ -3768,7 +3839,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
     }
 
     fn evaluate_expr_in(&self, lhs_ty: Type<'db>, rhs_ty: Type<'db>) -> Option<Type<'db>> {
-        TypeInspector::scope(&self.env, |inspector| {
+        TypeInspector::scope(&self.env, TypeInspectionKey::EvaluateExprIn, |inspector| {
             self.evaluate_expr_in_inspected(inspector, lhs_ty, rhs_ty)
         })
     }
@@ -3792,6 +3863,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::EvaluateExprNotIn,
             rhs_ty,
             |_, _| None,
             |_, rhs_ty| rhs_ty.narrow_non_membership(self, lhs_ty),
@@ -3871,6 +3943,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 TypeInspector::inspect_root(
                     db,
                     &self.env,
+                    TypeInspectionKey::EvaluateExprCompareOp,
                     rhs_ty,
                     |_, _| None,
                     |_, rhs_resolved| {
@@ -4012,6 +4085,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
             TypeInspector::inspect_root(
                 db,
                 &self.env,
+                TypeInspectionKey::ComparisonLeft,
                 inference.expression_type(&*subscript.value),
                 |_, _| (),
                 |_, ty| {
@@ -4046,6 +4120,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                     let Some(length) = TypeInspector::inspect_root(
                         db,
                         &self.env,
+                        TypeInspectionKey::ComparisonRight,
                         length_type,
                         |_, _| None,
                         |_, ty| ty.as_int_like_literal(),
@@ -4215,6 +4290,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                 let narrowed = TypeInspector::inspect_root(
                     db,
                     &self.env,
+                    TypeInspectionKey::ComparisonLength,
                     rhs_type,
                     |_, _| None,
                     |_, resolved_rhs_type| resolved_rhs_type.narrow_missing_typed_dict_key(db, key),
@@ -5180,6 +5256,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::FilterTupleSubscript,
             subscript_value_type,
             |_, _| None,
             |_, subscript_value_type| {
@@ -5206,6 +5283,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::NarrowNominalAttribute,
             attribute_value_type,
             |_, _| None,
             |_, attribute_value_type| {
@@ -5232,6 +5310,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::NarrowNominalAttributeByTruthiness,
             attribute_value_type,
             |_, _| None,
             |_, attribute_value_type| {
@@ -5249,6 +5328,10 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
 struct NarrowWithPresentKey<'a>(&'a str);
 
 impl<'db> TypeQuery<'db> for NarrowWithPresentKey<'_> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::NarrowWithPresentKey(self.0.into())
+    }
+
     type Output = Type<'db>;
 
     fn on_cycle(
@@ -5260,7 +5343,7 @@ impl<'db> TypeQuery<'db> for NarrowWithPresentKey<'_> {
     ) -> Self::Output {
         match kind {
             CycleKind::Exact => Type::Never,
-            CycleKind::MatchingIdentity => ty,
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => ty,
         }
     }
 
@@ -5326,6 +5409,10 @@ struct ContainsTypedDict<'a> {
 }
 
 impl<'db> TypeQuery<'db> for ContainsTypedDict<'_> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::ContainsTypedDict(self.key.map(Into::into))
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -5446,6 +5533,10 @@ struct VisitTypedDictField<'a> {
 }
 
 impl<'a, 'db, F: FnMut(Type<'db>)> TypeWalk<'db, &'a mut F> for VisitTypedDictField<'_> {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::VisitTypedDictField(ruff_python_ast::name::Name::new(self.field_name))
+    }
+
     type Output = ();
 
     fn on_cycle(
@@ -5527,6 +5618,10 @@ struct ClassPatternSubject<'a, 'db, 'pattern> {
 }
 
 impl<'db> TypeWalk<'db, (), StructuralTraversal> for ClassPatternSubject<'_, 'db, '_> {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::ClassPatternSubject(self.class, self.class_ty)
+    }
+
     type Output = Type<'db>;
 
     fn on_cycle(
@@ -5558,6 +5653,10 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for ClassPatternSubject<'_, 'db
 struct RuntimeClass;
 
 impl<'db> TypeQuery<'db> for RuntimeClass {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::RuntimeClass
+    }
+
     type Output = Option<ClassLiteral<'db>>;
 
     fn on_cycle(
@@ -5948,6 +6047,7 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
         TypeInspector::inspect_root(
             db,
             &self.env,
+            TypeInspectionKey::NarrowIdentityResolved,
             lhs_ty,
             |_, _| None,
             |_, lhs_resolved| {

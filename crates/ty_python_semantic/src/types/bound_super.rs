@@ -1,6 +1,7 @@
 //! Logic for inferring `super()`, `super(x)` and `super(x, y)` calls.
 
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use itertools::{Either, Itertools};
 use ruff_db::diagnostic::Diagnostic;
@@ -534,7 +535,7 @@ impl<'db> BoundSuperType<'db> {
         pivot_class_type: Type<'db>,
         owner_type: Type<'db>,
     ) -> Result<Type<'db>, BoundSuperError<'db>> {
-        TypeInspector::scope(env, |inspector| {
+        TypeInspector::scope(env, TypeInspectionKey::Build, |inspector| {
             Self::build_in(db, inspector, pivot_class_type, owner_type)
         })
     }

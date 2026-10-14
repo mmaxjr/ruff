@@ -1,5 +1,7 @@
 use crate::Db;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use crate::types::{
     CallArguments, DataclassParams, KnownClass, KnownInstanceType, SpecialFormType,
@@ -390,6 +392,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             inferred_ty = TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::InferClassDefinition(definition),
                 decorated_ty,
                 |ty, _| ty,
                 |_, resolved| {
@@ -561,6 +564,10 @@ struct ClassBinding<'db> {
 }
 
 impl<'db> TypeQuery<'db> for ClassBinding<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::ClassBinding(self.original_class, self.allow_intersections)
+    }
+
     type Output = bool;
 
     fn on_cycle(

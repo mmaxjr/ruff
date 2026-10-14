@@ -1,3 +1,4 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use std::debug_assert_matches;
 
@@ -218,7 +219,23 @@ fn create_bound_method<'db>(
     function: Type<'db>,
     builtins_class: Type<'db>,
 ) -> Type<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+    SourceTypeQuery::run(
+        db,
+        (program, function, builtins_class),
+        |db, source_operation, (program, function, builtins_class)| {
+            create_bound_method_from_source(db, source_operation, program, function, builtins_class)
+        },
+    )
+}
+
+fn create_bound_method_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    program: Program<'db>,
+    function: Type<'db>,
+    builtins_class: Type<'db>,
+) -> Type<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_program(program));
     let self_instance = builtins_class.to_instance_approximation(db, &env).unwrap();
     Type::BoundMethod(BoundMethodType::new(
         db,

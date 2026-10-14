@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use std::fmt::Write;
@@ -221,10 +222,10 @@ impl<'db> PEP695TypeAliasType<'db> {
     #[salsa::tracked(
         returns(copy),
         cycle_initial=|_, id, _| Type::divergent_alias(id),
-        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: PEP695TypeAliasType<'db>| {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(alias.rhs_scope(db)));
+        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: PEP695TypeAliasType<'db>| SourceTypeQuery::run(db, (cycle, previous, value, alias), |db, source_operation, (cycle, previous, value, alias)| {
+            let env = source_operation.operations(ProgramEnvironment::from_scope(alias.rhs_scope(db)));
             value.cycle_normalized(db, &env, *previous, cycle)
-        },
+        }),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
@@ -318,10 +319,10 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
     #[salsa::tracked(
         returns(copy),
         cycle_initial=|_, id, _| Type::divergent_alias(id),
-        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: ManualPEP695TypeAliasType<'db>| {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_definition(alias.definition(db)));
+        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: ManualPEP695TypeAliasType<'db>| SourceTypeQuery::run(db, (cycle, previous, value, alias), |db, source_operation, (cycle, previous, value, alias)| {
+            let env = source_operation.operations(ProgramEnvironment::from_definition(alias.definition(db)));
             value.cycle_normalized(db, &env, *previous, cycle)
-        },
+        }),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
@@ -362,9 +363,19 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
 
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.generic_context_from_source(db, source_operation)
+        })
+    }
+
+    fn generic_context_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Option<GenericContext<'db>> {
         let definition = self.definition(db);
         let file = definition.program_file(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+        let env = source_operation.operations(ProgramEnvironment::from_file(file));
         let module = parsed_module(db, file.python_file(db)).load(db);
         let DefinitionKind::Assignment(assignment) = definition.kind(db) else {
             return None;
@@ -502,11 +513,11 @@ impl<'db> TypeAliasType<'db> {
             alias: TypeAliasType<'db>,
             (): (),
         ) -> AliasCycleSummary<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_definition(alias.definition(db)),
-            );
-            AliasCycleSummary::from_type(db, &env, alias.raw_value_type(db))
+            SourceTypeQuery::run(db, alias, |db, source, alias| {
+                let env =
+                    source.operations(ProgramEnvironment::from_definition(alias.definition(db)));
+                AliasCycleSummary::from_type(db, &env, alias.raw_value_type(db))
+            })
         }
 
         cycle_summary(db, self.unspecialized(db), ())
@@ -775,10 +786,23 @@ impl<'db> TypeAliasType<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        let env = TypeOperations::for_inference(
+        SourceTypeQuery::run(
             db,
-            ProgramEnvironment::from_definition(self.definition(db)),
-        );
+            (self, typevar),
+            |db, source_operation, (source_self, typevar)| {
+                source_self.variance_equation_from_source(db, source_operation, typevar)
+            },
+        )
+    }
+
+    fn variance_equation_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        let env =
+            source_operation.operations(ProgramEnvironment::from_definition(self.definition(db)));
         let Some(generic_context) = self.generic_context(db) else {
             return self.raw_value_type(db).variance_of(db, &env, typevar);
         };

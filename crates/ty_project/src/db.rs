@@ -829,7 +829,7 @@ pub(crate) mod testing {
     impl TestDb {
         #[cfg(feature = "testing")]
         pub fn program_environment(&self) -> ty_python_semantic::TypeOperations<'_> {
-            ty_python_semantic::TypeOperations::for_program(self, self.project().program(self))
+            ty_python_semantic::TypeOperations::for_test_program(self, self.project().program(self))
         }
 
         /// Takes the salsa events.

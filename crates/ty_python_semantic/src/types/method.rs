@@ -1,3 +1,4 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use itertools::Either;
@@ -236,13 +237,11 @@ impl<'db> BoundMethodType<'db> {
         )
     }
 
-    /// The unbound signatures stored directly on an actual or synthesized function.
-    /// Note that this function returns `None` for unions or intersections
-    /// of callables. These need to be handled by the caller.
-    pub(crate) fn unbound_signatures(self, db: &'db dyn Db) -> Option<&'db CallableSignature<'db>> {
+    /// The unbound callable, retaining any deferred signature or projection.
+    pub(crate) fn unbound_callable(self, db: &'db dyn Db) -> Option<CallableType<'db>> {
         match self.func(db) {
-            Type::FunctionLiteral(function) => Some(function.signature(db)),
-            Type::Callable(callable) => callable.explicit_signatures(db),
+            Type::FunctionLiteral(function) => Some(function.into_callable_type(db)),
+            Type::Callable(callable) => Some(callable),
             _ => None,
         }
     }
@@ -309,10 +308,18 @@ impl<'db> BoundMethodType<'db> {
             db: &'db dyn Db,
             method: BoundMethodType<'db>,
         ) -> Option<CallableTypes<'db>> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(method.program(db)),
-            );
+            SourceTypeQuery::run(db, (method,), |db, source_operation, (method,)| {
+                cached_from_source(db, source_operation, method)
+            })
+        }
+
+        fn cached_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            method: BoundMethodType<'db>,
+        ) -> Option<CallableTypes<'db>> {
+            let env =
+                source_operation.operations(ProgramEnvironment::from_program(method.program(db)));
             method.callables_with_receiver(
                 db,
                 &env,

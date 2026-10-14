@@ -6,6 +6,7 @@ use crate::types::TypeOperations;
 use crate::types::call::arguments::CallArguments;
 use crate::types::constraints::ConstraintSetBuilder;
 use crate::types::generics::{GenericContext, Specialization};
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use crate::types::signatures::Parameter;
 use crate::types::typevar::TypeVarNonceGenerator;
@@ -776,9 +777,11 @@ fn constructor_returns_instance<'db>(
     class_literal: ClassLiteral<'db>,
     return_ty: Type<'db>,
 ) -> bool {
-    TypeInspector::scope(env, |inspector| {
-        constructor_returns_instance_in(db, inspector, class_literal, return_ty)
-    })
+    TypeInspector::scope(
+        env,
+        TypeInspectionKey::ConstructorReturnsInstance,
+        |inspector| constructor_returns_instance_in(db, inspector, class_literal, return_ty),
+    )
 }
 
 fn constructor_returns_instance_in<'db>(
@@ -822,6 +825,7 @@ impl<'db> Binding<'db> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::IsSelfLikeConstructorReturnTypevar,
             cls_parameter_ty,
             |_, _| false,
             |_, cls_parameter_ty| {
@@ -888,6 +892,7 @@ impl<'db> Binding<'db> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::NormalizedConstructorReturn,
             self.signature.return_ty,
             |_, _| Some(self.signature.return_ty),
             |_, return_ty| return_ty.normalize_constructor_return(db, self),

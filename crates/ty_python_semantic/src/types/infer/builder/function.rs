@@ -1,6 +1,7 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::recursive::TypeQueryVisit;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey};
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use crate::{
     Db, DisplaySettings, FxIndexMap, ProgramEnvironment,
@@ -649,9 +650,11 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         |inspector, ty| ty.wrap_descriptor(db, inspector, kind),
                     )
                 }
-                let wrapped = TypeInspector::scope(self.program_environment(), |inspector| {
-                    wrap(db, inspector, inferred_ty, kind)
-                });
+                let wrapped = TypeInspector::scope(
+                    self.program_environment(),
+                    TypeInspectionKey::InferFunctionDefinition(definition),
+                    |inspector| wrap(db, inspector, inferred_ty, kind),
+                );
                 if let Some(wrapped) = wrapped {
                     inferred_ty = wrapped;
                     continue;
@@ -2310,6 +2313,10 @@ fn is_instance_tuple_exhaustive<'db>(
 struct InstanceTupleCovers<'a, 'db>(&'a TupleSpec<'db>);
 
 impl<'db> TypeQuery<'db> for InstanceTupleCovers<'_, 'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::InstanceTupleCovers(self.0.clone())
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -2372,6 +2379,10 @@ fn is_instance_truthiness<'db>(
 struct InstanceTruthiness<'db>(ClassLiteral<'db>);
 
 impl<'db> TypeQuery<'db> for InstanceTruthiness<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::InstanceTruthiness(self.0)
+    }
+
     type Output = Truthiness;
 
     fn on_cycle(

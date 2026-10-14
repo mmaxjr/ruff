@@ -1,3 +1,5 @@
+use crate::types::SourceTypeQuery;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use std::borrow::Cow;
 
@@ -52,6 +54,10 @@ fn has_exact_runtime_class<'db>(db: &'db dyn Db, env: &TypeOperations<'db>, ty: 
 struct HasExactRuntimeClass;
 
 impl<'db> TypeQuery<'db> for HasExactRuntimeClass {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::HasExactRuntimeClass
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -241,7 +247,31 @@ impl<'db> Type<'db> {
             op: ast::Operator,
             right_ty: Type<'db>,
         ) -> Option<BinaryOperationResult<'db>> {
-            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+            SourceTypeQuery::run(
+                db,
+                (program, left_ty, op, right_ty),
+                |db, source_operation, (program, left_ty, op, right_ty)| {
+                    try_call_bin_op_result_impl_from_source(
+                        db,
+                        source_operation,
+                        program,
+                        left_ty,
+                        op,
+                        right_ty,
+                    )
+                },
+            )
+        }
+
+        fn try_call_bin_op_result_impl_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            program: Program<'db>,
+            left_ty: Type<'db>,
+            op: ast::Operator,
+            right_ty: Type<'db>,
+        ) -> Option<BinaryOperationResult<'db>> {
+            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
             Type::compute_binary_operation_result(db, env, left_ty, op, right_ty)
         }
 

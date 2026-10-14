@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use ruff_db::{diagnostic::Span, parsed::parsed_module};
 use ruff_python_ast::{PythonVersion, name::Name};
@@ -249,14 +250,20 @@ impl<'db> DynamicNamedTupleLiteral<'db> {
     #[salsa::tracked(
         returns(ref),
         heap_size=ruff_memory_usage::heap_size,
-        cycle_initial=|db, _, self_: DynamicNamedTupleLiteral<'db>| Mro::from_error(
+        cycle_initial=|db, _, self_: DynamicNamedTupleLiteral<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| Mro::from_error(
             db,
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self_.scope(db))),
+            &source_operation.operations(ProgramEnvironment::from_scope(self_.scope(db))),
             ClassType::NonGeneric(ClassLiteral::DynamicNamedTuple(self_)),
-        ),
+        )),
     )]
     pub(crate) fn mro(self, db: &'db dyn Db) -> Mro<'db> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.scope(db)));
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.mro_from_source(db, source_operation)
+        })
+    }
+
+    fn mro_from_source(self, db: &'db dyn Db, source_operation: &SourceTypeQuery<'db>) -> Mro<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.scope(db)));
         let self_base = ClassBase::Class(ClassType::NonGeneric(self.into()));
         let tuple_class = self.tuple_base_class(db, &env);
         std::iter::once(self_base)

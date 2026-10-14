@@ -1,4 +1,5 @@
 use crate::types::TypeOperations;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey, TypeWalkKey};
 use crate::types::recursive::{TypeQueryVisit, TypeWalkVisit};
 use std::hash::{Hash, Hasher};
 
@@ -125,6 +126,10 @@ impl<'a, 'db, F> TypeWalk<'db, &'a mut F> for TypedDictPatternDomain
 where
     F: FnMut(TypedDictType<'db>) -> bool,
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::TypedDictPatternDomain
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -506,6 +511,7 @@ pub(crate) fn class_pattern_positional_result<'db>(
         ClassMatchArgs::Defined { member_type, .. } => TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::ClassPatternPositionalResult,
             member_type,
             |_, _| None,
             |_, match_args| match_args.class_pattern_positional_result(db),
@@ -790,6 +796,10 @@ struct DefinitePattern<'pattern, 'db>(&'pattern PatternPredicateKind<'db>);
 impl<'a, 'pattern, 'db> TypeWalk<'db, (&'a mut PatternTypeCache<'pattern, 'db>, Type<'db>)>
     for DefinitePattern<'pattern, 'db>
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::DefinitePattern(self.0.clone())
+    }
+
     type Output = Type<'db>;
 
     fn on_cycle(
@@ -1110,6 +1120,10 @@ struct SequencePatternFallthrough<'pattern, 'db>(&'pattern SequencePatternPredic
 impl<'a, 'db> TypeWalk<'db, (&'a mut ExactTuplePatternExpansionBudget, Type<'db>)>
     for SequencePatternFallthrough<'_, 'db>
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::SequencePatternFallthrough(self.0.clone())
+    }
+
     type Output = Result<Type<'db>, ()>;
 
     fn on_cycle(
@@ -1291,6 +1305,10 @@ fn is_same_enum_pattern_domain<'db>(
 struct EnumPatternDomain<'db>(EnumLiteralType<'db>);
 
 impl<'db> TypeQuery<'db> for EnumPatternDomain<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::EnumPatternDomain(self.0)
+    }
+
     type Output = bool;
 
     fn on_cycle(

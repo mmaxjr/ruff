@@ -10,6 +10,7 @@
 use crate::Db;
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey, TypeWalkKey};
 use crate::types::recursive::{TypeQueryVisit, TypeWalkVisit};
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext, TypeTraversal, TypeWalk};
 use ty_module_resolver::KnownModule;
@@ -323,6 +324,10 @@ impl<'db, R, F> TypeWalk<'db, F> for ResolveAttributeWrite<'_>
 where
     F: FnOnce(Option<AttributeWriteRequirement<'db>>) -> R,
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::ResolveAttributeWrite(ruff_python_ast::name::Name::new(self.0))
+    }
+
     type Output = R;
 
     fn on_cycle(
@@ -334,7 +339,9 @@ where
     ) -> Self::Output {
         evaluate(match kind {
             CycleKind::Exact => None,
-            CycleKind::MatchingIdentity => Some(AttributeWriteRequirement::CannotAssign),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => {
+                Some(AttributeWriteRequirement::CannotAssign)
+            }
         })
     }
 
@@ -676,6 +683,7 @@ fn possible_class_attribute_descriptor<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::PossibleClassAttributeDescriptor,
         descriptor_ty,
         |_, _| None,
         |_, descriptor_ty| descriptor_ty.data_descriptor(db),
@@ -756,6 +764,10 @@ fn shadowed_descriptor_write_type<'db>(
 struct ShadowedDescriptorWriteType;
 
 impl<'db> TypeQuery<'db> for ShadowedDescriptorWriteType {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::ShadowedDescriptorWriteType
+    }
+
     type Output = Option<Type<'db>>;
 
     fn on_cycle(
@@ -1093,6 +1105,7 @@ pub(super) fn descriptor_setter_domain<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::DescriptorSetterDomain,
         descriptor_ty,
         |_, _| DescriptorSetterDomain::Deferred,
         |_, descriptor_ty| descriptor_ty.descriptor_setter_domain(db, receiver_ty),
@@ -1269,9 +1282,8 @@ pub(super) fn property_setter_value_type<'db>(
         }
         definition = definition.or_else(|| {
             callable
-                .explicit_signatures(db)?
-                .iter()
-                .find_map(Signature::definition)
+                .parameter_signatures(db)
+                .find_map(super::callable::CallableParameters::definition)
         });
     }
     Some((UnionType::from_elements(db, env, set_types), definition))
@@ -1691,6 +1703,10 @@ struct CheckDescriptorWrite<'db> {
 }
 
 impl<'c, 'db> TypeWalk<'db, &TypeRelationChecker<'_, 'c, 'db>> for CheckDescriptorWrite<'db> {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::CheckDescriptorWrite(self.receiver_ty, self.value_ty)
+    }
+
     type Output = ConstraintSet<'db, 'c>;
 
     fn on_cycle(
@@ -1702,7 +1718,7 @@ impl<'c, 'db> TypeWalk<'db, &TypeRelationChecker<'_, 'c, 'db>> for CheckDescript
     ) -> Self::Output {
         match kind {
             CycleKind::Exact => checker.always(),
-            CycleKind::MatchingIdentity => checker.never(),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => checker.never(),
         }
     }
 

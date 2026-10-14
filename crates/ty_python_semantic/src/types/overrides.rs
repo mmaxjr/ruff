@@ -5,6 +5,7 @@
 
 mod attributes;
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use bitflags::bitflags;
 use ruff_db::{
@@ -84,7 +85,8 @@ pub(super) fn check_class<'db>(
     }
 
     let scope = class.body_scope(db);
-    let own_class_members: FxHashSet<_> = all_end_of_scope_members(db, scope).collect();
+    let own_class_members: FxHashSet<_> =
+        all_end_of_scope_members(db, context.program_environment(), scope).collect();
     let class_specialized = class.identity_specialization(db);
     if configuration.check_method_liskov_violations() && !inconsistent_generic_bases {
         check_inherited_method_conflicts(context, class, class_specialized, &own_class_members);
@@ -238,7 +240,8 @@ fn check_inherited_method_conflicts<'db>(
         //
         // class Conflict(Ordered, AcceptsObject): ...
         // ```
-        let members: FxHashSet<_> = all_end_of_scope_members(db, scope).collect();
+        let members: FxHashSet<_> =
+            all_end_of_scope_members(db, context.program_environment(), scope).collect();
 
         #[expect(
             clippy::iter_over_hash_type,
@@ -1240,19 +1243,22 @@ fn method_override_types<'db>(
 ) -> Option<(Type<'db>, Type<'db>)> {
     let (subclass_type, superclass_type) = match (subclass_type, superclass_type) {
         (Type::BoundMethod(subclass_method), Type::BoundMethod(superclass_method))
-            if let Some(superclass_signature) = superclass_method.unbound_signatures(db) =>
+            if let Some(superclass_callable) = superclass_method.unbound_callable(db) =>
         {
-            let explicit_receiver = match superclass_signature.overloads.as_slice() {
-                [signature] => signature
-                    .parameters()
-                    .get(0)
-                    .filter(|parameter| parameter.is_positional() && !parameter.inferred_annotation)
-                    .map(Parameter::annotated_type),
-                // TODO: Compare overloaded mixin methods within each overload's explicit receiver
-                // domain. Binding them directly to the concrete subclass can filter out applicable
-                // overloads when the subclass does not itself satisfy the receiver protocol.
-                _ => None,
-            };
+            let explicit_receiver =
+                superclass_callable
+                    .single_parameters(db)
+                    .and_then(|parameters| {
+                        parameters
+                            .get(0)
+                            .filter(|parameter| {
+                                parameter.is_positional() && !parameter.inferred_annotation
+                            })
+                            .map(Parameter::annotated_type)
+                    });
+            // TODO: Compare overloaded mixin methods within each overload's explicit receiver
+            // domain. Binding them directly to the concrete subclass can filter out applicable
+            // overloads when the subclass does not itself satisfy the receiver protocol.
 
             let typing_self_type = subclass_method.typing_self_type(db, env);
             let receiver =
@@ -1330,10 +1336,24 @@ pub(super) fn effective_superclass_variable_kind<'db>(
     superclass: ClassType<'db>,
     name: Name,
 ) -> Option<VariableKind> {
-    let env = &TypeOperations::for_inference(
+    SourceTypeQuery::run(
         db,
-        ProgramEnvironment::from_file(superclass.class_literal(db).program_file(db)),
-    );
+        (superclass, name),
+        |db, source_operation, (superclass, name)| {
+            effective_superclass_variable_kind_from_source(db, source_operation, superclass, &name)
+        },
+    )
+}
+
+fn effective_superclass_variable_kind_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    superclass: ClassType<'db>,
+    name: &Name,
+) -> Option<VariableKind> {
+    let env = &source_operation.operations(ProgramEnvironment::from_file(
+        superclass.class_literal(db).program_file(db),
+    ));
     let inherited_variable_kind = || {
         superclass
             .iter_mro(db, env)
@@ -1345,14 +1365,14 @@ pub(super) fn effective_superclass_variable_kind<'db>(
     let (superclass_literal, superclass_specialization) = superclass.static_class_literal(db)?;
     let superclass_scope = superclass_literal.body_scope(db);
     let superclass_symbol_table = place_table(db, superclass_scope);
-    let superclass_symbol_id = superclass_symbol_table.symbol_id(&name);
+    let superclass_symbol_id = superclass_symbol_table.symbol_id(name);
 
     let has_own_member = if let Some(id) = superclass_symbol_id {
         let superclass_symbol = superclass_symbol_table.symbol(id);
         superclass_symbol.is_bound() || superclass_symbol.is_declared()
     } else {
         superclass_literal
-            .own_synthesized_member(db, env, superclass_specialization, None, &name)
+            .own_synthesized_member(db, env, superclass_specialization, None, name)
             .is_some()
     };
 
@@ -1367,7 +1387,7 @@ pub(super) fn effective_superclass_variable_kind<'db>(
             return inherited_variable_kind();
         }
 
-        let class_member = superclass.own_class_member(db, env, None, &name).inner;
+        let class_member = superclass.own_class_member(db, env, None, name).inner;
 
         // Final attributes have their own override rule and diagnostic. Treating them as class
         // variables here would report both diagnostics for the same override.
@@ -1379,7 +1399,7 @@ pub(super) fn effective_superclass_variable_kind<'db>(
             db,
             env,
             class_member,
-            superclass.own_instance_member(db, env, &name).inner,
+            superclass.own_instance_member(db, env, name).inner,
         );
 
         if superclass_variable_kind == Some(VariableKind::Instance)

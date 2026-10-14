@@ -1,4 +1,5 @@
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use std::fmt::Display;
 
@@ -337,6 +338,10 @@ struct ResolveClassBase<'db> {
 }
 
 impl<'db> TypeQuery<'db> for ResolveClassBase<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::ResolveClassBase(self.subclass)
+    }
+
     type Output = Option<ClassBase<'db>>;
 
     fn on_cycle(

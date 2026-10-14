@@ -1,7 +1,9 @@
 use super::signatures::CallableSignature;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::recursive::TypeWalkVisit;
+use crate::types::recursive::{TypeInspectionKey, TypeWalkKey};
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use crate::{Program, ProgramEnvironment};
 use std::borrow::Cow;
@@ -1778,7 +1780,7 @@ impl<'db> Specialization<'db> {
         checker.check_specialization_pair(db, self, other)
     }
 
-    pub(crate) fn find_legacy_typevars_impl(
+    pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
@@ -2694,10 +2696,19 @@ impl<'db> TypeVarInference<'db> {
             db: &'db dyn Db,
             inference: TypeVarInference<'db>,
         ) -> Specialization<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(inference.generic_context(db).program(db)),
-            );
+            SourceTypeQuery::run(db, (inference,), |db, source_operation, (inference,)| {
+                merged_specialization_inner_from_source(db, source_operation, inference)
+            })
+        }
+
+        fn merged_specialization_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            inference: TypeVarInference<'db>,
+        ) -> Specialization<'db> {
+            let env = source_operation.operations(ProgramEnvironment::from_program(
+                inference.generic_context(db).program(db),
+            ));
             inference.merged_specialization_with(db, &env, |_, _| None)
         }
 
@@ -3808,6 +3819,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::IsStringKeyedMapping,
                 ty,
                 |_, _| false,
                 |_, ty| ty.is_string_keyed_mapping(db),
@@ -3824,6 +3836,10 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         struct CollectMappingUnionTypes;
 
         impl<'a, 'db> TypeWalk<'db, &'a mut MappingUnionTypes<'db>> for CollectMappingUnionTypes {
+            fn recursion_key(&self) -> TypeWalkKey<'db> {
+                TypeWalkKey::CollectMappingUnionTypes
+            }
+
             type Output = bool;
 
             fn on_cycle(

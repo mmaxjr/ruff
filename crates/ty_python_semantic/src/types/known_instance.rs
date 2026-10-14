@@ -1,5 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::{RecursiveReferenceMapper, TypeQueryVisit};
 use itertools::Either;
 use ruff_python_ast::name::Name;
@@ -102,6 +103,10 @@ struct MethodDescriptor<'db> {
 }
 
 impl<'db> super::TypeQuery<'db> for MethodDescriptor<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::MethodDescriptor(self.kind)
+    }
+
     type Output = Type<'db>;
 
     fn on_cycle(

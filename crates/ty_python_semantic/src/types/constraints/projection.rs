@@ -2,6 +2,7 @@
 
 use crate::types::TypeOperations;
 use crate::types::recursive::StructuralTypeVisit;
+use crate::types::recursive::TypeWalkKey;
 use rustc_hash::FxHashSet;
 
 use super::{
@@ -108,6 +109,10 @@ impl<'db, 'budget, 'state>
     TypeWalk<'db, &'state mut ProjectionTerms<'budget, 'db>, StructuralTraversal>
     for ChargeProjectionTerms
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::ChargeProjectionTerms
+    }
+
     type Output = Result<(), ProjectionError>;
 
     fn on_cycle(
@@ -119,7 +124,9 @@ impl<'db, 'budget, 'state>
     ) -> Self::Output {
         match kind {
             CycleKind::Exact => state.budget.charge_one(),
-            CycleKind::MatchingIdentity => Err(ProjectionError::TypeBudgetExceeded),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => {
+                Err(ProjectionError::TypeBudgetExceeded)
+            }
         }
     }
 

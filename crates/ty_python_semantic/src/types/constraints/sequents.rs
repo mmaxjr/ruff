@@ -1,5 +1,6 @@
 //! The [`SequentMap`] and related functionality
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::borrow::Cow;
@@ -403,7 +404,22 @@ impl<'db> SequentMap<'db> {
             program: Program<'db>,
             constraint: InternedSequentConstraint<'db>,
         ) -> SequentMap<'db> {
-            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+            SourceTypeQuery::run(
+                db,
+                (program, constraint),
+                |db, source_operation, (program, constraint)| {
+                    for_constraint_inner_from_source(db, source_operation, program, constraint)
+                },
+            )
+        }
+
+        fn for_constraint_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            program: Program<'db>,
+            constraint: InternedSequentConstraint<'db>,
+        ) -> SequentMap<'db> {
+            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
             compute(db, env, constraint.constraint(db))
         }
 
@@ -482,7 +498,29 @@ impl<'db> SequentMap<'db> {
             left: InternedSequentConstraint<'db>,
             right: InternedSequentConstraint<'db>,
         ) -> SequentMap<'db> {
-            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+            SourceTypeQuery::run(
+                db,
+                (program, left, right),
+                |db, source_operation, (program, left, right)| {
+                    for_constraint_pair_inner_from_source(
+                        db,
+                        source_operation,
+                        program,
+                        left,
+                        right,
+                    )
+                },
+            )
+        }
+
+        fn for_constraint_pair_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            program: Program<'db>,
+            left: InternedSequentConstraint<'db>,
+            right: InternedSequentConstraint<'db>,
+        ) -> SequentMap<'db> {
+            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
             compute(db, env, left.constraint(db), right.constraint(db))
         }
 

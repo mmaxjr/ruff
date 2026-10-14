@@ -3,7 +3,7 @@ use crate::place::{
     ConsideredDefinitions, DefinedPlace, Place, PlaceAndQualifiers, RequiresExplicitReExport,
     TypeOrigin, place_by_id, place_from_bindings, place_from_declarations,
 };
-use crate::types::TypeOperations;
+use crate::types::SourceTypeQuery;
 use crate::types::{ProgramEnvironment, Type, class::MroLookup, infer::nearest_enclosing_class};
 use ty_python_core::{
     place_table, scope::ScopeId, semantic_index, symbol::ScopedSymbolId, use_def_map,
@@ -57,6 +57,17 @@ impl<'db> Member<'db> {
 /// Infer the public type of a class member/symbol (its type as seen from outside its scope) in the given
 /// `scope`.
 pub(super) fn class_member<'db>(db: &'db dyn Db, scope: ScopeId<'db>, name: &str) -> Member<'db> {
+    SourceTypeQuery::run(db, (scope, name), |db, source_operation, (scope, name)| {
+        class_member_from_source(db, source_operation, scope, name)
+    })
+}
+
+fn class_member_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    name: &str,
+) -> Member<'db> {
     place_table(db, scope)
         .symbol_id(name)
         .map(|symbol_id| {
@@ -104,7 +115,7 @@ pub(super) fn class_member<'db>(db: &'db dyn Db, scope: ScopeId<'db>, name: &str
                 // Otherwise, we need to check if the symbol has bindings
                 let use_def = use_def_map(db, scope);
                 let bindings = use_def.end_of_scope_symbol_bindings(symbol_id);
-                let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+                let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
                 let inferred = place_from_bindings(db, &env, bindings).place;
 
                 // TODO: we should not need to calculate inferred type second time. This is a temporary
@@ -138,11 +149,26 @@ pub(super) fn inherited_class_body_declaration<'db>(
     scope: ScopeId<'db>,
     symbol: ScopedSymbolId,
 ) -> Option<PlaceAndQualifiers<'db>> {
+    SourceTypeQuery::run(
+        db,
+        (scope, symbol),
+        |db, source_operation, (scope, symbol)| {
+            inherited_class_body_declaration_from_source(db, source_operation, scope, symbol)
+        },
+    )
+}
+
+fn inherited_class_body_declaration_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    symbol: ScopedSymbolId,
+) -> Option<PlaceAndQualifiers<'db>> {
     scope.node(db).as_class()?;
     let table = place_table(db, scope);
     let name = table.symbol(symbol).name();
     let use_def = use_def_map(db, scope);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
     if !place_from_declarations(db, &env, use_def.end_of_scope_symbol_declarations(symbol))
         .ignore_conflicting_declarations()
         .is_undefined()

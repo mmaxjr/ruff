@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::recursive::TypeQueryVisit;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey};
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use ruff_python_ast::{self as ast};
 
@@ -27,6 +28,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let non_type_form_fallback = TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::InferTypeFormContextualExpression(
+                self.scope(),
+                ty_python_core::ExpressionNodeKey::from(expression),
+            ),
             target,
             |_, _| None,
             |_, target| target.type_form_context_fallback(db),
@@ -120,6 +125,10 @@ struct ContainsTypeFormValue<'a, 'db, 'ast> {
 }
 
 impl<'db> TypeQuery<'db> for ContainsTypeFormValue<'_, 'db, '_> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::ContainsTypeFormValue(self.builder.scope(), self.expression.into())
+    }
+
     type Output = bool;
 
     fn on_cycle(

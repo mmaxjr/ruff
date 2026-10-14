@@ -585,7 +585,7 @@ impl<'db> SubscriptChecker<'_, 'db> {
             .visit_active_with_expansion(db, (value_ty, slice_ty), &self.mapping, |visit| {
                 match visit {
                     Err(CycleKind::Exact) => Ok(Type::Never),
-                    Err(CycleKind::MatchingIdentity) => Ok(Type::unknown()),
+                    Err(CycleKind::MatchingIdentity | CycleKind::Reentrant) => Ok(Type::unknown()),
                     Ok(expansion) => match (value_ty, slice_ty) {
                         (Type::Dynamic(_) | Type::Divergent(_) | Type::Never, _) => {
                             value_ty.subscript_impl(db, self, slice_ty)

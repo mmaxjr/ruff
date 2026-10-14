@@ -6,6 +6,8 @@
 
 use crate::types::TypeOperations;
 use crate::types::recursive::StructuralTypeVisit;
+use crate::types::recursive::TypeInspectionKey;
+use crate::types::recursive::TypeWalkKey;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal, TypeInspector};
 use crate::types::{CycleKind, TypeWalk};
 use ty_python_core::definition::Definition;
@@ -158,6 +160,7 @@ pub(super) fn equality_exclusion_constraint<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::EqualityExclusionConstraint,
         ty,
         |_, _| None,
         |_, ty| ty.equality_exclusion(db, soundness_policy),
@@ -213,17 +216,21 @@ fn evaluate_type_comparison<'db>(
     operator: ComparisonOperator,
     soundness_policy: ComparisonSoundnessPolicy,
 ) -> Option<Type<'db>> {
-    TypeInspector::scope(env, |inspector| {
-        evaluate_type_comparison_in(
-            db,
-            inspector,
-            left,
-            right,
-            is_positive,
-            operator,
-            soundness_policy,
-        )
-    })
+    TypeInspector::scope(
+        env,
+        TypeInspectionKey::EvaluateTypeComparison,
+        |inspector| {
+            evaluate_type_comparison_in(
+                db,
+                inspector,
+                left,
+                right,
+                is_positive,
+                operator,
+                soundness_policy,
+            )
+        },
+    )
 }
 
 fn evaluate_type_comparison_in<'db>(
@@ -828,6 +835,7 @@ pub(super) fn is_builtin_literal_type<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::IsBuiltinLiteralType,
         ty,
         |_, _| false,
         |_, ty| ty.is_builtin_comparison_literal(db),
@@ -865,6 +873,7 @@ fn builtin_literal_constraint<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::BuiltinLiteralConstraint,
         right,
         |_, _| None,
         |inspector, right| {
@@ -914,7 +923,7 @@ fn add_equal_enum_literals<'db>(
     operator: ComparisonOperator,
     mut builder: UnionBuilder<'db>,
 ) -> UnionBuilder<'db> {
-    TypeInspector::scope(env, |inspector| {
+    TypeInspector::scope(env, TypeInspectionKey::AddEqualEnumLiterals, |inspector| {
         add_equal_enum_literals_in(db, inspector, ty, right, operator, &mut builder);
     });
     builder
@@ -967,6 +976,7 @@ fn enum_literal_constraint<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::EnumLiteralConstraint,
         right,
         |_, _| None,
         |_, right| right.enum_literal_constraint(db, left, operator, condition_expects_equality),
@@ -998,6 +1008,10 @@ struct EnumDomain<'db> {
 }
 
 impl<'db> TypeWalk<'db, (), StructuralTraversal> for EnumDomain<'db> {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::EnumDomain(self.right)
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -1479,6 +1493,7 @@ fn unsafe_narrowable_builtin_semantics<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::UnsafeNarrowableBuiltinSemantics,
         ty,
         |_, _| None,
         |_, ty| ty.unsafe_narrowable_builtin_semantics(db),
@@ -1915,9 +1930,11 @@ fn has_reflexive_equality_semantics<'db>(
     evaluator: &ComparisonEvaluator<'_, 'db>,
     ty: Type<'db>,
 ) -> bool {
-    TypeInspector::scope(evaluator.env, |inspector| {
-        has_reflexive_equality_semantics_in(evaluator, inspector, ty)
-    })
+    TypeInspector::scope(
+        evaluator.env,
+        TypeInspectionKey::HasReflexiveEqualitySemantics,
+        |inspector| has_reflexive_equality_semantics_in(evaluator, inspector, ty),
+    )
 }
 
 fn has_reflexive_equality_semantics_in<'db>(

@@ -1,5 +1,6 @@
 //! Parameters of implicit type aliases, including parameters used only in forward references.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use ruff_db::parsed::{parsed_module, parsed_string_annotation};
 use ruff_db::source::source_text;
@@ -35,12 +36,22 @@ pub(in crate::types) fn implicit_alias_parameters<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> Option<GenericContext<'db>> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        implicit_alias_parameters_from_source(db, source_operation, definition)
+    })
+}
+
+fn implicit_alias_parameters_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> Option<GenericContext<'db>> {
     let file = definition.program_file(db);
     let parsed = parsed_module(db, file.python_file(db)).load(db);
     let value = definition.kind(db).value(&parsed)?;
     let mut collector = ImplicitAliasLegacyTypeVarCollector {
         db,
-        operations: TypeOperations::for_inference(db, ProgramEnvironment::from_file(file)),
+        operations: source_operation.operations(ProgramEnvironment::from_file(file)),
         alias_definition: definition,
         index: semantic_index(db, file),
         string_annotation_scope: None,

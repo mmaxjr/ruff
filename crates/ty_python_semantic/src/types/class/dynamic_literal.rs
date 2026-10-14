@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use ruff_db::{diagnostic::Span, parsed::parsed_module};
 use ruff_python_ast::{self as ast, name::Name};
@@ -203,10 +204,19 @@ impl<'db> DynamicClassLiteral<'db> {
             db: &'db dyn Db,
             definition: Definition<'db>,
         ) -> Box<[Type<'db>]> {
+            SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+                deferred_explicit_bases_from_source(db, source_operation, definition)
+            })
+        }
+
+        fn deferred_explicit_bases_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            definition: Definition<'db>,
+        ) -> Box<[Type<'db>]> {
             let program_file = definition.program_file(db);
             let python_file = program_file.python_file(db);
-            let env =
-                TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+            let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
             let module = parsed_module(db, python_file).load(db);
 
             let value = definition
@@ -290,8 +300,18 @@ impl<'db> DynamicClassLiteral<'db> {
         self,
         db: &'db dyn Db,
     ) -> Result<ClassMetaclass<'db>, DynamicMetaclassConflict<'db>> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.try_metaclass_from_source(db, source_operation)
+        })
+    }
+
+    fn try_metaclass_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Result<ClassMetaclass<'db>, DynamicMetaclassConflict<'db>> {
         let original_bases = self.explicit_bases(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.scope(db)));
 
         // If no bases, metaclass is `type`.
         // To dynamically create a class with no bases that has a custom metaclass,
@@ -480,16 +500,26 @@ impl<'db> DynamicClassLiteral<'db> {
     /// an error (duplicate bases or C3 linearization failure).
     #[salsa::tracked(
         returns(ref),
-        cycle_initial=|db, _, self_: DynamicClassLiteral<'db>| {
+        cycle_initial=|db, _, self_: DynamicClassLiteral<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| {
             Ok(Mro::from([
                 ClassBase::Class(ClassType::NonGeneric(ClassLiteral::Dynamic(self_))),
-                ClassBase::object(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self_.scope(db)))),
+                ClassBase::object(db, &source_operation.operations(ProgramEnvironment::from_scope(self_.scope(db)))),
             ]))
-        },
+        }),
         heap_size=ruff_memory_usage::heap_size
     )]
     pub(crate) fn try_mro(self, db: &'db dyn Db) -> Result<Mro<'db>, DynamicMroError<'db>> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.scope(db)));
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.try_mro_from_source(db, source_operation)
+        })
+    }
+
+    fn try_mro_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Result<Mro<'db>, DynamicMroError<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.scope(db)));
         Mro::of_dynamic_class(db, &env, self)
     }
 

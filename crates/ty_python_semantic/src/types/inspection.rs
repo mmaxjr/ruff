@@ -1,5 +1,6 @@
 //! Metadata queries that consume expanded types inside the semantic operation.
 
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
@@ -53,6 +54,10 @@ impl<'db> Type<'db> {
 struct FindTypeCategory;
 
 impl<'db> TypeQuery<'db> for FindTypeCategory {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::FindTypeCategory
+    }
+
     type Output = Option<TypeCategory>;
 
     fn on_cycle(
@@ -122,6 +127,10 @@ impl<'db> TypeQuery<'db> for FindTypeCategory {
 struct StringLiteralCandidates;
 
 impl<'db> TypeQuery<'db> for StringLiteralCandidates {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::StringLiteralCandidates
+    }
+
     type Output = Vec<String>;
 
     fn on_cycle(
@@ -164,6 +173,10 @@ impl<'db> TypeQuery<'db> for StringLiteralCandidates {
 struct EnumLiteralSubjectNames;
 
 impl<'db> TypeQuery<'db> for EnumLiteralSubjectNames {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::EnumLiteralSubjectNames
+    }
+
     type Output = Option<(EnumClassLiteral<'db>, FxHashSet<Name>)>;
 
     fn on_cycle(

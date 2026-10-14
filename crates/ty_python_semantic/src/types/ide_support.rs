@@ -1,4 +1,6 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -236,11 +238,26 @@ impl<'db, 'name> ImplementationsFinder<'db, 'name> {
         db: &'scan dyn Db,
         file: ProgramFile<'scan>,
     ) -> Vec<ResolvedDefinition<'scan>> {
+        SourceTypeQuery::run(
+            db,
+            (self, file),
+            |db, source_operation, (source_self, file)| {
+                source_self.implementations_for_file_from_source(db, source_operation, file)
+            },
+        )
+    }
+
+    fn implementations_for_file_from_source<'scan>(
+        &'scan self,
+        db: &'scan dyn Db,
+        source_operation: &SourceTypeQuery<'scan>,
+        file: ProgramFile<'scan>,
+    ) -> Vec<ResolvedDefinition<'scan>> {
         if !self.name_matcher.may_match(&source_text(db, file.file(db))) {
             return Vec::new();
         }
 
-        let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+        let env = &source_operation.operations(ProgramEnvironment::from_file(file));
         let roots = &self.roots;
         match &self.kind {
             ImplementationsFinderKind::ClassFamily => {
@@ -717,9 +734,13 @@ fn collect_implementation_root_classes<'db>(
     seen: &mut FxHashSet<ClassLiteral<'db>>,
     roots: &mut Vec<ClassLiteral<'db>>,
 ) {
-    TypeInspector::scope(env, |inspector| {
-        collect_implementation_root_classes_in(db, inspector, ty, seen, roots);
-    });
+    TypeInspector::scope(
+        env,
+        TypeInspectionKey::CollectImplementationRootClasses,
+        |inspector| {
+            collect_implementation_root_classes_in(db, inspector, ty, seen, roots);
+        },
+    );
 }
 
 fn collect_implementation_root_classes_in<'db>(
@@ -1632,10 +1653,11 @@ mod stub_mapping {
     use crate::lexical_name_path::{
         lexical_name_path_component_for_node, lexical_name_path_for_definition,
     };
+    use crate::types::SourceTypeQuery;
     use crate::types::definition_resolution::{
         ImportAliasResolution, ResolvedDefinition, find_symbol_in_scope, resolve_definition,
     };
-    use crate::{Db, ProgramEnvironment, TypeOperations};
+    use crate::{Db, ProgramEnvironment};
     use ruff_db::files::vendored_path_to_file;
     use ruff_db::parsed::parsed_module;
     use ruff_db::system::SystemPath;
@@ -1651,12 +1673,26 @@ mod stub_mapping {
         def: &ResolvedDefinition<'db>,
         cached_vendored_typeshed: Option<&SystemPath>,
     ) -> Option<Vec<ResolvedDefinition<'db>>> {
+        SourceTypeQuery::run(
+            db,
+            (def, cached_vendored_typeshed),
+            |db, source_operation, (def, cached_vendored_typeshed)| {
+                map_stub_definition_from_source(db, source_operation, def, cached_vendored_typeshed)
+            },
+        )
+    }
+
+    fn map_stub_definition_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        def: &ResolvedDefinition<'db>,
+        cached_vendored_typeshed: Option<&SystemPath>,
+    ) -> Option<Vec<ResolvedDefinition<'db>>> {
         let Some(stub_program_file) = def.program_file(db) else {
             trace!("Found arbitrary FileWithRange while stub mapping, giving up");
             return None;
         };
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_file(stub_program_file));
+        let env = source_operation.operations(ProgramEnvironment::from_file(stub_program_file));
 
         // If the file isn't a stub, this is presumably the real definition
         let stub_file = stub_program_file.file(db);
@@ -1955,7 +1991,17 @@ fn reachable_class_literals_in_file<'db>(
     db: &'db dyn Db,
     file: ProgramFile<'db>,
 ) -> Vec<ClassLiteral<'db>> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+    SourceTypeQuery::run(db, (file,), |db, source_operation, (file,)| {
+        reachable_class_literals_in_file_from_source(db, source_operation, file)
+    })
+}
+
+fn reachable_class_literals_in_file_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    file: ProgramFile<'db>,
+) -> Vec<ClassLiteral<'db>> {
+    let env = source_operation.operations(ProgramEnvironment::from_file(file));
     let index = semantic_index(db, file);
     let parsed = parsed_module(db, file.python_file(db)).load(db);
     let mut classes = Vec::new();

@@ -1,6 +1,8 @@
 //! Equality reasoning for enum value domains without expanding member unions.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeVisitorKey;
 use crate::types::recursive::TypeVisitorState;
 use ruff_python_ast::name::Name;
 use rustc_hash::FxHashSet;
@@ -360,8 +362,7 @@ impl<'db> SameEnumComparison<'db> {
     }
 }
 
-pub(in crate::types) type EnumDomainVisitor<'env, 'db> =
-    TypeVisitorState<'env, 'db, (), Type<'db>, (), 3>;
+pub(in crate::types) type EnumDomainVisitor<'env, 'db> = TypeVisitorState<'env, 'db, Type<'db>, ()>;
 
 /// The enum-member values represented by an operand, excluding non-enum intersection state.
 ///
@@ -702,7 +703,7 @@ impl<'db> EnumDomainPartition<'db> {
         let mut enum_types = Vec::new();
         let mut alternatives = Vec::new();
         let mut enum_position = None;
-        let visitor = EnumDomainVisitor::new(env, ());
+        let visitor = EnumDomainVisitor::new(env, TypeVisitorKey::EnumDomain, ());
         EnumPartitionCollector {
             enum_types: &mut enum_types,
             alternatives: &mut alternatives,
@@ -736,7 +737,7 @@ struct EnumDomainSet<'db> {
 impl<'db> EnumDomainSet<'db> {
     fn from_type(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> Option<Self> {
         let mut domains = Vec::new();
-        let visitor = EnumDomainVisitor::new(env, ());
+        let visitor = EnumDomainVisitor::new(env, TypeVisitorKey::EnumDomain, ());
         EnumDomainCollector {
             domains: &mut domains,
             visitor: &visitor,
@@ -1046,10 +1047,24 @@ fn enum_class_key_profile<'db>(
     enum_class: EnumClassLiteral<'db>,
     operator: ComparisonOperator,
 ) -> EnumClassKeyProfile<'db> {
-    let env = TypeOperations::for_inference(
+    SourceTypeQuery::run(
         db,
-        ProgramEnvironment::from_file(enum_class.class_literal(db).program_file(db)),
-    );
+        (enum_class, operator),
+        |db, source_operation, (enum_class, operator)| {
+            enum_class_key_profile_from_source(db, source_operation, enum_class, operator)
+        },
+    )
+}
+
+fn enum_class_key_profile_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    enum_class: EnumClassLiteral<'db>,
+    operator: ComparisonOperator,
+) -> EnumClassKeyProfile<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_file(
+        enum_class.class_literal(db).program_file(db),
+    ));
     let semantics = KnownComparisonSemantics::of_instance(
         db,
         &env,

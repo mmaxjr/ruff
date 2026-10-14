@@ -4,6 +4,7 @@
 //! lookup takes an already-inferred receiver type. Neither lookup obtains use-site types
 //! through `SemanticModel` or requests completed inference of the caller's scope.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use std::collections::VecDeque;
 
@@ -170,11 +171,27 @@ pub(crate) fn definitions_for_name<'db>(
     name: &str,
     alias_resolution: ImportAliasResolution,
 ) -> Vec<ResolvedDefinition<'db>> {
+    SourceTypeQuery::run(
+        db,
+        (scope, name, alias_resolution),
+        |db, source_operation, (scope, name, alias_resolution)| {
+            definitions_for_name_from_source(db, source_operation, scope, name, alias_resolution)
+        },
+    )
+}
+
+fn definitions_for_name_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    name: &str,
+    alias_resolution: ImportAliasResolution,
+) -> Vec<ResolvedDefinition<'db>> {
     let definitions = scoped_definitions_for_name(db, scope, name, alias_resolution);
     if !definitions.is_empty() {
         return definitions;
     }
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
     implicit_builtins_symbol_scope(db, &env, name)
         .map(|scope| definitions_for_builtin(db, scope, name))
         .unwrap_or_default()
@@ -187,7 +204,29 @@ pub(crate) fn scoped_definitions_for_name<'db>(
     name_str: &str,
     alias_resolution: ImportAliasResolution,
 ) -> Vec<ResolvedDefinition<'db>> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    SourceTypeQuery::run(
+        db,
+        (scope, name_str, alias_resolution),
+        |db, source_operation, (scope, name_str, alias_resolution)| {
+            scoped_definitions_for_name_from_source(
+                db,
+                source_operation,
+                scope,
+                name_str,
+                alias_resolution,
+            )
+        },
+    )
+}
+
+fn scoped_definitions_for_name_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    name_str: &str,
+    alias_resolution: ImportAliasResolution,
+) -> Vec<ResolvedDefinition<'db>> {
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
     let file = scope.program_file(db);
     let index = semantic_index(db, file);
     let file_scope = scope.file_scope_id(db);
@@ -298,7 +337,18 @@ pub(crate) fn definitions_for_builtin<'db>(
     scope: ScopeId<'db>,
     name: &str,
 ) -> Vec<ResolvedDefinition<'db>> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    SourceTypeQuery::run(db, (scope, name), |db, source_operation, (scope, name)| {
+        definitions_for_builtin_from_source(db, source_operation, scope, name)
+    })
+}
+
+fn definitions_for_builtin_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    name: &str,
+) -> Vec<ResolvedDefinition<'db>> {
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
     find_symbol_in_scope(db, scope, name)
         .into_iter()
         .filter(|def| def.is_reexported(db))

@@ -1,6 +1,7 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::recursive::TypeQueryVisit;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey};
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use itertools::{Either, EitherOrBoth, Itertools};
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span};
@@ -1691,18 +1692,25 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         infer_rhs_value: &mut dyn FnMut(&mut Self, TypeContext<'db>) -> Type<'db>,
         emit_diagnostic: bool,
     ) -> bool {
-        TypeInspector::scope(self.program_environment(), |inspector| {
-            self.validate_subscript_assignment_in(
-                inspector,
-                target,
-                full_object_ty,
-                object_ty,
-                infer_slice_ty,
-                rhs_value_node,
-                infer_rhs_value,
-                emit_diagnostic,
-            )
-        })
+        TypeInspector::scope(
+            self.program_environment(),
+            TypeInspectionKey::ValidateSubscriptAssignmentImpl(
+                self.scope(),
+                ty_python_core::ExpressionNodeKey::from(ast::ExprRef::from(target)),
+            ),
+            |inspector| {
+                self.validate_subscript_assignment_in(
+                    inspector,
+                    target,
+                    full_object_ty,
+                    object_ty,
+                    infer_slice_ty,
+                    rhs_value_node,
+                    infer_rhs_value,
+                    emit_diagnostic,
+                )
+            },
+        )
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -2228,6 +2236,10 @@ impl AnnotatedExprContext {
 struct TypedDictKeyExpectedType;
 
 impl<'db> TypeQuery<'db> for TypedDictKeyExpectedType {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::TypedDictKeyExpectedType
+    }
+
     type Output = Option<Type<'db>>;
 
     fn on_cycle(

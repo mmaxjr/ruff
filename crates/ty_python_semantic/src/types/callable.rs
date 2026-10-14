@@ -4,9 +4,11 @@ use super::constraints::IteratorConstraintsExtension;
 use super::infer::TransparentCallableReturn;
 use super::protocol_class::StructuralMemberPriority;
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::recursive::TypeQueryVisit;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey};
 use itertools::Either;
 use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec_inline};
@@ -44,6 +46,10 @@ struct FunctionDescriptorGet<'db> {
 }
 
 impl<'db> TypeQuery<'db> for FunctionDescriptorGet<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::FunctionDescriptorGet(self.instance, self.owner)
+    }
+
     type Output = Option<Type<'db>>;
 
     fn on_cycle(
@@ -161,6 +167,19 @@ impl<'db> Type<'db> {
         Type::Callable(CallableType::paramspec_value(db, parameters))
     }
 
+    pub(super) fn callable_projection_key(self, db: &'db dyn Db) -> Type<'db> {
+        match self {
+            Type::ClassLiteral(_)
+            | Type::GenericAlias(_)
+            | Type::SubclassOf(_)
+            | Type::NominalInstance(_)
+            | Type::ProtocolInstance(_) => {
+                Type::Callable(CallableType::incomplete_projection(db, self))
+            }
+            _ => self,
+        }
+    }
+
     pub(crate) fn try_upcast_to_callable(
         self,
         db: &'db dyn Db,
@@ -207,17 +226,55 @@ impl<'db> Type<'db> {
         context: &CallableUpcastContext<'_, 'db>,
         receiver: Option<Type<'db>>,
     ) -> Option<CallableTypes<'db>> {
-        context.active.visit_active_with_expansion(
-            db,
+        let key = self.callable_projection_key(db);
+        // Stored functions and bound methods do not follow a deferred type definition here.
+        // Binding a receiver can ask a relation to inspect the same method; that relation owns
+        // the recursive assumption, so conversion must not reject it as an unfinished projection.
+        if matches!(
             self,
-            &context.mapping,
-            |result| match result {
-                Ok(expansion) => {
-                    self.try_upcast_to_callable_impl(db, env, policy, context, receiver, expansion)
-                }
-                Err(_) => None,
-            },
-        )
+            Type::Callable(_) | Type::FunctionLiteral(_) | Type::BoundMethod(_)
+        ) {
+            return context.active.visit_active_with_expansion(
+                db,
+                self,
+                &context.mapping,
+                |result| {
+                    result.ok().and_then(|expansion| {
+                        self.try_upcast_to_callable_impl(
+                            db, env, policy, context, receiver, expansion,
+                        )
+                    })
+                },
+            );
+        }
+        env.context()
+            .state()
+            .callable_upcasts
+            .get_or_init(|| Box::new(crate::types::CycleDetector::new(())))
+            .visit_active_with_expansion(
+                db,
+                (
+                    key,
+                    (policy, context.recursive_definition),
+                    receiver.unwrap_or(Type::Never).callable_projection_key(db),
+                ),
+                &context.mapping,
+                |result| match result {
+                    Ok(expansion) => self
+                        .try_upcast_to_callable_impl(db, env, policy, context, receiver, expansion),
+                    Err(kind)
+                        if matches!(
+                            self,
+                            Type::ClassLiteral(_) | Type::GenericAlias(_) | Type::SubclassOf(_)
+                        ) =>
+                    {
+                        Some(CallableTypes::one(CallableType::constructor_cycle(
+                            db, self, kind,
+                        )))
+                    }
+                    Err(_) => None,
+                },
+            )
     }
 
     fn try_upcast_to_callable_impl(
@@ -308,7 +365,10 @@ impl<'db> Type<'db> {
                         )
                         // The callable instance itself doesn't inherit the descriptor behavior of
                         // its `__call__` method.
-                        .map(|callables| callables.map(|callable| callable.into_regular(db)))
+                        .map(|callables| {
+                            callables
+                                .map(|callable| callable.into_regular(db).projected_from(db, self))
+                        })
                 } else {
                     None
                 }
@@ -788,6 +848,70 @@ pub enum SignatureSource<'db, S = CallableSignature<'db>> {
     Explicit(S),
     /// Source inputs for a lambda signature, whose return type is inferred on demand.
     Lambda(LambdaSignature<'db>),
+    /// A callable interface obtained from another type, retaining the source of its recursion.
+    Projected(ProjectedSignature<'db>),
+}
+
+/// The callable interface of a class or instance, with the original type retained.
+/// The applied signatures are private: semantic consumers inspect them through the operation
+/// that guards the projection, rather than treating them as independent stored signatures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
+pub struct ProjectedSignature<'db> {
+    source: Type<'db>,
+    callable: Option<CallableType<'db>>,
+}
+
+impl<'db> ProjectedSignature<'db> {
+    pub(super) fn source(&self) -> Type<'db> {
+        self.source
+    }
+
+    pub(super) fn walk_inputs<V: visitor::TypeVisitor<'db> + ?Sized>(
+        &self,
+        db: &'db dyn Db,
+        visitor: &V,
+    ) {
+        visitor.visit_type(db, self.source);
+        if let Some(callable) = self.callable {
+            walk_callable_type(db, callable, visitor);
+        } else {
+            visitor.notify_skipped_lazy_type_attributes();
+        }
+    }
+}
+
+enum ParameterSource<'db> {
+    Explicit(&'db CallableSignature<'db>),
+    Lambda(LambdaSignature<'db>),
+}
+
+/// Stored parameter annotations and declaration metadata, without access to a return type.
+#[derive(Clone, Copy)]
+pub(super) struct CallableParameters<'db> {
+    parameters: &'db Parameters<'db>,
+    declaration: Option<&'db Signature<'db>>,
+}
+
+impl<'db> CallableParameters<'db> {
+    pub(super) fn parameters(self) -> &'db Parameters<'db> {
+        self.parameters
+    }
+    pub(super) fn generic_context(self) -> Option<super::GenericContext<'db>> {
+        self.declaration
+            .and_then(|signature| signature.generic_context)
+    }
+    pub(super) fn definition(self) -> Option<Definition<'db>> {
+        self.declaration.and_then(Signature::definition)
+    }
+    pub(super) fn source_overload_index(self) -> Option<usize> {
+        self.declaration.and_then(Signature::source_overload_index)
+    }
+    pub(super) fn with_return_type(self, return_type: Type<'db>) -> Signature<'db> {
+        match self.declaration {
+            Some(signature) => signature.clone().with_return_type(return_type),
+            None => Signature::new(self.parameters.clone(), return_type),
+        }
+    }
 }
 
 // Borrowed signatures hash identically to owned signatures. Salsa only clones them when
@@ -797,6 +921,7 @@ impl<'db> salsa::Lookup<SignatureSource<'db>> for SignatureSource<'db, &Callable
         match self {
             Self::Explicit(signatures) => SignatureSource::Explicit(signatures.clone()),
             Self::Lambda(lambda) => SignatureSource::Lambda(lambda),
+            Self::Projected(projection) => SignatureSource::Projected(projection),
         }
     }
 }
@@ -808,6 +933,7 @@ impl<'db> salsa::HashEqLike<SignatureSource<'db, &CallableSignature<'db>>>
         match (self, other) {
             (Self::Explicit(left), SignatureSource::Explicit(right)) => left == *right,
             (Self::Lambda(left), SignatureSource::Lambda(right)) => left == right,
+            (Self::Projected(left), SignatureSource::Projected(right)) => left == right,
             _ => false,
         }
     }
@@ -839,6 +965,10 @@ pub(super) fn walk_callable_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
                 for parameter in lambda.parameters(db) {
                     visitor.visit_type(db, parameter.annotated_type());
                 }
+            }
+            SignatureSource::Projected(projection) => {
+                visitor.notify_skipped_lazy_type_attributes();
+                projection.walk_inputs(db, visitor);
             }
         }
     }
@@ -922,9 +1052,23 @@ impl<'db> LambdaSource<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
+        SourceTypeQuery::run(
+            db,
+            (self, typevar),
+            |db, source_operation, (source_self, typevar)| {
+                source_self.return_variance_from_source(db, source_operation, typevar)
+            },
+        )
+    }
+
+    fn return_variance_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
         let source = self.input(db);
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(source.scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(source.scope(db)));
         source
             .infer_body(db)
             .expression_type(source.body(db))
@@ -958,6 +1102,43 @@ pub(crate) struct ExpandedSignatures<'scope, 'db> {
 }
 
 impl<'scope, 'db> ExpandedSignatures<'scope, 'db> {
+    /// Summarize annotation variance for diagnostics while the return type remains guarded.
+    pub(super) fn single_annotation_variances(
+        self,
+        db: &'db dyn Db,
+        variable: BoundTypeVarIdentity<'db>,
+    ) -> Option<(Vec<(usize, super::TypeVarVariance)>, super::TypeVarVariance)> {
+        let [signature] = self.signatures.overloads.as_slice() else {
+            return None;
+        };
+        let parameters = signature
+            .parameters()
+            .iter()
+            .filter_map(|parameter| {
+                let index = parameter.source_parameter_index()?;
+                let ty = match parameter.annotated_type() {
+                    Type::TypeVar(typevar) if typevar.paramspec_attr(db).is_some() => {
+                        Type::TypeVar(typevar.without_paramspec_attr(db))
+                    }
+                    ty => ty,
+                };
+                Some((
+                    index,
+                    ty.with_polarity(super::TypeVarVariance::Contravariant)
+                        .variance_of(db, self.env, variable)
+                        .evaluate(db),
+                ))
+            })
+            .collect();
+        Some((
+            parameters,
+            signature
+                .return_ty
+                .variance_of(db, self.env, variable)
+                .evaluate(db),
+        ))
+    }
+
     /// Inspect signatures already stored as finite values, without expanding a callable.
     pub(super) fn from_stored(
         signatures: &'scope CallableSignature<'db>,
@@ -1486,6 +1667,223 @@ impl<'scope, 'db> ExpandedSignatures<'scope, 'db> {
 }
 
 impl<'db> CallableType<'db> {
+    /// Bind only receivers whose annotations were supplied implicitly by their declaration.
+    pub(super) fn bind_implicit_receiver(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        receiver: Type<'db>,
+        self_type: Type<'db>,
+    ) -> Self {
+        match self.signature_source(db) {
+            SignatureSource::Explicit(signatures) => self.with_signatures(
+                db,
+                CallableSignature::from_overloads(signatures.iter().map(|signature| {
+                    if signature.has_implicit_positional_receiver_annotation() {
+                        signature.bind_self_with_receiver(db, env, Some(receiver), Some(self_type))
+                    } else {
+                        signature.clone()
+                    }
+                })),
+            ),
+            SignatureSource::Lambda(lambda) => {
+                if lambda.parameters(db).get(0).is_some_and(|parameter| {
+                    parameter.is_positional() && parameter.inferred_annotation
+                }) {
+                    self.bind_self(db, env, receiver, self_type)
+                } else {
+                    self
+                }
+            }
+            SignatureSource::Projected(projection) => self.with_signature_source(
+                db,
+                SignatureSource::Projected(ProjectedSignature {
+                    source: projection.source,
+                    callable: projection.callable.map(|callable| {
+                        callable.bind_implicit_receiver(db, env, receiver, self_type)
+                    }),
+                }),
+            ),
+        }
+    }
+
+    /// Merge stored approximations without evaluating a deferred signature.
+    pub(super) fn normalize_stored_cycle(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        previous: Self,
+        cycle: &salsa::Cycle,
+    ) -> Option<Self> {
+        match (self.signature_source(db), previous.signature_source(db)) {
+            (SignatureSource::Explicit(current), SignatureSource::Explicit(previous)) => {
+                Some(self.with_signatures(db, current.cycle_normalized(db, env, previous, cycle)))
+            }
+            (SignatureSource::Projected(current), SignatureSource::Projected(previous))
+                if current.source == previous.source =>
+            {
+                Some(self.with_signature_source(
+                    db,
+                    SignatureSource::Projected(ProjectedSignature {
+                        source: current.source,
+                        callable: match (current.callable, previous.callable) {
+                            (Some(current), Some(previous)) => {
+                                Some(current.normalize_stored_cycle(db, env, previous, cycle)?)
+                            }
+                            (current, previous) => current.or(previous),
+                        },
+                    }),
+                ))
+            }
+            _ => None,
+        }
+    }
+    /// Inspect parameters and their declaration metadata without opening a deferred return.
+    pub(super) fn parameter_signatures(
+        self,
+        db: &'db dyn Db,
+    ) -> impl ExactSizeIterator<Item = CallableParameters<'db>> {
+        match self.parameter_source(db) {
+            ParameterSource::Explicit(signatures) => {
+                Either::Left(signatures.iter().map(|signature| CallableParameters {
+                    parameters: signature.parameters(),
+                    declaration: Some(signature),
+                }))
+            }
+            ParameterSource::Lambda(lambda) => Either::Right(std::iter::once(CallableParameters {
+                parameters: lambda.parameters(db),
+                declaration: None,
+            })),
+        }
+    }
+
+    /// Preserve the established bottom approximation for exact constructor cycles. A growing
+    /// specialization has no finite signature, so retain its source as an incomplete projection.
+    pub(super) fn constructor_cycle(db: &'db dyn Db, source: Type<'db>, kind: CycleKind) -> Self {
+        match kind {
+            CycleKind::Exact => Self::bottom(db),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => {
+                Self::incomplete_projection(db, source)
+            }
+        }
+    }
+
+    /// Retain the source of an unfinished conversion without manufacturing a complete signature.
+    pub(super) fn incomplete_projection(db: &'db dyn Db, source: Type<'db>) -> Self {
+        Self::new_internal(
+            db,
+            SignatureSource::<CallableSignature<'db>>::Projected(ProjectedSignature {
+                source,
+                callable: None,
+            }),
+            CallableTypeKind::Regular,
+            None,
+        )
+    }
+
+    pub(super) fn projected_from(self, db: &'db dyn Db, source: Type<'db>) -> Self {
+        self.with_signature_source(
+            db,
+            SignatureSource::Projected(ProjectedSignature {
+                source,
+                callable: Some(self),
+            }),
+        )
+    }
+
+    pub(super) fn bind_protocol_receiver(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        self_type: Option<Type<'db>>,
+    ) -> Self {
+        match self.signature_source(db) {
+            SignatureSource::Explicit(signatures) => self.with_signatures(
+                db,
+                signatures.bind_self_with_receiver(db, env, self_type, self_type),
+            ),
+            SignatureSource::Lambda(lambda) => {
+                let lambda = match self_type {
+                    Some(receiver) => lambda.bind_receiver(db, env, receiver, receiver),
+                    None => lambda.with_bound_parameters(
+                        db,
+                        env,
+                        lambda.parameters(db).bind_receiver(db),
+                    ),
+                };
+                self.with_lambda_signature(db, lambda)
+            }
+            SignatureSource::Projected(projection) => self.with_signature_source(
+                db,
+                SignatureSource::Projected(ProjectedSignature {
+                    source: projection.source,
+                    callable: projection
+                        .callable
+                        .map(|callable| callable.bind_protocol_receiver(db, env, self_type)),
+                }),
+            ),
+        }
+        .into_regular(db)
+    }
+
+    fn parameter_source(self, db: &'db dyn Db) -> ParameterSource<'db> {
+        match self.signature_source(db) {
+            SignatureSource::Explicit(signatures) => ParameterSource::Explicit(signatures),
+            SignatureSource::Lambda(lambda) => ParameterSource::Lambda(*lambda),
+            SignatureSource::Projected(projection) => projection
+                .callable
+                .unwrap_or_else(|| {
+                    Self::new(
+                        db,
+                        CallableSignature::from_overloads([]),
+                        CallableTypeKind::Regular,
+                    )
+                })
+                .parameter_source(db),
+        }
+    }
+
+    /// Read declaration metadata without exposing a projected signature's return type.
+    pub(super) fn generic_contexts(
+        self,
+        db: &'db dyn Db,
+    ) -> impl Iterator<Item = Option<super::GenericContext<'db>>> {
+        match self.parameter_source(db) {
+            ParameterSource::Explicit(signatures) => {
+                Either::Left(signatures.iter().map(|signature| signature.generic_context))
+            }
+            ParameterSource::Lambda(_) => Either::Right(std::iter::once(None)),
+        }
+    }
+
+    /// Change which variables a signature binds, retaining its projection and deferred returns.
+    pub(super) fn map_generic_contexts(
+        self,
+        db: &'db dyn Db,
+        mut map: impl FnMut(Option<super::GenericContext<'db>>) -> Option<super::GenericContext<'db>>,
+    ) -> Self {
+        match self.signature_source(db) {
+            SignatureSource::Explicit(signatures) => self.with_signatures(
+                db,
+                CallableSignature::from_overloads(signatures.iter().map(|signature| {
+                    let mut signature = signature.clone();
+                    signature.generic_context = map(signature.generic_context);
+                    signature
+                })),
+            ),
+            SignatureSource::Lambda(_) => self,
+            SignatureSource::Projected(projection) => self.with_signature_source(
+                db,
+                SignatureSource::Projected(ProjectedSignature {
+                    source: projection.source,
+                    callable: projection
+                        .callable
+                        .map(|callable| callable.map_generic_contexts(db, map)),
+                }),
+            ),
+        }
+    }
+
     pub(super) fn map_recursive_references(
         self,
         db: &'db dyn Db,
@@ -1497,6 +1895,14 @@ impl<'db> CallableType<'db> {
             }
             SignatureSource::Lambda(lambda) => {
                 SignatureSource::Lambda(lambda.map_recursive_references(db, mapper))
+            }
+            SignatureSource::Projected(projection) => {
+                SignatureSource::Projected(ProjectedSignature {
+                    source: mapper.map_type(db, projection.source),
+                    callable: projection
+                        .callable
+                        .map(|callable| callable.map_recursive_references(db, mapper)),
+                })
             }
         };
         self.with_signature_source(db, source)
@@ -1523,14 +1929,14 @@ impl<'db> CallableType<'db> {
 
     /// Replace return types without evaluating a deferred body that will be discarded.
     pub(super) fn with_return_type(self, db: &'db dyn Db, return_ty: Type<'db>) -> Self {
-        let signatures = match self.signature_source(db) {
-            SignatureSource::Explicit(signatures) => CallableSignature::from_overloads(
+        let signatures = match self.parameter_source(db) {
+            ParameterSource::Explicit(signatures) => CallableSignature::from_overloads(
                 signatures
                     .iter()
                     .cloned()
                     .map(|signature| signature.with_return_type(return_ty)),
             ),
-            SignatureSource::Lambda(lambda) => {
+            ParameterSource::Lambda(lambda) => {
                 CallableSignature::single(Signature::new(lambda.parameters(db).clone(), return_ty))
             }
         };
@@ -1538,13 +1944,10 @@ impl<'db> CallableType<'db> {
     }
 
     /// Read signatures already stored on this callable without inferring a deferred body.
-    pub(crate) fn explicit_signatures(
-        self,
-        db: &'db dyn Db,
-    ) -> Option<&'db CallableSignature<'db>> {
+    fn explicit_signatures(self, db: &'db dyn Db) -> Option<&'db CallableSignature<'db>> {
         match self.signature_source(db) {
             SignatureSource::Explicit(signatures) => Some(signatures),
-            SignatureSource::Lambda(_) => None,
+            SignatureSource::Lambda(_) | SignatureSource::Projected(_) => None,
         }
     }
 
@@ -1567,6 +1970,11 @@ impl<'db> CallableType<'db> {
                     env,
                 })
             }),
+            SignatureSource::Projected(projection) => context
+                .expand_signature(db, env, self, || {
+                    projection.callable?.inspect_signatures(db, env, inspect)
+                })
+                .flatten(),
         }
     }
 
@@ -1586,6 +1994,13 @@ impl<'db> CallableType<'db> {
             SignatureSource::Lambda(lambda) => {
                 expansion.expand_signature(db, self, |env| lambda.signature(db, env))?
             }
+            SignatureSource::Projected(projection) => {
+                Cow::Owned(expansion.expand_signature(db, self, |env| {
+                    projection
+                        .callable?
+                        .inspect_signatures(db, env, |signatures| signatures.signatures.clone())
+                })??)
+            }
         };
         Some(inspect(ExpandedSignatures {
             signatures: &signatures,
@@ -1603,9 +2018,13 @@ impl<'db> CallableType<'db> {
             ExpandedSignatures<'_, 'db>,
         ) -> R,
     ) -> Option<R> {
-        super::recursive::TypeInspector::scope(env, |traversal| {
-            traversal.inspect_signatures(db, self, |signatures| inspect(traversal, signatures))
-        })
+        super::recursive::TypeInspector::scope(
+            env,
+            TypeInspectionKey::InspectSignaturesRoot,
+            |traversal| {
+                traversal.inspect_signatures(db, self, |signatures| inspect(traversal, signatures))
+            },
+        )
     }
 
     /// Obtain a comparison key while preserving the caller's active signature expansions.
@@ -1632,6 +2051,11 @@ impl<'db> CallableType<'db> {
         match self.signature_source(db) {
             SignatureSource::Explicit(signatures) => signatures.variance_of(db, env, typevar),
             SignatureSource::Lambda(lambda) => lambda.variance_of(db, env, typevar),
+            SignatureSource::Projected(projection) => projection
+                .callable
+                .map_or(super::TypeVarVariance::Invariant.into(), |callable| {
+                    callable.variance_of(db, env, typevar)
+                }),
         }
     }
 
@@ -1640,11 +2064,11 @@ impl<'db> CallableType<'db> {
         self,
         db: &'db dyn Db,
     ) -> impl ExactSizeIterator<Item = &'db Parameters<'db>> {
-        match self.signature_source(db) {
-            SignatureSource::Explicit(signatures) => {
+        match self.parameter_source(db) {
+            ParameterSource::Explicit(signatures) => {
                 Either::Left(signatures.overloads.iter().map(Signature::parameters))
             }
-            SignatureSource::Lambda(lambda) => {
+            ParameterSource::Lambda(lambda) => {
                 Either::Right(std::iter::once(lambda.parameters(db)))
             }
         }
@@ -1652,23 +2076,24 @@ impl<'db> CallableType<'db> {
 
     /// Lambda signatures have no declared generic context; captured variables belong to their source.
     pub(crate) fn has_generic_context(self, db: &'db dyn Db) -> bool {
-        self.explicit_signatures(db).is_some_and(|signatures| {
-            signatures
+        match self.parameter_source(db) {
+            ParameterSource::Explicit(signatures) => signatures
                 .iter()
-                .any(|signature| signature.generic_context.is_some())
-        })
+                .any(|signature| signature.generic_context.is_some()),
+            ParameterSource::Lambda(_) => false,
+        }
     }
 
     /// Inspect the parameters of a non-overloaded callable without inferring a lambda's body.
     pub(crate) fn single_parameters(self, db: &'db dyn Db) -> Option<&'db Parameters<'db>> {
-        match self.signature_source(db) {
-            SignatureSource::Explicit(signatures) => {
+        match self.parameter_source(db) {
+            ParameterSource::Explicit(signatures) => {
                 let [signature] = signatures.overloads.as_slice() else {
                     return None;
                 };
                 Some(signature.parameters())
             }
-            SignatureSource::Lambda(lambda) => Some(lambda.parameters(db)),
+            ParameterSource::Lambda(lambda) => Some(lambda.parameters(db)),
         }
     }
 
@@ -1833,9 +2258,9 @@ impl<'db> CallableType<'db> {
     /// Retain every parameter signature and its generic context, but erase return types
     /// that do not participate in a `ParamSpec` specialization.
     pub(crate) fn into_paramspec_value(self, db: &'db dyn Db) -> CallableType<'db> {
-        let signatures = match self.signature_source(db) {
-            SignatureSource::Explicit(signatures) => signatures.clone(),
-            SignatureSource::Lambda(lambda) => CallableSignature::single(Signature::new(
+        let signatures = match self.parameter_source(db) {
+            ParameterSource::Explicit(signatures) => signatures.clone(),
+            ParameterSource::Lambda(lambda) => CallableSignature::single(Signature::new(
                 lambda.parameters(db).clone(),
                 Type::unknown(),
             )),
@@ -1918,6 +2343,14 @@ impl<'db> CallableType<'db> {
                 receiver_type,
                 typing_self_type,
             )),
+            SignatureSource::Projected(projection) => {
+                SignatureSource::Projected(ProjectedSignature {
+                    source: projection.source,
+                    callable: projection.callable.map(|callable| {
+                        callable.bind_self(db, env, receiver_type, typing_self_type)
+                    }),
+                })
+            }
         };
         Self::new_internal(db, source, CallableTypeKind::Regular, self.deprecated(db))
     }
@@ -1944,6 +2377,14 @@ impl<'db> CallableType<'db> {
             SignatureSource::Lambda(lambda) => {
                 SignatureSource::Lambda(lambda.apply_receiver(db, env, receiver_type, self_type))
             }
+            SignatureSource::Projected(projection) => {
+                SignatureSource::Projected(ProjectedSignature {
+                    source: projection.source,
+                    callable: projection.callable.map(|callable| {
+                        callable.apply_self_with_receiver(db, env, receiver_type, self_type)
+                    }),
+                })
+            }
         };
         Self::new_internal(db, source, self.kind(db), self.deprecated(db))
     }
@@ -1963,13 +2404,27 @@ impl<'db> CallableType<'db> {
         div: Type<'db>,
         nested: bool,
     ) -> Option<Self> {
-        let Some(signatures) = self.explicit_signatures(db) else {
-            return Some(self);
-        };
-        Some(self.with_signatures(
-            db,
-            signatures.recursive_type_normalized_impl(db, env, div, nested)?,
-        ))
+        Some(match self.signature_source(db) {
+            SignatureSource::Explicit(signatures) => self.with_signatures(
+                db,
+                signatures.recursive_type_normalized_impl(db, env, div, nested)?,
+            ),
+            SignatureSource::Lambda(_) => self,
+            SignatureSource::Projected(projection) => self.with_signature_source(
+                db,
+                SignatureSource::Projected(ProjectedSignature {
+                    source: projection
+                        .source
+                        .recursive_type_normalized_impl(db, env, div, nested)?,
+                    callable: match projection.callable {
+                        Some(callable) => {
+                            Some(callable.recursive_type_normalized_impl(db, env, div, nested)?)
+                        }
+                        None => None,
+                    },
+                }),
+            ),
+        })
     }
 
     pub(super) fn apply_type_mapping_impl<'a>(
@@ -2007,6 +2462,19 @@ impl<'db> CallableType<'db> {
                     }
                 };
                 SignatureSource::Lambda(mapped)
+            }
+            SignatureSource::Projected(projection) => {
+                SignatureSource::Projected(ProjectedSignature {
+                    source: projection.source.apply_type_mapping_impl(
+                        db,
+                        type_mapping,
+                        tcx,
+                        visitor,
+                    ),
+                    callable: projection.callable.map(|callable| {
+                        callable.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
+                    }),
+                })
             }
         };
         Self::new_internal(db, source, self.kind(db), self.deprecated(db))

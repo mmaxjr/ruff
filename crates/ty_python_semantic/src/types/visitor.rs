@@ -1,6 +1,7 @@
 use crate::Db;
 use crate::types::TypeOperations;
 use crate::types::recursive::StructuralTypeVisit;
+use crate::types::recursive::TypeWalkKey;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use std::cell::{Cell, RefCell};
 use std::hash::Hash;
@@ -419,6 +420,10 @@ struct VisitRecursiveBody;
 impl<'db, V: TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, StructuralTraversal>
     for VisitRecursiveBody
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::VisitRecursiveBody
+    }
+
     type Output = ();
 
     fn on_cycle(

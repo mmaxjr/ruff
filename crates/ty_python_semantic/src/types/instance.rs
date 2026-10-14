@@ -1,6 +1,7 @@
 //! Instance types: both nominal and structural.
 
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
@@ -234,6 +235,16 @@ pub(super) fn walk_nominal_instance_type<'db, V: super::visitor::TypeVisitor<'db
 }
 
 impl<'db> NominalInstanceType<'db> {
+    /// Read the stored class without constructing a class for a tuple or a builtin singleton.
+    pub(super) fn stored_class(self, db: &'db dyn Db) -> Option<ClassType<'db>> {
+        match self.0 {
+            NominalInstanceInner::NonTuple(class) => Some(class.class(db)),
+            NominalInstanceInner::ExactTuple(_)
+            | NominalInstanceInner::Object
+            | NominalInstanceInner::SysVersionInfo => None,
+        }
+    }
+
     pub(super) fn map_recursive_references(
         self,
         db: &'db dyn Db,
@@ -581,7 +592,22 @@ fn protocol_materialization_is_noop<'db>(
         program: crate::Program<'db>,
         class: ProtocolClass<'db>,
     ) -> bool {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        SourceTypeQuery::run(
+            db,
+            (program, class),
+            |db, source_operation, (program, class)| {
+                cached_from_source(db, source_operation, program, class)
+            },
+        )
+    }
+
+    fn cached_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: crate::Program<'db>,
+        class: ProtocolClass<'db>,
+    ) -> bool {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
         compute(db, &env, class)
     }
 
@@ -1608,10 +1634,23 @@ fn non_recursive_protocol_constraints<'db>(
         source: ProtocolInstanceType<'db>,
         target: ProtocolInterfaceView<'db>,
     ) -> OwnedConstraintSet<'db> {
-        let env = TypeOperations::for_inference(
+        SourceTypeQuery::run(
             db,
-            ProgramEnvironment::from_program(target.base().program(db)),
-        );
+            (source, target),
+            |db, source_operation, (source, target)| {
+                cached_from_source(db, source_operation, source, target)
+            },
+        )
+    }
+
+    fn cached_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source: ProtocolInstanceType<'db>,
+        target: ProtocolInterfaceView<'db>,
+    ) -> OwnedConstraintSet<'db> {
+        let env = source_operation
+            .operations(ProgramEnvironment::from_program(target.base().program(db)));
         compute(db, &env, source, target)
     }
 
@@ -2077,7 +2116,23 @@ impl<'db> ProtocolInstanceType<'db> {
             protocol: ProtocolInstanceType<'db>,
             _: (),
         ) -> bool {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+            SourceTypeQuery::run(
+                db,
+                (program, protocol, ()),
+                |db, source_operation, (program, protocol, ())| {
+                    cached_from_source(db, source_operation, program, protocol, ())
+                },
+            )
+        }
+
+        fn cached_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            program: crate::Program<'db>,
+            protocol: ProtocolInstanceType<'db>,
+            _: (),
+        ) -> bool {
+            let env = source_operation.operations(ProgramEnvironment::from_program(program));
             compute(db, &env, protocol)
         }
 

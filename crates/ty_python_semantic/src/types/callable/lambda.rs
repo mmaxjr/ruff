@@ -1,5 +1,6 @@
 //! Transform lambda signatures without making their inferred return types part of their identity.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
@@ -63,6 +64,22 @@ fn lambda_inference_sources<'db>(
     ty: Type<'db>,
     include_inputs: bool,
 ) -> Box<[ScopeId<'db>]> {
+    SourceTypeQuery::run(
+        db,
+        (program, ty, include_inputs),
+        |db, source_operation, (program, ty, include_inputs)| {
+            lambda_inference_sources_from_source(db, source_operation, program, ty, include_inputs)
+        },
+    )
+}
+
+fn lambda_inference_sources_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    program: Program<'db>,
+    ty: Type<'db>,
+    include_inputs: bool,
+) -> Box<[ScopeId<'db>]> {
     struct SourceVisitor<'db> {
         env: TypeOperations<'db>,
         include_inputs: bool,
@@ -96,7 +113,9 @@ fn lambda_inference_sources<'db>(
                         lambda.walk_inference_inputs(db, visit);
                     }
                 }
-                SignatureSource::Explicit(_) => walk_callable_type(db, callable, visit),
+                SignatureSource::Explicit(_) | SignatureSource::Projected(_) => {
+                    walk_callable_type(db, callable, visit);
+                }
             }
         }
 
@@ -124,7 +143,7 @@ fn lambda_inference_sources<'db>(
     }
 
     let visitor = SourceVisitor {
-        env: TypeOperations::for_inference(db, ProgramEnvironment::from_program(program)),
+        env: source_operation.operations(ProgramEnvironment::from_program(program)),
         include_inputs,
         visited: TypeCollector::default(),
         sources: RefCell::default(),
@@ -1307,8 +1326,18 @@ fn source_return_type_dependencies<'db>(
     db: &'db dyn Db,
     source: LambdaSource<'db>,
 ) -> TypeVarSet<'db> {
+    SourceTypeQuery::run(db, (source,), |db, source_operation, (source,)| {
+        source_return_type_dependencies_from_source(db, source_operation, source)
+    })
+}
+
+fn source_return_type_dependencies_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    source: LambdaSource<'db>,
+) -> TypeVarSet<'db> {
     let lambda = source.input(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(lambda.scope(db)));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(lambda.scope(db)));
     type_dependencies(
         db,
         &env,
@@ -1324,9 +1353,19 @@ fn source_return_type_dependencies<'db>(
     heap_size=ruff_memory_usage::heap_size,
 )]
 fn source_captured_typevars<'db>(db: &'db dyn Db, input: LambdaSource<'db>) -> GenericContext<'db> {
+    SourceTypeQuery::run(db, (input,), |db, source_operation, (input,)| {
+        source_captured_typevars_from_source(db, source_operation, input)
+    })
+}
+
+fn source_captured_typevars_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    input: LambdaSource<'db>,
+) -> GenericContext<'db> {
     let source = input.input(db);
     let scope = source.scope(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
     let index = semantic_index(db, scope.program_file(db));
     let mut scopes = vec![scope.file_scope_id(db)];
     let mut position = 0;

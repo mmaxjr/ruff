@@ -20,6 +20,7 @@
 //! avoid this is to prefer always calling `visitor.visit` only in the main recursive method on
 //! `Type`.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::operations::{RecursiveOperationScope, TypeOperationIdentity};
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
@@ -42,9 +43,9 @@ use crate::types::function::FunctionLiteral;
 use crate::types::generics::{GenericContext, Specialization};
 use crate::types::visitor::{TypeCollector, TypeVisitor};
 use crate::types::{
-    BoundTypeVarIdentity, BoundTypeVarInstance, KnownClass, MaterializationKind,
-    ProtocolInstanceType, RecursiveType, StaticClassLiteral, Type, TypeAliasType, TypedDictType,
-    walk_signature,
+    BoundTypeVarIdentity, BoundTypeVarInstance, ClassLiteral, KnownClass, MaterializationKind,
+    ProtocolInstanceType, RecursiveType, StaticClassLiteral, SubclassOfInner, Type, TypeAliasType,
+    TypedDictType, walk_signature,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -65,6 +66,8 @@ pub enum TypeIdentity<'db> {
     GrowingProtocol(Definition<'db>),
     GrowingTypeAlias(Definition<'db>),
     GrowingTypedDict(Definition<'db>),
+    GrowingConstructor(Definition<'db>, Option<KnownClass>),
+    GrowingCallableInstance(Definition<'db>, Option<KnownClass>),
     GrowingRecursive {
         definition: Definition<'db>,
         materialization: Option<MaterializationKind>,
@@ -108,12 +111,17 @@ impl<'db> Type<'db> {
                             .and_then(|args| args.materialization_kind(db))
             }
             (Type::Callable(a), Type::Callable(b)) => {
-                a.runtime_class(db) == b.runtime_class(db)
-                    && matches!(
-                        (a.signature_source(db), b.signature_source(db)),
-                        (SignatureSource::Lambda(a), SignatureSource::Lambda(b))
-                            if a.source(db) == b.source(db)
-                    )
+                if a.runtime_class(db) != b.runtime_class(db) {
+                    return false;
+                }
+                matches!(
+                    (a.signature_source(db), b.signature_source(db)),
+                    (SignatureSource::Lambda(a), SignatureSource::Lambda(b))
+                        if a.source(db) == b.source(db)
+                ) || matches!((a.signature_source(db), b.signature_source(db)),
+                        (SignatureSource::Projected(a), SignatureSource::Projected(b))
+                        if RecursiveDefinition::from_type(db, a.source()).zip(RecursiveDefinition::from_type(db, b.source()))
+                            .is_some_and(|(a,b)| a.target(db).origin(db) == b.target(db).origin(db)))
             }
             _ => false,
         }
@@ -156,6 +164,16 @@ impl<'db> Type<'db> {
                     RecursiveDefinition::TypedDict(class) => {
                         TypeIdentity::GrowingTypedDict(class.definition(db))
                     }
+                    RecursiveDefinition::Constructor(class) => TypeIdentity::GrowingConstructor(
+                        class.definition(db),
+                        self.as_callable()?.runtime_class(db),
+                    ),
+                    RecursiveDefinition::CallableInstance(class) => {
+                        TypeIdentity::GrowingCallableInstance(
+                            class.definition(db),
+                            self.as_callable()?.runtime_class(db),
+                        )
+                    }
                     RecursiveDefinition::Structural(_) => {
                         let Type::Recursive(recursive) = self else {
                             return None;
@@ -194,6 +212,8 @@ enum RecursiveDefinition<'db> {
     TypeAlias(TypeAliasType<'db>),
     Protocol(StaticClassLiteral<'db>),
     TypedDict(StaticClassLiteral<'db>),
+    Constructor(StaticClassLiteral<'db>),
+    CallableInstance(StaticClassLiteral<'db>),
     Structural(RecursiveType<'db>),
     Lambda(LambdaSignature<'db>),
 }
@@ -202,6 +222,8 @@ enum RecursiveDefinition<'db> {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum RecursiveOrigin<'db> {
     Definition(Definition<'db>),
+    Constructor(Definition<'db>),
+    CallableInstance(Definition<'db>),
     Lambda(LambdaSignature<'db>),
 }
 
@@ -318,6 +340,27 @@ struct SourceParameterCollector<'a, 'db> {
 impl<'db> RecursiveDefinition<'db> {
     fn from_type(db: &'db dyn Db, ty: Type<'db>) -> Option<DefinitionUse<'db>> {
         let (target, specialization) = match ty {
+            Type::ClassLiteral(ClassLiteral::Static(class)) => {
+                class.generic_context(db)?;
+                (Self::Constructor(class), None)
+            }
+            Type::GenericAlias(alias) => (
+                Self::Constructor(alias.origin(db)),
+                Some(alias.specialization(db)),
+            ),
+            Type::SubclassOf(subclass) => {
+                let SubclassOfInner::Class(class) = subclass.subclass_of() else {
+                    return None;
+                };
+                let (class, arguments) = class.static_class_literal(db)?;
+                class.generic_context(db)?;
+                (Self::Constructor(class), arguments)
+            }
+            Type::NominalInstance(instance) => {
+                let (class, arguments) = instance.stored_class(db)?.static_class_literal(db)?;
+                class.generic_context(db)?;
+                (Self::CallableInstance(class), arguments)
+            }
             Type::Recursive(recursive) => {
                 let specialization = recursive.arguments(db)?;
                 (
@@ -340,10 +383,13 @@ impl<'db> RecursiveDefinition<'db> {
                 (Self::TypedDict(origin), specialization)
             }
             Type::Callable(callable) => {
-                let SignatureSource::Lambda(lambda) = callable.signature_source(db) else {
-                    return None;
+                return match callable.signature_source(db) {
+                    SignatureSource::Lambda(lambda) => Some(DefinitionUse::Lambda(*lambda)),
+                    SignatureSource::Projected(projection) => {
+                        Self::from_type(db, projection.source())
+                    }
+                    SignatureSource::Explicit(_) => None,
                 };
-                return Some(DefinitionUse::Lambda(*lambda));
             }
             _ => return None,
         };
@@ -359,12 +405,18 @@ impl<'db> RecursiveDefinition<'db> {
                 RecursiveOrigin::Definition(origin.definition(db))
             }
             Self::Lambda(lambda) => RecursiveOrigin::Lambda(lambda),
+            Self::Constructor(class) => RecursiveOrigin::Constructor(class.definition(db)),
+            Self::CallableInstance(class) => {
+                RecursiveOrigin::CallableInstance(class.definition(db))
+            }
         }
     }
 
     fn environment(self, db: &'db dyn Db) -> ProgramEnvironment<'db> {
         match self.origin(db) {
-            RecursiveOrigin::Definition(definition) => {
+            RecursiveOrigin::Definition(definition)
+            | RecursiveOrigin::Constructor(definition)
+            | RecursiveOrigin::CallableInstance(definition) => {
                 ProgramEnvironment::from_definition(definition)
             }
             RecursiveOrigin::Lambda(lambda) => ProgramEnvironment::from_scope(lambda.scope(db)),
@@ -375,7 +427,10 @@ impl<'db> RecursiveDefinition<'db> {
         match self {
             Self::TypeAlias(alias) => alias.generic_context(db),
             Self::Structural(recursive) => recursive.parameters(db),
-            Self::Protocol(origin) | Self::TypedDict(origin) => origin.generic_context(db),
+            Self::Protocol(origin)
+            | Self::TypedDict(origin)
+            | Self::Constructor(origin)
+            | Self::CallableInstance(origin) => origin.generic_context(db),
             Self::Lambda(lambda) => Some(LambdaSource::of(db, lambda).captured_typevars(db)),
         }
     }
@@ -388,7 +443,10 @@ impl<'db> RecursiveDefinition<'db> {
     ) -> Specialization<'db> {
         let known_class = match self {
             Self::TypeAlias(_) | Self::Structural(_) | Self::Lambda(_) => None,
-            Self::Protocol(origin) | Self::TypedDict(origin) => origin.known(db),
+            Self::Protocol(origin)
+            | Self::TypedDict(origin)
+            | Self::Constructor(origin)
+            | Self::CallableInstance(origin) => origin.known(db),
         };
         generic_context.default_specialization(db, env, known_class)
     }
@@ -532,35 +590,38 @@ impl<'db> DefinitionUse<'db> {
 
 impl<'db> SpecializationFlowGraph<'db> {
     fn build(db: &'db dyn Db, root: RecursiveDefinition<'db>) -> Self {
-        let mut graph = Self::default();
-        let mut pending = vec![root];
-        let mut visited = FxHashSet::default();
+        SourceTypeQuery::run(db, root, |db, source_operation, root| {
+            let env = source_operation.operations(root.environment(db));
+            let mut graph = Self::default();
+            let mut pending = vec![root];
+            let mut visited = FxHashSet::default();
 
-        while let Some(source) = pending.pop() {
-            let source_definition = source.origin(db);
-            if !visited.insert(source_definition) {
-                continue;
+            while let Some(source) = pending.pop() {
+                let source_definition = source.origin(db);
+                if !visited.insert(source_definition) {
+                    continue;
+                }
+                let Some(visitor) = SpecializationFlowVisitor::new(db, &env, source) else {
+                    graph.inconclusive = true;
+                    continue;
+                };
+                if !visitor.visit_definition_body(db, source) {
+                    graph.inconclusive = true;
+                }
+                let (edges, referenced_definitions, inconclusive) = visitor.finish();
+                graph.edges.extend(edges);
+                if inconclusive {
+                    graph.inconclusive_definitions.insert(source_definition);
+                }
+                graph.definition_edges.extend(
+                    referenced_definitions
+                        .iter()
+                        .map(|target| (source_definition, target.origin(db))),
+                );
+                pending.extend(referenced_definitions);
             }
-            let Some(visitor) = SpecializationFlowVisitor::new(db, source) else {
-                graph.inconclusive = true;
-                continue;
-            };
-            if !visitor.visit_definition_body(db, source) {
-                graph.inconclusive = true;
-            }
-            let (edges, referenced_definitions, inconclusive) = visitor.finish();
-            graph.edges.extend(edges);
-            if inconclusive {
-                graph.inconclusive_definitions.insert(source_definition);
-            }
-            graph.definition_edges.extend(
-                referenced_definitions
-                    .iter()
-                    .map(|target| (source_definition, target.origin(db))),
-            );
-            pending.extend(referenced_definitions);
-        }
-        graph
+            graph
+        })
     }
 
     fn root_may_have_unbounded_specialization(
@@ -724,11 +785,15 @@ impl<'db> SpecializationFlowGraph<'db> {
 }
 
 impl<'db> SpecializationFlowVisitor<'db> {
-    fn new(db: &'db dyn Db, source: RecursiveDefinition<'db>) -> Option<Self> {
+    fn new(
+        db: &'db dyn Db,
+        env: &crate::types::TypeOperations<'db>,
+        source: RecursiveDefinition<'db>,
+    ) -> Option<Self> {
         Some(Self {
             source_origin: source.origin(db),
             source_parameters: source.source_parameters(db)?,
-            env: TypeOperations::for_inference(db, source.environment(db)),
+            env: env.in_environment(source.environment(db)),
             visited_types: TypeCollector::default(),
             edges: RefCell::default(),
             referenced_definitions: RefCell::default(),
@@ -752,8 +817,12 @@ impl<'db> SpecializationFlowVisitor<'db> {
         let traversal = TypeVisitorContext::new(self);
         match source {
             RecursiveDefinition::Structural(recursive) => {
-                let visitor: super::recursive::TypeVisitorState<'_, 'db, (), Type<'db>, bool, 1> =
-                    super::recursive::TypeVisitorState::new(&self.env, false);
+                let visitor: super::recursive::TypeVisitorState<'_, 'db, Type<'db>, bool> =
+                    super::recursive::TypeVisitorState::new(
+                        &self.env,
+                        super::recursive::TypeVisitorKey::SpecializationFlow,
+                        false,
+                    );
                 return visitor.visit_structure(db, Type::Recursive(recursive), |expansion| {
                     let Some(body) = expansion.recursive_body(db, recursive).into_unfolded() else {
                         return false;
@@ -789,6 +858,41 @@ impl<'db> SpecializationFlowVisitor<'db> {
             RecursiveDefinition::Lambda(lambda) => {
                 for signature in infer_lambda_signature(db, LambdaSource::of(db, lambda)) {
                     walk_signature(db, signature, &traversal);
+                }
+            }
+            RecursiveDefinition::Constructor(class) => {
+                let callables = class.identity_specialization(db).into_callable(db, env);
+                for callable in &callables {
+                    if callable
+                        .inspect_signatures(db, env, |signatures| {
+                            signatures.walk(db, &traversal);
+                        })
+                        .is_none()
+                    {
+                        return false;
+                    }
+                }
+            }
+            RecursiveDefinition::CallableInstance(class) => {
+                let Some(instance) = Type::from(class.identity_specialization(db))
+                    .to_instance_approximation(db, env)
+                else {
+                    return false;
+                };
+                // Follow the declared callable member as an edge in the flow graph. Converting
+                // it first would recurse through a class-valued or instance-valued __call__
+                // before the graph can classify that edge's type arguments.
+                if let Some(call) = instance
+                    .member_lookup_with_policy(
+                        db,
+                        env,
+                        "__call__",
+                        super::MemberLookupPolicy::NO_INSTANCE_FALLBACK,
+                    )
+                    .place
+                    .ignore_possibly_undefined()
+                {
+                    traversal.visit_type(db, call);
                 }
             }
         }
@@ -1340,6 +1444,9 @@ pub enum CycleKind {
     Exact,
     /// The types have the same recursive identity, but their arguments can differ.
     MatchingIdentity,
+    /// Another invocation of the same operation is already inspecting this type. Unlike an
+    /// edge within one traversal, semantic re-entry can contribute a new projected value.
+    Reentrant,
 }
 
 struct ActiveTypeVisit<'a, 'db, T: HasIdentity<'db> + PartialEq, const INLINE_CAPACITY: usize> {

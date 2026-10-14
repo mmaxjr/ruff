@@ -1,4 +1,6 @@
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeInspectionKey;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use compact_str::{CompactString, ToCompactString};
 use itertools::Itertools;
@@ -479,6 +481,7 @@ fn definition_expression_annotation<'db>(
     }
 }
 
+pub(crate) use operations::SourceTypeQuery;
 pub(crate) use operations::TypeRecursionContext;
 
 impl<'db> TypeRecursionContext<'db> {
@@ -534,7 +537,7 @@ impl<'db> TypeRecursionContext<'db> {
                 (source, env.program(db), target),
                 |cycle| match cycle {
                     Some(CycleKind::Exact) => true,
-                    Some(CycleKind::MatchingIdentity) => false,
+                    Some(CycleKind::MatchingIdentity | CycleKind::Reentrant) => false,
                     None => check(),
                 },
             )
@@ -556,7 +559,7 @@ impl<'db> TypeRecursionContext<'db> {
     }
 }
 
-type TypeRecursionRevision = [u64; 23];
+type TypeRecursionRevision = [u64; 24];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
@@ -564,6 +567,9 @@ impl TypeRecursionContext<'_> {
         // Keep this pattern exhaustive: each new guard must also invalidate cached queries.
         let TypeRecursionState {
             operation: _,
+            // Query guards are tracked individually in each cached result's dependencies.
+            type_queries: _,
+            type_visitors: _,
             function_normalization,
             lambda_captures,
             lambda_return_dependencies,
@@ -574,6 +580,7 @@ impl TypeRecursionContext<'_> {
             specialized_mro,
             class_fields,
             class_constructors,
+            callable_upcasts,
             abstract_methods,
             typed_dict_openness,
             meta_type:
@@ -604,6 +611,7 @@ impl TypeRecursionContext<'_> {
             specialized_mro.revision(),
             class_fields.revision(),
             class_constructors.get().map_or(0, |guard| guard.revision()),
+            callable_upcasts.get().map_or(0, |guard| guard.revision()),
             abstract_methods.revision(),
             typed_dict_openness.revision(),
             aliases.revision(),
@@ -625,6 +633,8 @@ impl TypeRecursionContext<'_> {
 
 #[derive(Default)]
 struct TypeRecursionState<'db> {
+    type_queries: recursive::TypeQueryRecursion<'db>,
+    type_visitors: recursive::TypeVisitorRecursion<'db>,
     function_normalization: ActiveRecursionDetector<(salsa::Id, bool)>,
     lambda_captures: OnceCell<Box<CycleDetector<'db, (), Type<'db>, (), 1>>>,
     lambda_return_dependencies: OnceCell<Box<CycleDetector<'db, (), Type<'db>, (), 1>>>,
@@ -635,6 +645,7 @@ struct TypeRecursionState<'db> {
     specialized_mro: ActiveRecursionDetector<GenericAlias<'db>>,
     class_fields: ActiveRecursionDetector<class::ClassFieldQuery<'db>>,
     class_constructors: OnceCell<Box<ClassConstructorRecursion<'db>>>,
+    callable_upcasts: OnceCell<Box<CallableUpcastRecursion<'db>>>,
     abstract_methods: ActiveRecursionDetector<ClassType<'db>>,
     typed_dict_openness: ActiveRecursionDetector<TypedDictType<'db>>,
     operation: operations::OperationState,
@@ -648,6 +659,18 @@ struct TypeRecursionState<'db> {
     alias_definitions: ActiveRecursionDetector<Definition<'db>>,
     comparisons: OnceCell<Box<relation::ComparisonRecursion<'db>>>,
 }
+
+type CallableUpcastRecursion<'db> = CycleDetector<
+    'db,
+    (),
+    (
+        Type<'db>,
+        (callable::UpcastPolicy, Option<Definition<'db>>),
+        Type<'db>,
+    ),
+    (),
+    3,
+>;
 
 type ClassConstructorRecursion<'db> = CycleDetector<'db, (), (Type<'db>, Type<'db>), (), 2>;
 
@@ -816,11 +839,7 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
 }
 
 /// A [`CycleDetector`] that is used in `find_legacy_typevars` methods.
-pub(crate) type FindLegacyTypeVarsVisitor<'env, 'db> =
-    TypeVisitorState<'env, 'db, FindLegacyTypeVars, Type<'db>, (), 3>;
-
-#[derive(Debug)]
-pub(crate) struct FindLegacyTypeVars;
+type FindLegacyTypeVarsVisitor<'env, 'db> = TypeVisitorState<'env, 'db, Type<'db>, ()>;
 
 /// The standard-library `typing` module or its `typing_extensions` backport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, get_size2::GetSize)]
@@ -998,6 +1017,10 @@ fn descriptor_get_result<'db>(
 struct IsDefinitelyNonDataDescriptor;
 
 impl<'db> TypeQuery<'db> for IsDefinitelyNonDataDescriptor {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::IsDefinitelyNonDataDescriptor
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -1039,6 +1062,10 @@ struct IsDataDescriptor {
 }
 
 impl<'db> TypeQuery<'db> for IsDataDescriptor {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::IsDataDescriptor(self.any_of_union)
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -1050,7 +1077,7 @@ impl<'db> TypeQuery<'db> for IsDataDescriptor {
     ) -> bool {
         match kind {
             CycleKind::Exact => !self.any_of_union,
-            CycleKind::MatchingIdentity => self.any_of_union,
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => self.any_of_union,
         }
     }
 
@@ -2469,7 +2496,7 @@ fn recursive_type_normalize_type_guard_like<'db, T: TypeGuardLike<'db>>(
 /// `Iterator[T]` and `AsyncIterator[T]` constrain yielded values but do not declare
 /// send or return types. Defaults used to check a generator body do not describe
 /// an arbitrary iterator's termination value or establish a send requirement.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 enum GeneratorTypeMode {
     /// Extract parameters exposed by `Generator` or `AsyncGenerator`, without
     /// supplying defaults for plain iterators.
@@ -2959,7 +2986,9 @@ impl<'db> Type<'db> {
 
     /// If this type is a class instance, returns its class.
     fn nominal_class(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Option<ClassType<'db>> {
-        TypeInspector::scope(env, |inspector| self.nominal_class_in(db, inspector))
+        TypeInspector::scope(env, TypeInspectionKey::NominalClass, |inspector| {
+            self.nominal_class_in(db, inspector)
+        })
     }
 
     fn nominal_class_in(
@@ -2985,6 +3014,7 @@ impl<'db> Type<'db> {
             || TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::MayPreferDeclaredType,
                 self,
                 |_, _| false,
                 |_, ty| ty.matches(|ty| ty.is_callable_type()),
@@ -3138,6 +3168,7 @@ impl<'db> Type<'db> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::HasOuterType,
             self,
             |ty, _| predicate(ty),
             |_, ty| ty.matches(predicate),
@@ -3158,6 +3189,7 @@ impl<'db> Type<'db> {
             TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::ResolvedIdentityRight,
                 other,
                 |right, _| left == right,
                 |_, right| right.has_same_type(left),
@@ -3169,6 +3201,7 @@ impl<'db> Type<'db> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::ResolvedIdentityLeft,
             self,
             |left, _| compare_right(left),
             |_, left| left.has_same_resolved_type(db, other),
@@ -3187,6 +3220,7 @@ impl<'db> Type<'db> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::ConstructorForTypevarBound,
             self,
             |_, _| Type::unknown(),
             |_, bound| bound.constructor_for_bound(db),
@@ -3406,9 +3440,11 @@ impl<'db> Type<'db> {
 
     /// Detects types which are valid to appear inside a `Literal[…]` type annotation.
     fn is_literal_or_union_of_literals(&self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
-        TypeInspector::scope(env, |inspector| {
-            self.is_literal_or_union_of_literals_in(db, inspector)
-        })
+        TypeInspector::scope(
+            env,
+            TypeInspectionKey::IsLiteralOrUnionOfLiterals,
+            |inspector| self.is_literal_or_union_of_literals_in(db, inspector),
+        )
     }
 
     fn is_literal_or_union_of_literals_in(
@@ -3682,7 +3718,7 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         f: impl FnMut(&Type<'db>) -> bool,
     ) -> Type<'db> {
-        TypeInspector::scope(env, |inspector| {
+        TypeInspector::scope(env, TypeInspectionKey::FilterUnion, |inspector| {
             inspector.inspect_normalized(
                 db,
                 self,
@@ -4118,6 +4154,10 @@ impl<'db> Type<'db> {
         }
 
         impl<'db> TypeQuery<'db> for LookupMroMember<'_> {
+            fn recursion_key(&self) -> TypeQueryKey<'db> {
+                TypeQueryKey::LookupMroMember(self.name.into(), self.policy)
+            }
+
             type Output = Option<PlaceAndQualifiers<'db>>;
 
             fn on_cycle(
@@ -4343,19 +4383,27 @@ impl<'db> Type<'db> {
         #[salsa::tracked(
             returns(copy),
             cycle_initial=|_, id, _| Place::bound(Type::divergent(id)).into(),
-            cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, member: PlaceAndQualifiers<'db>, key: MemberLookupKey<'db>| {
-                member.cycle_normalized(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(key.program(db))), *previous, cycle)
-            },
+            cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, member: PlaceAndQualifiers<'db>, key: MemberLookupKey<'db>| SourceTypeQuery::run(db, (cycle, previous, member, key), |db, source_operation, (cycle, previous, member, key)| {
+                member.cycle_normalized(db, &source_operation.operations(ProgramEnvironment::from_program(key.program(db))), *previous, cycle)
+            }),
             heap_size=ruff_memory_usage::heap_size
         )]
         fn class_member_with_policy_inner<'db>(
             db: &'db dyn Db,
             key: MemberLookupKey<'db>,
         ) -> PlaceAndQualifiers<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(key.program(db)),
-            );
+            SourceTypeQuery::run(db, (key,), |db, source_operation, (key,)| {
+                class_member_with_policy_inner_from_source(db, source_operation, key)
+            })
+        }
+
+        fn class_member_with_policy_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            key: MemberLookupKey<'db>,
+        ) -> PlaceAndQualifiers<'db> {
+            let env =
+                source_operation.operations(ProgramEnvironment::from_program(key.program(db)));
             Type::class_member_with_policy_impl(db, &env, key)
         }
         let key = MemberLookupKey::new(db, env.program(db), self, name, policy);
@@ -4769,6 +4817,10 @@ impl<'db> Type<'db> {
         }
 
         impl<'db> TypeQuery<'db> for LookupInstanceMember<'_> {
+            fn recursion_key(&self) -> TypeQueryKey<'db> {
+                TypeQueryKey::LookupInstanceMember(self.name.into())
+            }
+
             type Output = Option<PlaceAndQualifiers<'db>>;
 
             fn on_cycle(
@@ -4780,7 +4832,9 @@ impl<'db> Type<'db> {
             ) -> Self::Output {
                 match kind {
                     CycleKind::Exact => None,
-                    CycleKind::MatchingIdentity => Some(Place::bound(Type::unknown()).into()),
+                    CycleKind::MatchingIdentity | CycleKind::Reentrant => {
+                        Some(Place::bound(Type::unknown()).into())
+                    }
                 }
             }
 
@@ -5065,6 +5119,10 @@ impl<'db> Type<'db> {
             }
 
             impl<'db> TypeQuery<'db> for DescriptorGet<'db> {
+                fn recursion_key(&self) -> TypeQueryKey<'db> {
+                    TypeQueryKey::DescriptorGet(self.instance, self.owner)
+                }
+
                 type Output = Result<Option<DescriptorGetResult<'db>>, DescriptorGetError<'db>>;
 
                 fn on_cycle(
@@ -5803,6 +5861,7 @@ impl<'db> Type<'db> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::HasGenericInstanceAttribute,
             ty,
             |_, _| false,
             |_, ty| ty.requires_generic_instance_storage(db, generic_context),
@@ -5842,6 +5901,10 @@ impl<'db> Type<'db> {
         }
 
         impl<'db> TypeQuery<'db, Option<Type<'db>>> for LookupMember<'db> {
+            fn recursion_key(&self) -> TypeQueryKey<'db> {
+                TypeQueryKey::LookupMember(self.key)
+            }
+
             type Output = Option<MemberLookupResult<'db>>;
 
             fn on_cycle(
@@ -5853,7 +5916,7 @@ impl<'db> Type<'db> {
             ) -> Self::Output {
                 match kind {
                     CycleKind::Exact => None,
-                    CycleKind::MatchingIdentity => {
+                    CycleKind::MatchingIdentity | CycleKind::Reentrant => {
                         let member = Type::object().member_lookup_with_policy(
                             self.db,
                             traversal.environment(),
@@ -5959,28 +6022,36 @@ impl<'db> Type<'db> {
         #[salsa::tracked(
             returns(copy),
             cycle_initial=|_, id, _| Place::bound(Type::divergent(id)).into(),
-            cycle_fn=|db, cycle, previous: &MemberLookupResult<'db>, member: MemberLookupResult<'db>, key: MemberLookupKey<'db>| {
-                cycle_normalized_member_lookup(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(key.program(db))), member, *previous, cycle)
-            },
+            cycle_fn=|db, cycle, previous: &MemberLookupResult<'db>, member: MemberLookupResult<'db>, key: MemberLookupKey<'db>| SourceTypeQuery::run(db, (cycle, previous, member, key), |db, source_operation, (cycle, previous, member, key)| {
+                cycle_normalized_member_lookup(db, &source_operation.operations(ProgramEnvironment::from_program(key.program(db))), member, *previous, cycle)
+            }),
             heap_size=ruff_memory_usage::heap_size
         )]
         fn member_lookup_with_policy_inner<'db>(
             db: &'db dyn Db,
             key: MemberLookupKey<'db>,
         ) -> MemberLookupResult<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(key.program(db)),
-            );
+            SourceTypeQuery::run(db, (key,), |db, source_operation, (key,)| {
+                member_lookup_with_policy_inner_from_source(db, source_operation, key)
+            })
+        }
+
+        fn member_lookup_with_policy_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            key: MemberLookupKey<'db>,
+        ) -> MemberLookupResult<'db> {
+            let env =
+                source_operation.operations(ProgramEnvironment::from_program(key.program(db)));
             lookup_member(db, &env, key, None)
         }
 
         #[salsa::tracked(
             returns(copy),
             cycle_initial=|_, id, _, _| Place::bound(Type::divergent(id)).into(),
-            cycle_fn=|db, cycle, previous: &MemberLookupResult<'db>, member: MemberLookupResult<'db>, key: MemberLookupKey<'db>, _| {
-                cycle_normalized_member_lookup(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(key.program(db))), member, *previous, cycle)
-            },
+            cycle_fn=|db, cycle, previous: &MemberLookupResult<'db>, member: MemberLookupResult<'db>, key: MemberLookupKey<'db>, _| SourceTypeQuery::run(db, (cycle, previous, member, key), |db, source_operation, (cycle, previous, member, key)| {
+                cycle_normalized_member_lookup(db, &source_operation.operations(ProgramEnvironment::from_program(key.program(db))), member, *previous, cycle)
+            }),
             heap_size=ruff_memory_usage::heap_size
         )]
         fn member_lookup_with_policy_and_receiver_inner<'db>(
@@ -5988,10 +6059,28 @@ impl<'db> Type<'db> {
             key: MemberLookupKey<'db>,
             receiver: Type<'db>,
         ) -> MemberLookupResult<'db> {
-            let env = TypeOperations::for_inference(
+            SourceTypeQuery::run(
                 db,
-                ProgramEnvironment::from_program(key.program(db)),
-            );
+                (key, receiver),
+                |db, source_operation, (key, receiver)| {
+                    member_lookup_with_policy_and_receiver_inner_from_source(
+                        db,
+                        source_operation,
+                        key,
+                        receiver,
+                    )
+                },
+            )
+        }
+
+        fn member_lookup_with_policy_and_receiver_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            key: MemberLookupKey<'db>,
+            receiver: Type<'db>,
+        ) -> MemberLookupResult<'db> {
+            let env =
+                source_operation.operations(ProgramEnvironment::from_program(key.program(db)));
             lookup_member(db, &env, key, Some(receiver))
         }
 
@@ -8935,19 +9024,19 @@ impl<'db> Type<'db> {
         | TypeMapping::ApplySpecializationWithMaterialization { specialization, .. } =
             type_mapping
         {
-            // A lambda's parameters are available without evaluating its return query.
-            // Inspecting that query here would expand recursive signatures before the
-            // specialization can create a stable reference to the transformed lambda.
-            let callable_parameters = match self {
-                Type::Callable(callable) => callable.single_parameters(db),
+            // Parameter specialization does not need to inspect deferred return types.
+            let callable_parameters: Vec<_> = match self {
+                Type::Callable(callable) => callable.parameter_lists(db).collect(),
                 Type::BoundMethod(method)
                 | Type::KnownBoundMethod(KnownBoundMethodType::MethodTypeDunderGet(method)) => {
                     method
                         .func(db)
                         .as_callable()
-                        .and_then(|callable| callable.single_parameters(db))
+                        .into_iter()
+                        .flat_map(|callable| callable.parameter_lists(db))
+                        .collect()
                 }
-                _ => None,
+                _ => Vec::new(),
             };
             let function_signatures = |function: FunctionType<'db>| {
                 if specialization.preserves_lazy_signatures() {
@@ -8956,21 +9045,12 @@ impl<'db> Type<'db> {
                     Some(function.signature(db))
                 }
             };
-
             let signatures = match self {
-                _ if callable_parameters.is_some() => None,
                 Type::FunctionLiteral(function) => function_signatures(function),
                 Type::BoundMethod(method)
                 | Type::KnownBoundMethod(KnownBoundMethodType::MethodTypeDunderGet(method)) => {
-                    match method.function(db) {
-                        Some(function) => function_signatures(function),
-                        None => method
-                            .func(db)
-                            .as_callable()
-                            .and_then(|callable| callable.explicit_signatures(db)),
-                    }
+                    method.function(db).and_then(function_signatures)
                 }
-                Type::Callable(callable) => callable.explicit_signatures(db),
                 _ => None,
             };
 
@@ -9337,7 +9417,11 @@ impl<'db> Type<'db> {
             env,
             binding_context,
             typevars,
-            &FindLegacyTypeVarsVisitor::new(env, ()),
+            &FindLegacyTypeVarsVisitor::new(
+                env,
+                recursive::TypeVisitorKey::LegacyTypeVars(binding_context),
+                (),
+            ),
         );
     }
 
@@ -9719,6 +9803,7 @@ impl<'db> Type<'db> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::DivergenceAfterAliases,
             self,
             |ty, _| ty.as_divergent(),
             |_, ty| ty.divergence(),
@@ -9812,6 +9897,10 @@ impl<'db> Type<'db> {
         struct FindDefinition;
 
         impl<'db> TypeQuery<'db> for FindDefinition {
+            fn recursion_key(&self) -> TypeQueryKey<'db> {
+                TypeQueryKey::FindDefinition
+            }
+
             type Output = Option<TypeDefinition<'db>>;
 
             fn on_cycle(
@@ -10108,6 +10197,10 @@ impl<'db> Type<'db> {
 struct ProjectInstance;
 
 impl<'db> TypeQuery<'db> for ProjectInstance {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::ProjectInstance
+    }
+
     type Output = Option<InstanceProjection<Type<'db>>>;
 
     fn on_cycle(
@@ -10119,7 +10212,9 @@ impl<'db> TypeQuery<'db> for ProjectInstance {
     ) -> Self::Output {
         Some(match kind {
             CycleKind::Exact => InstanceProjection::Exact(Type::Never),
-            CycleKind::MatchingIdentity => InstanceProjection::OverApproximation(Type::object()),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => {
+                InstanceProjection::OverApproximation(Type::object())
+            }
         })
     }
 
@@ -10211,6 +10306,14 @@ struct TypeExpression<'db> {
 }
 
 impl<'db> TypeQuery<'db> for TypeExpression<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::TypeExpression(
+            self.scope_id,
+            self.typevar_binding_context,
+            self.inference_flags,
+        )
+    }
+
     type Output = Result<Type<'db>, InvalidTypeExpressionError<'db>>;
 
     fn on_cycle(
@@ -10224,7 +10327,7 @@ impl<'db> TypeQuery<'db> for TypeExpression<'db> {
         // can introduce additional alternatives whose represented types are not yet known.
         Ok(match kind {
             CycleKind::Exact => Type::Never,
-            CycleKind::MatchingIdentity => Type::unknown(),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => Type::unknown(),
         })
     }
 
@@ -10522,6 +10625,10 @@ struct CollectBindings<'a, 'db> {
 }
 
 impl<'db> TypeQuery<'db, Option<Type<'db>>> for CollectBindings<'_, 'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::CollectBindings
+    }
+
     type Output = Option<Bindings<'db>>;
 
     fn on_cycle(
@@ -10533,7 +10640,9 @@ impl<'db> TypeQuery<'db, Option<Type<'db>>> for CollectBindings<'_, 'db> {
     ) -> Self::Output {
         match kind {
             CycleKind::Exact => None,
-            CycleKind::MatchingIdentity => Some(CallableBinding::not_callable(ty).into()),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => {
+                Some(CallableBinding::not_callable(ty).into())
+            }
         }
     }
 
@@ -10570,6 +10679,10 @@ struct ProjectMetaType<'a, 'db> {
 }
 
 impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::ProjectMetaType
+    }
+
     type Output = Type<'db>;
 
     fn on_cycle(
@@ -10581,7 +10694,9 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
     ) -> Type<'db> {
         match kind {
             CycleKind::Exact => Type::Never,
-            CycleKind::MatchingIdentity => KnownClass::Type.to_instance(self.db, self.env),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => {
+                KnownClass::Type.to_instance(self.db, self.env)
+            }
         }
     }
 
@@ -10764,6 +10879,10 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
 struct IsSingleton;
 
 impl<'db> TypeQuery<'db> for IsSingleton {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::IsSingleton
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -10905,6 +11024,10 @@ impl<'db> TypeQuery<'db> for IsSingleton {
 struct InspectGenerator(GeneratorTypeMode);
 
 impl<'db> TypeQuery<'db> for InspectGenerator {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::InspectGenerator(self.0)
+    }
+
     type Output = Result<Option<GeneratorTypes<'db>>, ()>;
 
     fn on_cycle(
@@ -10916,7 +11039,7 @@ impl<'db> TypeQuery<'db> for InspectGenerator {
     ) -> Self::Output {
         match kind {
             CycleKind::Exact => Ok(None),
-            CycleKind::MatchingIdentity => Err(()),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => Err(()),
         }
     }
 
@@ -11081,6 +11204,10 @@ impl<'db> TypeQuery<'db> for InspectGenerator {
 struct GeneratorAnnotationSendType;
 
 impl<'db> TypeQuery<'db> for GeneratorAnnotationSendType {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::GeneratorAnnotationSendType
+    }
+
     type Output = Option<Type<'db>>;
 
     fn on_cycle(
@@ -11122,6 +11249,10 @@ impl<'db> TypeQuery<'db> for GeneratorAnnotationSendType {
 struct IncompatibleYieldFromSendType<'db>(Type<'db>);
 
 impl<'db> TypeQuery<'db> for IncompatibleYieldFromSendType<'db> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::IncompatibleYieldFromSendType(self.0)
+    }
+
     type Output = Option<Type<'db>>;
 
     fn on_cycle(
@@ -11518,10 +11649,23 @@ fn class_mro_literals<'db>(
     db: &'db dyn Db,
     class_literal: ClassLiteral<'db>,
 ) -> Box<[ClassLiteral<'db>]> {
-    let env = &TypeOperations::for_inference(
+    SourceTypeQuery::run(
         db,
-        ProgramEnvironment::from_file(class_literal.program_file(db)),
-    );
+        (class_literal,),
+        |db, source_operation, (class_literal,)| {
+            class_mro_literals_from_source(db, source_operation, class_literal)
+        },
+    )
+}
+
+fn class_mro_literals_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class_literal: ClassLiteral<'db>,
+) -> Box<[ClassLiteral<'db>]> {
+    let env = &source_operation.operations(ProgramEnvironment::from_file(
+        class_literal.program_file(db),
+    ));
     class_literal
         .iter_mro(db, env)
         .filter_map(ClassBase::into_class)

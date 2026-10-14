@@ -11,8 +11,10 @@
 //! arguments must match _at least one_ overload.
 
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use std::fmt;
 use std::num::NonZeroU32;
@@ -393,10 +395,9 @@ impl<'db> CallableSignature<'db> {
                 {
                     let env = visitor.env;
                     Some(CallableSignature::from_overloads(
-                        callable
-                            .explicit_signatures(db)?
-                            .iter()
-                            .map(|signature| Signature {
+                        callable.parameter_signatures(db).map(|parameters| {
+                            let signature = parameters.with_return_type(Type::unknown());
+                            Signature {
                                 generic_context: GenericContext::merge_optional(
                                     db,
                                     signature.generic_context,
@@ -446,7 +447,8 @@ impl<'db> CallableSignature<'db> {
                                         visitor,
                                     )
                                 },
-                            }),
+                            }
+                        }),
                     ))
                 }
                 _ => None,
@@ -489,7 +491,7 @@ impl<'db> CallableSignature<'db> {
         }
     }
 
-    pub(crate) fn find_legacy_typevars_impl(
+    pub(super) fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
@@ -940,8 +942,47 @@ impl<'db> Signature<'db> {
         has_implicitly_positional_first_parameter: bool,
         return_callable_typevar_scope: ReturnCallableTypeVarScope,
     ) -> Self {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
+        SourceTypeQuery::run(
+            db,
+            (
+                pep695_generic_context,
+                definition,
+                function_node,
+                has_implicitly_positional_first_parameter,
+                return_callable_typevar_scope,
+            ),
+            |db,
+             source_operation,
+             (
+                pep695_generic_context,
+                definition,
+                function_node,
+                has_implicitly_positional_first_parameter,
+                return_callable_typevar_scope,
+            )| {
+                Self::from_function_from_source(
+                    db,
+                    source_operation,
+                    pep695_generic_context,
+                    definition,
+                    function_node,
+                    has_implicitly_positional_first_parameter,
+                    return_callable_typevar_scope,
+                )
+            },
+        )
+    }
+
+    fn from_function_from_source(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        pep695_generic_context: Option<GenericContext<'db>>,
+        definition: Definition<'db>,
+        function_node: &ast::StmtFunctionDef,
+        has_implicitly_positional_first_parameter: bool,
+        return_callable_typevar_scope: ReturnCallableTypeVarScope,
+    ) -> Self {
+        let env = source_operation.operations(ProgramEnvironment::from_definition(definition));
         let parameters = Parameters::from_parameters(
             db,
             definition,
@@ -1184,7 +1225,7 @@ impl<'db> Signature<'db> {
         max_typevar_freshness_matching_generic_context(db, env, types, generic_context)
     }
 
-    pub(crate) fn find_legacy_typevars_impl(
+    pub(super) fn find_legacy_typevars_impl(
         &self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
@@ -1357,6 +1398,7 @@ impl<'db> Signature<'db> {
                 if TypeInspector::inspect_root(
                     db,
                     env,
+                    TypeInspectionKey::BindSelfWithReceiver,
                     annotation,
                     |_, _| false,
                     |_, annotation| annotation.receiver_violates_typevar_domain(db, receiver),
@@ -2756,6 +2798,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             && TypeInspector::inspect_root(
                 db,
                 self.env,
+                TypeInspectionKey::CheckParamspecReturnPair,
                 source.return_ty,
                 |_, _| false,
                 |_, ty| {
@@ -5304,6 +5347,34 @@ impl<'db> Parameters<'db> {
         parameters: &ast::Parameters,
         has_implicitly_positional_first_parameter: bool,
     ) -> Self {
+        SourceTypeQuery::run(
+            db,
+            (
+                definition,
+                parameters,
+                has_implicitly_positional_first_parameter,
+            ),
+            |db,
+             source_operation,
+             (definition, parameters, has_implicitly_positional_first_parameter)| {
+                Self::from_parameters_from_source(
+                    db,
+                    source_operation,
+                    definition,
+                    parameters,
+                    has_implicitly_positional_first_parameter,
+                )
+            },
+        )
+    }
+
+    fn from_parameters_from_source(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+        parameters: &ast::Parameters,
+        has_implicitly_positional_first_parameter: bool,
+    ) -> Self {
         let ast::Parameters {
             posonlyargs,
             args,
@@ -5402,7 +5473,7 @@ impl<'db> Parameters<'db> {
 
         Self::from_annotation(
             db,
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition)),
+            &source_operation.operations(ProgramEnvironment::from_definition(definition)),
             positional_only
                 .into_iter()
                 .chain(positional_or_keyword)
@@ -6130,6 +6201,28 @@ impl<'db> Parameter<'db> {
         parameter: &ast::Parameter,
         kind: ParameterKind<'db>,
     ) -> Self {
+        SourceTypeQuery::run(
+            db,
+            (function_definition, parameter, kind),
+            |db, source_operation, (function_definition, parameter, kind)| {
+                Self::from_node_and_kind_from_source(
+                    db,
+                    source_operation,
+                    function_definition,
+                    parameter,
+                    kind,
+                )
+            },
+        )
+    }
+
+    fn from_node_and_kind_from_source(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        function_definition: Definition<'db>,
+        parameter: &ast::Parameter,
+        kind: ParameterKind<'db>,
+    ) -> Self {
         let index = semantic_index(db, function_definition.program_file(db));
         let definition = Some(index.expect_single_definition(parameter));
 
@@ -6149,10 +6242,8 @@ impl<'db> Parameter<'db> {
         let is_unpacked_typed_dict_kwargs = matches!(&kind, ParameterKind::KeywordVariadic { .. })
             && extract_unpacked_typed_dict_keys_from_kwargs_annotation(
                 db,
-                &TypeOperations::for_inference(
-                    db,
-                    ProgramEnvironment::from_definition(function_definition),
-                ),
+                &source_operation
+                    .operations(ProgramEnvironment::from_definition(function_definition)),
                 annotated_type,
                 annotation_flags,
             )
@@ -6238,6 +6329,7 @@ impl<'db> Parameter<'db> {
             TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::UnpackedTypedDict,
                 self.annotated_type,
                 |_, _| None,
                 |_, ty| ty.unpacked_typed_dict(),
@@ -6388,9 +6480,9 @@ impl<'db> ParameterDefault<'db> {
 #[salsa::tracked(
     returns(copy),
     cycle_initial=|_, id, _, _| Type::divergent(id),
-    cycle_fn=|db, cycle, previous: &Type<'db>, ty: Type<'db>, parameter: Definition<'db>, _| {
-        ty.cycle_normalized(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_definition(parameter)), *previous, cycle)
-    },
+    cycle_fn=|db, cycle, previous: &Type<'db>, ty: Type<'db>, parameter: Definition<'db>, _| SourceTypeQuery::run(db, (cycle, previous, ty, parameter), |db, source_operation, (cycle, previous, ty, parameter)| {
+        ty.cycle_normalized(db, &source_operation.operations(ProgramEnvironment::from_definition(parameter)), *previous, cycle)
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 fn parameter_default_type<'db>(
@@ -6398,9 +6490,24 @@ fn parameter_default_type<'db>(
     parameter: Definition<'db>,
     context: ExpressionInferenceContext<'db>,
 ) -> Type<'db> {
+    SourceTypeQuery::run(
+        db,
+        (parameter, context),
+        |db, source_operation, (parameter, context)| {
+            parameter_default_type_from_source(db, source_operation, parameter, context)
+        },
+    )
+}
+
+fn parameter_default_type_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    parameter: Definition<'db>,
+    context: ExpressionInferenceContext<'db>,
+) -> Type<'db> {
     raw_parameter_default_type(db, parameter, context).replace_parameter_defaults(
         db,
-        &TypeOperations::for_inference(db, ProgramEnvironment::from_definition(parameter)),
+        &source_operation.operations(ProgramEnvironment::from_definition(parameter)),
     )
 }
 

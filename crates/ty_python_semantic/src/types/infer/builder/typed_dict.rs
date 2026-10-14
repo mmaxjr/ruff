@@ -1,3 +1,4 @@
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use ruff_python_ast::name::Name;
 use ruff_python_ast::{self as ast, AnyNodeRef, HasNodeIndex, NodeIndex, PythonVersion};
@@ -556,6 +557,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     TypeInspector::inspect_root(
                         db,
                         env,
+                        TypeInspectionKey::CanInferGenericTypedDictConstructor,
                         ty,
                         |_, _| false,
                         |_, ty| {

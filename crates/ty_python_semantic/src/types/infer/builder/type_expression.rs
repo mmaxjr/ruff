@@ -1,3 +1,4 @@
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use itertools::Either;
 use ruff_db::diagnostic::Annotation;
@@ -1287,6 +1288,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::InferStarredTypeExpression(
+                self.scope(),
+                ty_python_core::ExpressionNodeKey::from(ast::ExprRef::from(starred)),
+            ),
             starred_type,
             |_, _| Type::homogeneous_tuple(db, env, Type::unknown()),
             |_, starred_type| {
@@ -1591,6 +1596,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::InferSubclassOfTypeExpression(
+                    builder.scope(),
+                    ty_python_core::ExpressionNodeKey::from(slice),
+                ),
                 slice_ty,
                 |_, _| todo_type!("unsupported type[X] special form"),
                 |_, slice_ty| slice_ty.subclass_argument(builder, slice),
@@ -2867,6 +2876,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 TypeInspector::inspect_root(
                     db,
                     env,
+                    TypeInspectionKey::InferParameterizedSpecialFormTypeExpression(
+                        self.scope(),
+                        ty_python_core::ExpressionNodeKey::from(ast::ExprRef::from(subscript)),
+                    ),
                     inner_ty,
                     |_, _| Type::homogeneous_tuple(db, env, Type::unknown()),
                     |_, inner_ty| {

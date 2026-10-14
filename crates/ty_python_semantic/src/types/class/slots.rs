@@ -1,3 +1,4 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use itertools::Itertools;
 use ruff_db::parsed::parsed_module;
@@ -284,8 +285,18 @@ impl<'db> StaticClassLiteral<'db> {
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn slot_definition(self, db: &'db dyn Db) -> SlotDefinition {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.slot_definition_from_source(db, source_operation)
+        })
+    }
+
+    fn slot_definition_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> SlotDefinition {
         let body_scope = self.body_scope(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(body_scope));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(body_scope));
         // A bare annotation does not bind `__slots__`, but an annotated assignment does:
         //
         //     __slots__: tuple[str, ...]
@@ -447,8 +458,17 @@ impl<'db> StaticClassLiteral<'db> {
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn instance_layout(self, db: &'db dyn Db) -> InstanceLayout {
-        let env =
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.instance_layout_from_source(db, source_operation)
+        })
+    }
+
+    fn instance_layout_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> InstanceLayout {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         if self.is_protocol(db) {
             return InstanceLayout::unknown();
         }

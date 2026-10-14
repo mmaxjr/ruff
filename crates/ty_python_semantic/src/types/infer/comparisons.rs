@@ -1,5 +1,7 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
+use crate::types::recursive::TypeVisitorKey;
 use crate::types::recursive::{TypeInspector, TypeVisitorState};
 use crate::types::typevar::TypeVarSet;
 use ruff_python_ast as ast;
@@ -106,6 +108,7 @@ impl<'db> Type<'db> {
                 || TypeInspector::inspect_root(
                     db,
                     env,
+                    TypeInspectionKey::SingletonIntersection,
                     ty,
                     |_, _| false,
                     |_, ty| ty.has_singleton_intersection(db),
@@ -118,12 +121,14 @@ impl<'db> Type<'db> {
         if TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::IdentityTypeVarLeft,
             self,
             |_, _| false,
             |_, left| {
                 TypeInspector::inspect_root(
                     db,
                     env,
+                    TypeInspectionKey::IdentityTypeVarRight,
                     other,
                     |_, _| false,
                     |_, right| {
@@ -176,10 +181,8 @@ enum IntersectionOn {
 type BinaryComparisonVisitor<'env, 'db> = TypeVisitorState<
     'env,
     'db,
-    ast::CmpOp,
     (Type<'db>, NonIdentityOperator, Type<'db>),
     Result<Type<'db>, UnsupportedComparisonError<'db>>,
-    1,
 >;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -276,6 +279,12 @@ impl NonIdentityOperator {
             }
             _ => Truthiness::Ambiguous,
         }
+    }
+}
+
+impl From<NonIdentityOperator> for crate::types::recursive::TypeVisitorOperator {
+    fn from(operator: NonIdentityOperator) -> Self {
+        Self::Comparison(operator.into())
     }
 }
 
@@ -393,7 +402,11 @@ pub(super) fn infer_binary_type_comparison<'db>(
         op,
         right,
         range,
-        &BinaryComparisonVisitor::new(env, Ok(Type::bool_literal(true))),
+        &BinaryComparisonVisitor::new(
+            env,
+            TypeVisitorKey::BinaryComparison,
+            Ok(Type::bool_literal(true)),
+        ),
     )
 }
 

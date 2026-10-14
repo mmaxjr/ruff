@@ -1,6 +1,8 @@
 use crate::Db;
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use crate::{
@@ -18,6 +20,10 @@ struct CanSuppressExceptions {
 }
 
 impl<'db> TypeQuery<'db> for CanSuppressExceptions {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::CanSuppressExceptions(self.is_async)
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -143,7 +149,29 @@ impl<'db> Type<'db> {
             manager: Type<'db>,
             is_async: bool,
         ) -> bool {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+            SourceTypeQuery::run(
+                db,
+                (program, manager, is_async),
+                |db, source_operation, (program, manager, is_async)| {
+                    can_suppress_exceptions_impl_from_source(
+                        db,
+                        source_operation,
+                        program,
+                        manager,
+                        is_async,
+                    )
+                },
+            )
+        }
+
+        fn can_suppress_exceptions_impl_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            program: Program<'db>,
+            manager: Type<'db>,
+            is_async: bool,
+        ) -> bool {
+            let env = source_operation.operations(ProgramEnvironment::from_program(program));
             TypeQueryContext::with_root(&env, CanSuppressExceptions { is_async }, |traversal| {
                 traversal.visit(db, manager)
             })

@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use std::borrow::Cow;
@@ -216,10 +217,18 @@ impl<'db> CodeGeneratorKind<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> Option<CodeGeneratorKind<'db>> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_scope(class.body_scope(db)),
-            );
+            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+                code_generator_of_static_class_from_source(db, source_operation, class)
+            })
+        }
+
+        fn code_generator_of_static_class_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            class: StaticClassLiteral<'db>,
+        ) -> Option<CodeGeneratorKind<'db>> {
+            let env =
+                source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
             // If a class is directly decorated as a dataclass, it's a dataclass.
             // If a class' metaclass is a dataclass transformer, it's a dataclass.
             // If a class inherits from a base class that is a dataclass
@@ -303,8 +312,17 @@ impl<'db> CodeGeneratorKind<'db> {
             db: &'db dyn Db,
             class: DynamicClassLiteral<'db>,
         ) -> Option<CodeGeneratorKind<'db>> {
-            let env =
-                TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.scope(db)));
+            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+                code_generator_of_dynamic_class_from_source(db, source_operation, class)
+            })
+        }
+
+        fn code_generator_of_dynamic_class_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            class: DynamicClassLiteral<'db>,
+        ) -> Option<CodeGeneratorKind<'db>> {
+            let env = source_operation.operations(ProgramEnvironment::from_scope(class.scope(db)));
             // Check if the dynamic class was passed to `dataclass()` as a function.
             if class.dataclass_params(db).is_some() {
                 return Some(CodeGeneratorKind::DataclassLike(None));
@@ -574,27 +592,35 @@ impl<'db> GenericAlias<'db> {
     ) -> Result<Cow<'db, Mro<'db>>, Cow<'db, StaticMroError<'db>>> {
         #[salsa::tracked(
             returns(as_ref),
-            cycle_initial=|db, _, alias: GenericAlias<'db>| {
+            cycle_initial=|db, _, alias: GenericAlias<'db>| SourceTypeQuery::run(db, (alias,), |db, source_operation, (alias,)| {
                 let origin = alias.origin(db);
-                let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(origin.body_scope(db)));
+                let env = source_operation.operations(ProgramEnvironment::from_scope(origin.body_scope(db)));
                 Err(Box::new(StaticMroError::cycle(
                     db,
                     &env,
                     origin.apply_optional_specialization(db, &env, Some(alias.specialization(db))),
                 )))
-            },
+            }),
             heap_size=ruff_memory_usage::heap_size
         )]
         fn cached<'db>(
             db: &'db dyn Db,
             alias: GenericAlias<'db>,
         ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
+            SourceTypeQuery::run(db, (alias,), |db, source_operation, (alias,)| {
+                cached_from_source(db, source_operation, alias)
+            })
+        }
+
+        fn cached_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            alias: GenericAlias<'db>,
+        ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
             let origin = alias.origin(db);
             tracing::trace!("GenericAlias::try_mro: {}", origin.name(db));
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_scope(origin.body_scope(db)),
-            );
+            let env =
+                source_operation.operations(ProgramEnvironment::from_scope(origin.body_scope(db)));
             Mro::of_static_class(db, &env, origin, Some(alias.specialization(db))).map_err(Box::new)
         }
 
@@ -646,11 +672,24 @@ impl<'db> GenericAlias<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        let origin = self.origin(db);
-        let env = TypeOperations::for_inference(
+        SourceTypeQuery::run(
             db,
-            ProgramEnvironment::from_file(origin.program_file(db)),
-        );
+            (self, typevar),
+            |db, source_operation, (source_self, typevar)| {
+                source_self.variance_equation_from_source(db, source_operation, typevar)
+            },
+        )
+    }
+
+    fn variance_equation_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        let origin = self.origin(db);
+        let env =
+            source_operation.operations(ProgramEnvironment::from_file(origin.program_file(db)));
 
         let specialization = self.specialization(db);
 
@@ -1226,14 +1265,22 @@ impl<'db> ClassLiteral<'db> {
     /// Note that when this is a namedtuple this always returns a sequence
     /// of length one corresponding to `tuple`.
     pub(crate) fn explicit_bases(self, db: &'db dyn Db) -> Box<[Type<'db>]> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.explicit_bases_from_source(db, source_operation)
+        })
+    }
+
+    fn explicit_bases_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Box<[Type<'db>]> {
         match self {
             Self::Static(static_class) => static_class.explicit_bases(db).into(),
             Self::Dynamic(dynamic_class) => dynamic_class.explicit_bases(db).into(),
             Self::DynamicNamedTuple(namedtuple) => {
-                let env = TypeOperations::for_inference(
-                    db,
-                    ProgramEnvironment::from_scope(namedtuple.scope(db)),
-                );
+                let env = source_operation
+                    .operations(ProgramEnvironment::from_scope(namedtuple.scope(db)));
                 [Type::from(namedtuple.tuple_base_class(db, &env))].into()
             }
             Self::DynamicTypedDict(_) => {
@@ -1751,10 +1798,19 @@ impl<'db> ClassType<'db> {
         heap_size=ruff_memory_usage::heap_size
     )]
     pub(super) fn nearest_disjoint_base(self, db: &'db dyn Db) -> Option<DisjointBase<'db>> {
-        let env = TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
-        );
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.nearest_disjoint_base_from_source(db, source_operation)
+        })
+    }
+
+    fn nearest_disjoint_base_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Option<DisjointBase<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            self.class_literal(db).program_file(db),
+        ));
         self.class_literal(db)
             .iter_mro(db, &env)
             .filter_map(ClassBase::into_class)
@@ -2546,10 +2602,24 @@ impl<'db> ClassType<'db> {
         db: &'db dyn Db,
         receiver: Type<'db>,
     ) -> CallableTypes<'db> {
-        let env = TypeOperations::for_inference(
+        SourceTypeQuery::run(
             db,
-            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
-        );
+            (self, receiver),
+            |db, source_operation, (source_self, receiver)| {
+                source_self.cached_constructor_callables_from_source(db, source_operation, receiver)
+            },
+        )
+    }
+
+    fn cached_constructor_callables_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        receiver: Type<'db>,
+    ) -> CallableTypes<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            self.class_literal(db).program_file(db),
+        ));
         self.constructor_callables(db, &env, receiver)
     }
 
@@ -2563,13 +2633,22 @@ impl<'db> ClassType<'db> {
             .state()
             .class_constructors
             .get_or_init(|| Box::new(CycleDetector::new(())))
-            .visit_active(db, env, (Type::from(self), receiver), |cycle| {
-                if cycle.is_some() {
-                    CallableTypes::one(CallableType::bottom(db))
-                } else {
-                    self.compute_constructor_callables(db, env, receiver)
-                }
-            })
+            .visit_active(
+                db,
+                env,
+                (
+                    Type::from(self).callable_projection_key(db),
+                    receiver.callable_projection_key(db),
+                ),
+                |cycle| match cycle {
+                    Some(kind) => {
+                        CallableTypes::one(CallableType::constructor_cycle(db, receiver, kind))
+                    }
+                    None => self
+                        .compute_constructor_callables(db, env, receiver)
+                        .map(|callable| callable.projected_from(db, receiver)),
+                },
+            )
     }
 
     fn compute_constructor_callables(
@@ -2673,68 +2752,67 @@ impl<'db> ClassType<'db> {
         // If the class defines an `__init__` method, then we synthesize a callable type with the
         // same parameters as the `__init__` method after it is bound, and with the return type of
         // the concrete type of `Self`.
-        let synthesized_dunder_init_callable = if let Place::Defined(DefinedPlace { ty, .. }) =
-            dunder_init_function_symbol
-        {
-            let signature = match ty {
-                Type::FunctionLiteral(dunder_init_function) => {
-                    Some(dunder_init_function.into_callable_type(db))
-                }
-                Type::Callable(callable) => Some(callable),
-                _ => None,
-            };
-
-            if let Some(signature) = signature.and_then(|callable| {
-                callable
-                    .with_return_type(db, instance_type)
-                    .explicit_signatures(db)
-            }) {
-                let synthesized_signature = |signature: &Signature<'db>| {
-                    let self_annotation = signature
-                        .parameters()
-                        .get_positional(0)
-                        .filter(|parameter| !parameter.inferred_annotation)
-                        .map(Parameter::annotated_type)
-                        .filter(|ty| {
-                            ty.as_typevar()
-                                .is_none_or(|bound_typevar| !bound_typevar.typevar(db).is_self(db))
-                        });
-                    let return_type = self_annotation.unwrap_or(instance_type);
-                    let generic_context = GenericContext::merge_optional(
-                        db,
-                        class_generic_context,
-                        signature.generic_context,
-                    );
-                    Signature::new_generic(
-                        generic_context,
-                        signature.parameters().clone(),
-                        return_type,
-                    )
-                    .with_definition(signature.definition())
-                    .with_source_overload_index(signature.source_overload_index())
-                    .bind_self_with_receiver(
-                        db,
-                        env,
-                        Some(instance_type),
-                        Some(instance_type),
-                    )
+        let synthesized_dunder_init_callable =
+            if let Place::Defined(DefinedPlace { ty, .. }) = dunder_init_function_symbol {
+                let signature = match ty {
+                    Type::FunctionLiteral(dunder_init_function) => {
+                        Some(dunder_init_function.into_callable_type(db))
+                    }
+                    Type::Callable(callable) => Some(callable),
+                    _ => None,
                 };
 
-                let synthesized_dunder_init_signature = CallableSignature::from_overloads(
-                    signature.overloads.iter().map(synthesized_signature),
-                );
+                if let Some(signature) = signature {
+                    let synthesized_signature =
+                        |signature: super::callable::CallableParameters<'db>| {
+                            let self_annotation = signature
+                                .parameters()
+                                .get_positional(0)
+                                .filter(|parameter| !parameter.inferred_annotation)
+                                .map(Parameter::annotated_type)
+                                .filter(|ty| {
+                                    ty.as_typevar().is_none_or(|bound_typevar| {
+                                        !bound_typevar.typevar(db).is_self(db)
+                                    })
+                                });
+                            let return_type = self_annotation.unwrap_or(instance_type);
+                            let generic_context = GenericContext::merge_optional(
+                                db,
+                                class_generic_context,
+                                signature.generic_context(),
+                            );
+                            Signature::new_generic(
+                                generic_context,
+                                signature.parameters().clone(),
+                                return_type,
+                            )
+                            .with_definition(signature.definition())
+                            .with_source_overload_index(signature.source_overload_index())
+                            .bind_self_with_receiver(
+                                db,
+                                env,
+                                Some(instance_type),
+                                Some(instance_type),
+                            )
+                        };
 
-                Some(CallableType::new(
-                    db,
-                    synthesized_dunder_init_signature,
-                    CallableTypeKind::Regular,
-                ))
+                    let synthesized_dunder_init_signature = CallableSignature::from_overloads(
+                        signature
+                            .parameter_signatures(db)
+                            .map(synthesized_signature),
+                    );
+
+                    Some(CallableType::new(
+                        db,
+                        synthesized_dunder_init_signature,
+                        CallableTypeKind::Regular,
+                    ))
+                } else {
+                    None
+                }
             } else {
                 None
-            }
-        } else {
-            None
-        };
+            };
 
         match (dunder_new_callables, synthesized_dunder_init_callable) {
             (Some(dunder_new_callables), Some(synthesized_dunder_init_callable)) => {

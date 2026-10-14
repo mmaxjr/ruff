@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey, TypeWalkKey};
 use crate::types::recursive::{TypeQueryVisit, TypeWalkVisit};
 use crate::types::{TypeTraversal, TypeWalk};
 use std::cell::{OnceCell, RefCell};
@@ -438,6 +439,7 @@ fn transparent_callable_decorator_result<'db>(
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::CallableParamspecAndReturn,
             ty,
             |_, _| None,
             |inspector, ty| {
@@ -505,6 +507,10 @@ struct AttributeDeletion<'a> {
 }
 
 impl<'db> TypeQuery<'db> for AttributeDeletion<'_> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::AttributeDeletion(self.attribute.into())
+    }
+
     // An intersection with no positive elements provides no member to diagnose.
     type Output = Result<(), Option<AttributeDeletionError<'db>>>;
 
@@ -5697,6 +5703,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         struct PropagateCallableKind(CallableTypeKind);
 
         impl<'db> TypeQuery<'db> for PropagateCallableKind {
+            fn recursion_key(&self) -> TypeQueryKey<'db> {
+                TypeQueryKey::PropagateCallableKind(self.0)
+            }
+
             type Output = Option<Type<'db>>;
 
             fn on_cycle(
@@ -6946,6 +6956,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             && TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::ApplyTypeContext(
+                    self.scope(),
+                    ty_python_core::ExpressionNodeKey::from(expression),
+                ),
                 tcx,
                 |_, _| false,
                 |_, tcx| tcx.accepts_literal_context(db, ty),
@@ -6987,6 +7001,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::SpecializeGenericClassFromCallableContext,
             target,
             |_, _| None,
             |inspector, target| target.specialize_class_callable_context(self, inspector, class),
@@ -7014,6 +7029,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         TypeInspector::inspect_root(
             db,
             env,
+            TypeInspectionKey::SpecializeGenericClassFromContext,
             target,
             |_, _| ty,
             |inspector, target| target.specialize_class_context(self, inspector, class),
@@ -7519,9 +7535,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     }
 
     fn infer_dict_expression(&mut self, dict: &ast::ExprDict, tcx: TypeContext<'db>) -> Type<'db> {
-        TypeInspector::scope(self.program_environment(), |inspector| {
-            self.infer_dict_expression_in(inspector, dict, tcx)
-        })
+        TypeInspector::scope(
+            self.program_environment(),
+            TypeInspectionKey::InferDictExpression(
+                self.scope(),
+                ty_python_core::ExpressionNodeKey::from(ast::ExprRef::from(dict)),
+            ),
+            |inspector| self.infer_dict_expression_in(inspector, dict, tcx),
+        )
     }
 
     fn infer_dict_expression_in(
@@ -8908,6 +8929,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::InferLambdaExpression(
+                    self.scope(),
+                    ty_python_core::ExpressionNodeKey::from(lambda_expression),
+                ),
                 annotation.filter_union(db, env, Type::is_callable_type),
                 |_, _| None,
                 |inspector, ty| {
@@ -11107,6 +11132,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         struct MissingAttribute<'a>(&'a str);
 
         impl<'db> TypeQuery<'db, bool> for MissingAttribute<'_> {
+            fn recursion_key(&self) -> TypeQueryKey<'db> {
+                TypeQueryKey::MissingAttribute(self.0.into())
+            }
+
             type Output = Vec<Type<'db>>;
 
             fn on_cycle(
@@ -13581,6 +13610,10 @@ struct UnaryExpression<'a> {
 }
 
 impl<'db, 'ast> TypeWalk<'db, &mut TypeInferenceBuilder<'db, 'ast>> for UnaryExpression<'_> {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::UnaryExpression(self.op)
+    }
+
     type Output = Type<'db>;
 
     fn on_cycle(
@@ -13683,31 +13716,18 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         // method-local constructor variables scoped there, but expose class variables to this
         // outer contextual-specialization solve.
         let source_callable = source_callable.map(|callable| {
-            let Some(original) = callable.explicit_signatures(db) else {
-                return callable;
-            };
-            let signatures =
-                CallableSignature::from_overloads(original.overloads.iter().map(|signature| {
-                    let signature_generic_context = signature.generic_context.and_then(|context| {
-                        let mut variables = context
-                            .variables(db)
-                            .filter(|typevar| {
-                                !class_generic_context.contains(db, typevar.identity(db))
-                            })
-                            .peekable();
-                        variables
-                            .peek()
-                            .is_some()
-                            .then(|| GenericContext::from_typevar_instances(db, env, variables))
-                    });
-                    Signature::new_generic(
-                        signature_generic_context,
-                        signature.parameters().clone(),
-                        signature.return_ty,
-                    )
-                    .with_definition(signature.definition())
-                }));
-            callable.with_signatures(db, signatures)
+            callable.map_generic_contexts(db, |context| {
+                context.and_then(|context| {
+                    let mut variables = context
+                        .variables(db)
+                        .filter(|typevar| !class_generic_context.contains(db, typevar.identity(db)))
+                        .peekable();
+                    variables
+                        .peek()
+                        .is_some()
+                        .then(|| GenericContext::from_typevar_instances(db, env, variables))
+                })
+            })
         });
         let inferable = class_generic_context.inferable_typevars(db);
         let constraints = ConstraintSetBuilder::new();

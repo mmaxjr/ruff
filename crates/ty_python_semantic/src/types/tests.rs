@@ -1,3 +1,4 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use std::fmt::Write as _;
 
@@ -316,7 +317,31 @@ fn oscillating_generic_alias_cycle_recover<'db>(
     current: Type<'db>,
     program: Program<'db>,
 ) -> Type<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+    SourceTypeQuery::run(
+        db,
+        (cycle, previous, current, program),
+        |db, source_operation, (cycle, previous, current, program)| {
+            oscillating_generic_alias_cycle_recover_from_source(
+                db,
+                source_operation,
+                cycle,
+                previous,
+                current,
+                program,
+            )
+        },
+    )
+}
+
+fn oscillating_generic_alias_cycle_recover_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    cycle: &salsa::Cycle,
+    previous: &Type<'db>,
+    current: Type<'db>,
+    program: Program<'db>,
+) -> Type<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_program(program));
     current.cycle_normalized(db, &env, *previous, cycle)
 }
 
@@ -326,7 +351,17 @@ fn oscillating_generic_alias_cycle_recover<'db>(
     cycle_fn=oscillating_generic_alias_cycle_recover,
 )]
 fn oscillating_generic_alias<'db>(db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+    SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
+        oscillating_generic_alias_from_source(db, source_operation, program)
+    })
+}
+
+fn oscillating_generic_alias_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    program: Program<'db>,
+) -> Type<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_program(program));
     let previous = oscillating_generic_alias(db, program);
     let argument = if let Type::GenericAlias(alias) = previous
         && alias.specialization(db).types(db) == [Type::unknown()]

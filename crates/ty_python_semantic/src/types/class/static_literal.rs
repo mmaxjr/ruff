@@ -1,4 +1,5 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use itertools::{Either, Itertools};
@@ -441,10 +442,18 @@ impl<'db> StaticClassLiteral<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> Option<GenericContext<'db>> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_scope(class.body_scope(db)),
-            );
+            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+                inherited_legacy_generic_context_inner_from_source(db, source_operation, class)
+            })
+        }
+
+        fn inherited_legacy_generic_context_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            class: StaticClassLiteral<'db>,
+        ) -> Option<GenericContext<'db>> {
+            let env =
+                source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
             GenericContext::from_base_classes(
                 db,
                 &env,
@@ -508,6 +517,16 @@ impl<'db> StaticClassLiteral<'db> {
         self,
         db: &'db dyn Db,
     ) -> FxIndexSet<BoundTypeVarInstance<'db>> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.typevars_referenced_in_bases_from_source(db, source_operation)
+        })
+    }
+
+    fn typevars_referenced_in_bases_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> FxIndexSet<BoundTypeVarInstance<'db>> {
         struct CollectTypeVars<'a, 'db> {
             env: &'a TypeOperations<'db>,
             typevars: RefCell<FxIndexSet<BoundTypeVarInstance<'db>>>,
@@ -564,8 +583,7 @@ impl<'db> StaticClassLiteral<'db> {
             }
         }
 
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         let visitor = CollectTypeVars {
             env: &env,
             typevars: RefCell::default(),
@@ -893,19 +911,28 @@ impl<'db> StaticClassLiteral<'db> {
 
     #[salsa::tracked(
         returns(as_ref),
-        cycle_initial=|db, _, self_: StaticClassLiteral<'db>| {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self_.body_scope(db)));
+        cycle_initial=|db, _, self_: StaticClassLiteral<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| {
+            let env = source_operation.operations(ProgramEnvironment::from_scope(self_.body_scope(db)));
             Err(Box::new(StaticMroError::cycle(
                 db, &env,
                 self_.apply_optional_specialization(db, &env, None),
             )))
-        },
+        }),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn try_mro_unspecialized(self, db: &'db dyn Db) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.try_mro_unspecialized_from_source(db, source_operation)
+        })
+    }
+
+    fn try_mro_unspecialized_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
         tracing::trace!("StaticClassLiteral::try_mro: {}", self.name(db));
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         Mro::of_static_class(db, &env, self, None).map_err(Box::new)
     }
 
@@ -960,8 +987,17 @@ impl<'db> StaticClassLiteral<'db> {
     /// ```
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| true, heap_size=ruff_memory_usage::heap_size)]
     fn has_own_custom_getattribute(self, db: &'db dyn Db) -> bool {
-        let env =
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.has_own_custom_getattribute_from_source(db, source_operation)
+        })
+    }
+
+    fn has_own_custom_getattribute_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> bool {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         if matches!(self.known(db), Some(KnownClass::Object | KnownClass::Type)) {
             return false;
         }
@@ -1003,10 +1039,18 @@ impl<'db> StaticClassLiteral<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> ClassInstanceFlags {
-            let env = &TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_scope(class.body_scope(db)),
-            );
+            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+                instance_flags_inner_from_source(db, source_operation, class)
+            })
+        }
+
+        fn instance_flags_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            class: StaticClassLiteral<'db>,
+        ) -> ClassInstanceFlags {
+            let env =
+                &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
             let mut flags = ClassInstanceFlags::empty();
             for base in class.iter_mro(db, env) {
                 match base {
@@ -1053,8 +1097,17 @@ impl<'db> StaticClassLiteral<'db> {
     /// Return the module defining the `TypedDict` base of this class.
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn typed_dict_module(self, db: &'db dyn Db) -> Option<TypingModule> {
-        let env =
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.typed_dict_module_from_source(db, source_operation)
+        })
+    }
+
+    fn typed_dict_module_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Option<TypingModule> {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         self.iter_mro(db, env)
             .find_map(ClassBase::typed_dict_module)
     }
@@ -1077,8 +1130,17 @@ impl<'db> StaticClassLiteral<'db> {
     /// `NamedTuple("X", ...)`).
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| false, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn has_named_tuple_class_in_mro(self, db: &'db dyn Db) -> bool {
-        let env =
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.has_named_tuple_class_in_mro_from_source(db, source_operation)
+        })
+    }
+
+    fn has_named_tuple_class_in_mro_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> bool {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         self.iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .any(|base| match base.class_literal(db) {
@@ -1278,10 +1340,20 @@ impl<'db> StaticClassLiteral<'db> {
             class: StaticClassLiteral<'db>,
         ) -> Result<(ClassMetaclass<'db>, Option<MetaclassTransformInfo<'db>>), MetaclassError<'db>>
         {
+            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+                try_metaclass_inner_from_source(db, source_operation, class)
+            })
+        }
+
+        fn try_metaclass_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            class: StaticClassLiteral<'db>,
+        ) -> Result<(ClassMetaclass<'db>, Option<MetaclassTransformInfo<'db>>), MetaclassError<'db>>
+        {
             let program_file = class.program_file(db);
             let python_file = program_file.python_file(db);
-            let env =
-                TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+            let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
             tracing::trace!("StaticClassLiteral::try_metaclass: {}", class.name(db));
 
             // Identify the class's own metaclass (or take the first base class's metaclass).
@@ -2521,8 +2593,28 @@ impl<'db> StaticClassLiteral<'db> {
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
     ) -> FxIndexMap<Name, Field<'db>> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        SourceTypeQuery::run(
+            db,
+            (self, specialization, field_policy),
+            |db, source_operation, (source_self, specialization, field_policy)| {
+                source_self.fields_inner_from_source(
+                    db,
+                    source_operation,
+                    specialization,
+                    field_policy,
+                )
+            },
+        )
+    }
+
+    fn fields_inner_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        specialization: Option<Specialization<'db>>,
+        field_policy: CodeGeneratorKind<'db>,
+    ) -> FxIndexMap<Name, Field<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         self.compute_fields(db, &env, specialization, field_policy)
     }
 
@@ -2753,8 +2845,28 @@ impl<'db> StaticClassLiteral<'db> {
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
     ) -> OwnClassFields<'db> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        SourceTypeQuery::run(
+            db,
+            (self, specialization, field_policy),
+            |db, source_operation, (source_self, specialization, field_policy)| {
+                source_self.own_fields_inner_from_source(
+                    db,
+                    source_operation,
+                    specialization,
+                    field_policy,
+                )
+            },
+        )
+    }
+
+    fn own_fields_inner_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        specialization: Option<Specialization<'db>>,
+        field_policy: CodeGeneratorKind<'db>,
+    ) -> OwnClassFields<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         self.compute_own_fields(db, &env, specialization, field_policy)
     }
 
@@ -3532,13 +3644,32 @@ fn expanded_fixed_length_starred_class_base_tuple<'db>(
     class_definition: Definition<'db>,
     base_node: &ast::Expr,
 ) -> Option<FixedLengthTuple<Type<'db>>> {
+    SourceTypeQuery::run(
+        db,
+        (class_definition, base_node),
+        |db, source_operation, (class_definition, base_node)| {
+            expanded_fixed_length_starred_class_base_tuple_from_source(
+                db,
+                source_operation,
+                class_definition,
+                base_node,
+            )
+        },
+    )
+}
+
+fn expanded_fixed_length_starred_class_base_tuple_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class_definition: Definition<'db>,
+    base_node: &ast::Expr,
+) -> Option<FixedLengthTuple<Type<'db>>> {
     let ast::Expr::Starred(starred) = base_node else {
         return None;
     };
 
     let starred_ty = definition_expression_type(db, class_definition, &starred.value);
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_definition(class_definition));
+    let env = source_operation.operations(ProgramEnvironment::from_definition(class_definition));
     let Tuple::Fixed(tuple) = starred_ty.tuple_instance_spec(db, &env)?.into_owned() else {
         return None;
     };
@@ -3567,8 +3698,22 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        SourceTypeQuery::run(
+            db,
+            (self, typevar),
+            |db, source_operation, (source_self, typevar)| {
+                source_self.variance_equation_from_source(db, source_operation, typevar)
+            },
+        )
+    }
+
+    fn variance_equation_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
 
         if self.is_typed_dict(db) {
             return TypedDictType::new(self.identity_specialization(db))
@@ -3780,11 +3925,33 @@ fn explicit_bases_cycle_fn<'db>(
     current: Box<[Type<'db>]>,
     literal: StaticClassLiteral<'db>,
 ) -> Box<[Type<'db>]> {
+    SourceTypeQuery::run(
+        db,
+        (cycle, previous, current, literal),
+        |db, source_operation, (cycle, previous, current, literal)| {
+            explicit_bases_cycle_fn_from_source(
+                db,
+                source_operation,
+                cycle,
+                previous,
+                current,
+                literal,
+            )
+        },
+    )
+}
+
+fn explicit_bases_cycle_fn_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    cycle: &salsa::Cycle,
+    previous: &[Type<'db>],
+    current: Box<[Type<'db>]>,
+    literal: StaticClassLiteral<'db>,
+) -> Box<[Type<'db>]> {
     if previous.len() == current.len() {
-        let env = TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_scope(literal.body_scope(db)),
-        );
+        let env =
+            source_operation.operations(ProgramEnvironment::from_scope(literal.body_scope(db)));
         // As long as the length of bases hasn't changed, use the same "monotonic widening"
         // strategy that we use with most types, to avoid oscillations.
         current

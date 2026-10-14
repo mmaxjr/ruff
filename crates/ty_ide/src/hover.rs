@@ -333,7 +333,8 @@ impl<'db> Hover<'db> {
     pub const fn display<'a>(&'a self, db: &'db dyn Db, kind: MarkupKind) -> impl Display {
         std::fmt::from_fn(move |f| {
             let mut first = true;
-            let env = TypeOperations::for_file(db, self.program_file);
+            let env =
+                ty_python_semantic::SemanticModel::new(db, self.program_file).program_environment();
             for content in &self.contents {
                 if !first {
                     kind.horizontal_line().fmt(f)?;

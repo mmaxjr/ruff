@@ -1,3 +1,4 @@
+use crate::types::recursive::TypeWalkKey;
 use crate::types::recursive::TypeWalkVisit;
 use ruff_python_ast as ast;
 use ruff_text_size::Ranged;
@@ -1182,6 +1183,10 @@ struct DescriptorWrite<'db> {
 impl<'db> TypeWalk<'db, &mut AssignmentAttributeWriteEvaluator<'_, 'db, '_, '_>>
     for DescriptorWrite<'db>
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::DescriptorWrite(self.receiver_ty, self.value_ty, self.emit_diagnostics)
+    }
+
     type Output = bool;
 
     fn on_cycle(

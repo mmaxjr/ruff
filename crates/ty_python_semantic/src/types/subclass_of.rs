@@ -5,6 +5,7 @@ use crate::types::TypeOperations;
 use crate::types::class::{DynamicClassLiteral, metaclass_instance_type};
 use crate::types::constraints::ConstraintSet;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use crate::types::relation::{DisjointnessChecker, TypeRelationChecker};
 use crate::types::variance::{VarianceInferable, VarianceTerm};
@@ -222,6 +223,7 @@ impl<'db> SubclassOfType<'db> {
                 TypeInspector::inspect_root(
                     db,
                     env,
+                    TypeInspectionKey::ExactTypevarUpperBound,
                     bound,
                     |_, _| None,
                     |_, bound| bound.exact_class_for_bound(db),

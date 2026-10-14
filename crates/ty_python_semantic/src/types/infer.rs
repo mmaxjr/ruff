@@ -44,7 +44,9 @@
 //! be considered a bug.)
 
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use itertools::Either;
 use ruff_db::parsed::parsed_module;
@@ -119,20 +121,30 @@ pub(super) struct CyclicTypeAliasError<'db> {
             implicit_aliases: Box::default(),
         }
     },
-    cycle_fn=|db, cycle: &salsa::Cycle, _: &ImplicitAliasInference<'db>, mut result: ImplicitAliasInference<'db>, definition: Definition<'db>, parameters: Option<crate::types::GenericContext<'db>>| {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
+    cycle_fn=|db, cycle: &salsa::Cycle, _: &ImplicitAliasInference<'db>, result: ImplicitAliasInference<'db>, definition: Definition<'db>, parameters: Option<crate::types::GenericContext<'db>>| SourceTypeQuery::run(db, (cycle, result, definition, parameters), |db, source_operation, (cycle, mut result, definition, parameters)| {
+        let env = source_operation.operations(ProgramEnvironment::from_definition(definition));
         let recover = |ty| RecursiveType::recover(db, &env, definition, cycle.id(), parameters, ty);
         result.ty = result.ty.map(recover).map_err(|error| CyclicTypeAliasError {
             fallback_type: recover(error.fallback_type),
         });
         result
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 pub(super) fn infer_implicit_alias_type<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
     _parameters: Option<crate::types::GenericContext<'db>>,
+) -> ImplicitAliasInference<'db> {
+    SourceTypeQuery::run(db, definition, |db, source_operation, definition| {
+        infer_implicit_alias_type_from_source(db, source_operation, definition)
+    })
+}
+
+fn infer_implicit_alias_type_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
 ) -> ImplicitAliasInference<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);
@@ -145,7 +157,7 @@ pub(super) fn infer_implicit_alias_type<'db>(
         };
     };
     let index = semantic_index(db, program_file);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     TypeInferenceBuilder::new(
         db,
         &env,
@@ -279,6 +291,21 @@ fn infer_definition_types_inner<'db>(
     definition: Definition<'db>,
     environment: InferenceEnvironment<'db>,
 ) -> DefinitionInference<'db> {
+    SourceTypeQuery::run(
+        db,
+        (definition, environment),
+        |db, source_operation, (definition, environment)| {
+            infer_definition_types_inner_from_source(db, source_operation, definition, environment)
+        },
+    )
+}
+
+fn infer_definition_types_inner_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+    environment: InferenceEnvironment<'db>,
+) -> DefinitionInference<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);
     let module = parsed_module(db, python_file).load(db);
@@ -291,7 +318,7 @@ fn infer_definition_types_inner<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -345,12 +372,22 @@ pub(crate) fn function_known_decorators<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> FunctionDecoratorInference<'db> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        function_known_decorators_from_source(db, source_operation, definition)
+    })
+}
+
+fn function_known_decorators_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> FunctionDecoratorInference<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);
     let module = parsed_module(db, python_file).load(db);
     let index = semantic_index(db, program_file);
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -447,6 +484,16 @@ pub(crate) fn infer_deferred_types<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> DefinitionInference<'db> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        infer_deferred_types_from_source(db, source_operation, definition)
+    })
+}
+
+fn infer_deferred_types_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> DefinitionInference<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);
     let module = parsed_module(db, python_file).load(db);
@@ -460,7 +507,7 @@ pub(crate) fn infer_deferred_types<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -493,11 +540,21 @@ pub(crate) fn infer_function_default_types<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> DefinitionInference<'db> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        infer_function_default_types_from_source(db, source_operation, definition)
+    })
+}
+
+fn infer_function_default_types_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> DefinitionInference<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);
     let module = parsed_module(db, python_file).load(db);
     let index = semantic_index(db, program_file);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -561,15 +618,25 @@ fn infer_scope_types<'db>(
 #[salsa::tracked(
     returns(ref),
     cycle_initial=|_, id, _| ScopeInference::cycle_initial(Type::divergent(id)),
-    cycle_fn=|db, cycle, previous: &ScopeInference<'db>, inference: ScopeInference<'db>, input: InferScope<'db>| {
+    cycle_fn=|db, cycle, previous: &ScopeInference<'db>, inference: ScopeInference<'db>, input: InferScope<'db>| SourceTypeQuery::run(db, (cycle, previous, inference, input), |db, source_operation, (cycle, previous, inference, input)| {
         let (scope, _, _) = input.into_inner(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
         inference.cycle_normalized(db, &env, previous, cycle)
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 pub(crate) fn infer_scope_types_impl<'db>(
     db: &'db dyn Db,
+    input: InferScope<'db>,
+) -> ScopeInference<'db> {
+    SourceTypeQuery::run(db, (input,), |db, source_operation, (input,)| {
+        infer_scope_types_impl_from_source(db, source_operation, input)
+    })
+}
+
+fn infer_scope_types_impl_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
     input: InferScope<'db>,
 ) -> ScopeInference<'db> {
     let (scope, tcx, environment) = input.into_inner(db);
@@ -584,7 +651,7 @@ pub(crate) fn infer_scope_types_impl<'db>(
     // The isolation of the query is by the return inferred types.
     let index = semantic_index(db, program_file);
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -614,15 +681,25 @@ pub(crate) fn infer_expression_types<'db>(
 #[salsa::tracked(
     returns(ref),
     cycle_initial=expression_cycle_initial,
-    cycle_fn=|db, cycle, previous: &ExpressionInference<'db>, inference: ExpressionInference<'db>, input: InferExpression<'db>| {
+    cycle_fn=|db, cycle, previous: &ExpressionInference<'db>, inference: ExpressionInference<'db>, input: InferExpression<'db>| SourceTypeQuery::run(db, (cycle, previous, inference, input), |db, source_operation, (cycle, previous, inference, input)| {
         let (expression, _, _) = input.into_inner(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(expression.scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(expression.scope(db)));
         inference.cycle_normalized(db, &env, previous, cycle)
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 pub(super) fn infer_expression_types_impl<'db>(
     db: &'db dyn Db,
+    input: InferExpression<'db>,
+) -> ExpressionInference<'db> {
+    SourceTypeQuery::run(db, (input,), |db, source_operation, (input,)| {
+        infer_expression_types_impl_from_source(db, source_operation, input)
+    })
+}
+
+fn infer_expression_types_impl_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
     input: InferExpression<'db>,
 ) -> ExpressionInference<'db> {
     let (expression, tcx, context) = input.into_inner(db);
@@ -640,7 +717,7 @@ pub(super) fn infer_expression_types_impl<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -700,11 +777,11 @@ pub(crate) fn infer_expression_type<'db>(
 #[salsa::tracked(
     returns(copy),
     cycle_initial=|_, id, _| Type::divergent(id),
-    cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, input: InferExpression<'db>| {
+    cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, input: InferExpression<'db>| SourceTypeQuery::run(db, (cycle, previous, result, input), |db, source_operation, (cycle, previous, result, input)| {
         let (expression, _, _) = input.into_inner(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(expression.scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(expression.scope(db)));
         result.cycle_normalized(db, &env, *previous, cycle)
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 fn infer_expression_type_impl<'db>(db: &'db dyn Db, input: InferExpression<'db>) -> Type<'db> {
@@ -742,14 +819,24 @@ pub(super) fn infer_statement_types<'db>(
     cycle_initial=|db, id, statement: StatementInner<'db>| {
         StatementInferenceInner::cycle_initial(statement.scope(db), Type::divergent(id))
     },
-    cycle_fn=|db, cycle, previous: &StatementInferenceInner<'db>, inference: StatementInferenceInner<'db>, statement: StatementInner<'db>| {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(statement.program_file(db)));
+    cycle_fn=|db, cycle, previous: &StatementInferenceInner<'db>, inference: StatementInferenceInner<'db>, statement: StatementInner<'db>| SourceTypeQuery::run(db, (cycle, previous, inference, statement), |db, source_operation, (cycle, previous, inference, statement)| {
+        let env = source_operation.operations(ProgramEnvironment::from_file(statement.program_file(db)));
         inference.cycle_normalized(db, &env, previous, cycle)
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 fn infer_statement_types_impl<'db>(
     db: &'db dyn Db,
+    statement: StatementInner<'db>,
+) -> StatementInferenceInner<'db> {
+    SourceTypeQuery::run(db, (statement,), |db, source_operation, (statement,)| {
+        infer_statement_types_impl_from_source(db, source_operation, statement)
+    })
+}
+
+fn infer_statement_types_impl_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
     statement: StatementInner<'db>,
 ) -> StatementInferenceInner<'db> {
     let program_file = statement.program_file(db);
@@ -765,7 +852,7 @@ fn infer_statement_types_impl<'db>(
 
     let index = semantic_index(db, program_file);
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     TypeInferenceBuilder::new(
         db,
@@ -1085,7 +1172,7 @@ impl<'db> TypeContext<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
     ) -> Option<Cow<'db, [Type<'db>]>> {
-        TypeInspector::scope(env, |inspector| {
+        TypeInspector::scope(env, TypeInspectionKey::NarrowTargets, |inspector| {
             inspector.inspect_normalized(
                 db,
                 self.annotation?,
@@ -1118,14 +1205,29 @@ pub(super) fn infer_unpack_types<'db>(
 #[salsa::tracked(
     returns(ref),
     cycle_initial=|_, id, _, _| UnpackResult::cycle_initial(Type::divergent(id)),
-    cycle_fn=|db, cycle, previous: &UnpackResult<'db>, result: UnpackResult<'db>, unpack: Unpack<'db>, _| {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(unpack.program_file(db)));
+    cycle_fn=|db, cycle, previous: &UnpackResult<'db>, result: UnpackResult<'db>, unpack: Unpack<'db>, _| SourceTypeQuery::run(db, (cycle, previous, result, unpack), |db, source_operation, (cycle, previous, result, unpack)| {
+        let env = source_operation.operations(ProgramEnvironment::from_file(unpack.program_file(db)));
         result.cycle_normalized(db, &env, previous, cycle)
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 fn infer_unpack_types_impl<'db>(
     db: &'db dyn Db,
+    unpack: Unpack<'db>,
+    environment: InferenceEnvironment<'db>,
+) -> UnpackResult<'db> {
+    SourceTypeQuery::run(
+        db,
+        (unpack, environment),
+        |db, source_operation, (unpack, environment)| {
+            infer_unpack_types_impl_from_source(db, source_operation, unpack, environment)
+        },
+    )
+}
+
+fn infer_unpack_types_impl_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
     unpack: Unpack<'db>,
     environment: InferenceEnvironment<'db>,
 ) -> UnpackResult<'db> {
@@ -1139,7 +1241,7 @@ fn infer_unpack_types_impl<'db>(
     )
     .entered();
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     let mut unpacker = Unpacker::new(db, &env, unpack.target_scope(db), program_file, &module);
     unpacker.unpack(unpack.target(db, &module), unpack.value(db), environment);
     unpacker.finish()
@@ -1805,8 +1907,22 @@ impl<'db> DefinitionInference<'db> {
         definition: Definition<'db>,
         cycle_recovery: Type<'db>,
     ) -> Self {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
+        SourceTypeQuery::run(
+            db,
+            (definition, cycle_recovery),
+            |db, source_operation, (definition, cycle_recovery)| {
+                Self::cycle_initial_from_source(db, source_operation, definition, cycle_recovery)
+            },
+        )
+    }
+
+    fn cycle_initial_from_source(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+        cycle_recovery: Type<'db>,
+    ) -> Self {
+        let env = source_operation.operations(ProgramEnvironment::from_definition(definition));
         let mut types = DefinitionTypes::Empty;
 
         // Eagerly store more precise types for collection literals to avoid an extra
@@ -1883,14 +1999,36 @@ impl<'db> DefinitionInference<'db> {
     }
 
     fn cycle_normalized(
-        mut self,
+        self,
         db: &'db dyn Db,
         previous_inference: &DefinitionInference<'db>,
         cycle: &salsa::Cycle,
         definition: Definition<'db>,
     ) -> DefinitionInference<'db> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
+        SourceTypeQuery::run(
+            db,
+            (self, previous_inference, cycle, definition),
+            |db, source_operation, (source_self, previous_inference, cycle, definition)| {
+                source_self.cycle_normalized_from_source(
+                    db,
+                    source_operation,
+                    previous_inference,
+                    cycle,
+                    definition,
+                )
+            },
+        )
+    }
+
+    fn cycle_normalized_from_source(
+        mut self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        previous_inference: &DefinitionInference<'db>,
+        cycle: &salsa::Cycle,
+        definition: Definition<'db>,
+    ) -> DefinitionInference<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_definition(definition));
         if cycle.iteration() > crate::TAINTED_CYCLES {
             self.widen_comparison_truthiness(db, &env, previous_inference);
         }

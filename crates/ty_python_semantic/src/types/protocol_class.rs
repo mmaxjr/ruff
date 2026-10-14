@@ -1,5 +1,7 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use crate::{Program, ProgramEnvironment};
 use std::fmt::Write;
@@ -35,7 +37,7 @@ use crate::{
         diagnostic::{INVALID_PROTOCOL, report_undeclared_protocol_member},
         generics::Specialization,
         member::class_member,
-        signatures::{CallableSignature, walk_signature},
+        signatures::CallableSignature,
         variance::infer_protocol_variance,
     },
 };
@@ -266,11 +268,25 @@ impl<'db> ProtocolClass<'db> {
     ///     __doc__: str
     /// ```
     pub(super) fn has_member_declaration(self, db: &'db dyn Db, name: &str) -> bool {
+        SourceTypeQuery::run(
+            db,
+            (self, name),
+            |db, source_operation, (source_self, name)| {
+                source_self.has_member_declaration_from_source(db, source_operation, name)
+            },
+        )
+    }
+
+    fn has_member_declaration_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        name: &str,
+    ) -> bool {
         let Some((class, _)) = self.static_class_literal(db) else {
             return false;
         };
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
         self.iter_mro(db, &env)
             .filter_map(ClassBase::into_class)
             .any(|superclass| {
@@ -755,45 +771,17 @@ pub(super) fn walk_protocol_instance_member<'db, V: super::visitor::TypeVisitor<
                 visitor.visit_type(db, method);
                 return;
             };
-            let Some(signatures) = callable.explicit_signatures(db) else {
-                let callable = if kind != ProtocolMethodKind::Static
-                    && callable.single_parameters(db).is_some_and(|parameters| {
-                        parameters.get(0).is_some_and(|parameter| {
-                            parameter.is_positional() && parameter.inferred_annotation
-                        })
-                    }) {
-                    let runtime_type = if kind == ProtocolMethodKind::Class {
-                        receiver_ty.to_meta_type(db, env)
-                    } else {
-                        receiver_ty
-                    };
-                    callable.bind_self(db, env, runtime_type, receiver_ty)
+            let callable = if kind == ProtocolMethodKind::Static {
+                callable
+            } else {
+                let runtime_type = if kind == ProtocolMethodKind::Class {
+                    receiver_ty.to_meta_type(db, env)
                 } else {
-                    callable
+                    receiver_ty
                 };
-                visitor.visit_type(db, Type::Callable(callable));
-                return;
+                callable.bind_implicit_receiver(db, env, runtime_type, receiver_ty)
             };
-            for signature in signatures {
-                if signature.has_implicit_positional_receiver_annotation()
-                    && kind != ProtocolMethodKind::Static
-                {
-                    let runtime_type = if kind == ProtocolMethodKind::Class {
-                        receiver_ty.to_meta_type(db, env)
-                    } else {
-                        receiver_ty
-                    };
-                    let signature = signature.bind_self_with_receiver(
-                        db,
-                        env,
-                        Some(runtime_type),
-                        Some(receiver_ty),
-                    );
-                    walk_signature(db, &signature, visitor);
-                } else {
-                    walk_signature(db, signature, visitor);
-                }
-            }
+            visitor.visit_type(db, Type::Callable(callable));
         }
         ProtocolMemberKind::Property { .. } => {
             walk_protocol_member_access(
@@ -2008,16 +1996,11 @@ impl<'db> ProtocolMemberKind<'db> {
                     return Self::Method(current.cycle_normalized(db, env, previous, cycle), kind);
                 };
                 debug_assert_eq!(current_callable.kind(db), previous_callable.kind(db));
-                let (Some(current_signatures), Some(previous_signatures)) = (
-                    current_callable.explicit_signatures(db),
-                    previous_callable.explicit_signatures(db),
-                ) else {
-                    return Self::Method(current.cycle_normalized(db, env, previous, cycle), kind);
-                };
-                let signatures =
-                    current_signatures.cycle_normalized(db, env, previous_signatures, cycle);
                 Self::Method(
-                    Type::Callable(current_callable.with_signatures(db, signatures)),
+                    current_callable
+                        .normalize_stored_cycle(db, env, previous_callable, cycle)
+                        .map(Type::Callable)
+                        .unwrap_or_else(|| current.cycle_normalized(db, env, previous, cycle)),
                     kind,
                 )
             }
@@ -2571,6 +2554,7 @@ fn descriptor_decorated_protocol_member<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::DescriptorDecoratedProtocolMember,
         descriptor_ty,
         |_, _| None,
         |_, descriptor_ty| descriptor_ty.protocol_descriptor_member(db, protocol, definition),
@@ -3383,7 +3367,17 @@ impl<'db> ProtocolMemberCandidate<'db> {
 /// Cache `object` member names so missing protocol members can be rejected without member lookup.
 #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
 fn object_member_names<'db>(db: &'db dyn Db, program: Program<'db>) -> FxHashSet<Name> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+    SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
+        object_member_names_from_source(db, source_operation, program)
+    })
+}
+
+fn object_member_names_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    program: Program<'db>,
+) -> FxHashSet<Name> {
+    let env = source_operation.operations(ProgramEnvironment::from_program(program));
     let Some((object, _)) = ClassType::object(db, &env).static_class_literal(db) else {
         return FxHashSet::default();
     };
@@ -3424,11 +3418,20 @@ fn supports_protocol_variance_inference<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> bool {
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        supports_protocol_variance_inference_from_source(db, source_operation, class)
+    })
+}
+
+fn supports_protocol_variance_inference_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: StaticClassLiteral<'db>,
+) -> bool {
     let Some(protocol) = class.identity_specialization(db).into_protocol_class(db) else {
         return false;
     };
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
     let interface = protocol.interface(db, &env);
     if interface.members(db).any(|member| {
         matches!(
@@ -3468,10 +3471,19 @@ fn cached_protocol_interface<'db>(
     db: &'db dyn Db,
     class: ClassType<'db>,
 ) -> ProtocolInterface<'db> {
-    let env = TypeOperations::for_inference(
-        db,
-        ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
-    );
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        cached_protocol_interface_from_source(db, source_operation, class)
+    })
+}
+
+fn cached_protocol_interface_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: ClassType<'db>,
+) -> ProtocolInterface<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_file(
+        class.class_literal(db).program_file(db),
+    ));
     compute_protocol_interface(db, &env, class)
 }
 
@@ -3546,12 +3558,21 @@ fn protocol_interface_cycle_initial<'db>(
     _id: salsa::Id,
     class: ClassType<'db>,
 ) -> ProtocolInterface<'db> {
+    SourceTypeQuery::run(db, class, |db, source_operation, class| {
+        protocol_interface_cycle_initial_from_source(db, source_operation, class)
+    })
+}
+
+fn protocol_interface_cycle_initial_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: ClassType<'db>,
+) -> ProtocolInterface<'db> {
     ProtocolInterface::empty(
         db,
-        &TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
-        ),
+        &source_operation.operations(ProgramEnvironment::from_file(
+            class.class_literal(db).program_file(db),
+        )),
     )
 }
 
@@ -3563,11 +3584,34 @@ fn proto_interface_cycle_recover<'db>(
     value: ProtocolInterface<'db>,
     class: ClassType<'db>,
 ) -> ProtocolInterface<'db> {
-    let env = TypeOperations::for_inference(
+    SourceTypeQuery::run(
         db,
-        ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
-    );
-    value.cycle_normalized(db, &env, *previous, cycle)
+        (cycle, *previous, value, class),
+        |db, source_operation, (cycle, previous, value, class)| {
+            proto_interface_cycle_recover_from_source(
+                db,
+                source_operation,
+                cycle,
+                previous,
+                value,
+                class,
+            )
+        },
+    )
+}
+
+fn proto_interface_cycle_recover_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    cycle: &salsa::Cycle,
+    previous: ProtocolInterface<'db>,
+    value: ProtocolInterface<'db>,
+    class: ClassType<'db>,
+) -> ProtocolInterface<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_file(
+        class.class_literal(db).program_file(db),
+    ));
+    value.cycle_normalized(db, &env, previous, cycle)
 }
 
 /// Bind `self` unless this is a `Callable[P, R]` dunder, and *also* discard the functionlike-ness
@@ -3593,7 +3637,23 @@ fn protocol_bind_self<'db>(
         callable: CallableType<'db>,
         self_type: Option<Type<'db>>,
     ) -> CallableType<'db> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        SourceTypeQuery::run(
+            db,
+            (program, callable, self_type),
+            |db, source_operation, (program, callable, self_type)| {
+                cached_from_source(db, source_operation, program, callable, self_type)
+            },
+        )
+    }
+
+    fn cached_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        callable: CallableType<'db>,
+        self_type: Option<Type<'db>>,
+    ) -> CallableType<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
         compute(db, &env, callable, self_type)
     }
 
@@ -3607,25 +3667,7 @@ fn protocol_bind_self<'db>(
             return callable.into_regular(db);
         }
 
-        match callable.signature_source(db) {
-            crate::types::callable::SignatureSource::Explicit(signatures) => callable
-                .with_signatures(
-                    db,
-                    signatures.bind_self_with_receiver(db, env, self_type, self_type),
-                ),
-            crate::types::callable::SignatureSource::Lambda(lambda) => {
-                let lambda = match self_type {
-                    Some(receiver) => lambda.bind_receiver(db, env, receiver, receiver),
-                    None => lambda.with_bound_parameters(
-                        db,
-                        env,
-                        lambda.parameters(db).bind_receiver(db),
-                    ),
-                };
-                callable.with_lambda_signature(db, lambda)
-            }
-        }
-        .into_regular(db)
+        callable.bind_protocol_receiver(db, env, self_type)
     }
     env.cached_query(
         || cached(db, env.program(db), callable, self_type),
@@ -3653,7 +3695,31 @@ fn protocol_apply_self_with_receiver<'db>(
         receiver_type: Type<'db>,
         self_type: Type<'db>,
     ) -> CallableType<'db> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        SourceTypeQuery::run(
+            db,
+            (program, callable, receiver_type, self_type),
+            |db, source_operation, (program, callable, receiver_type, self_type)| {
+                cached_from_source(
+                    db,
+                    source_operation,
+                    program,
+                    callable,
+                    receiver_type,
+                    self_type,
+                )
+            },
+        )
+    }
+
+    fn cached_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        callable: CallableType<'db>,
+        receiver_type: Type<'db>,
+        self_type: Type<'db>,
+    ) -> CallableType<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
         compute(db, &env, callable, receiver_type, self_type)
     }
 

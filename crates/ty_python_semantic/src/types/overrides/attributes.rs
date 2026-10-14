@@ -1,6 +1,7 @@
 //! Compatibility of the values read from and written to inherited attributes.
 
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use ruff_db::diagnostic::Annotation;
 use ruff_python_ast::name::Name;
@@ -296,7 +297,7 @@ fn descriptor_write_domain<'db>(
     receiver: Type<'db>,
     storage_type: Type<'db>,
 ) -> Option<Type<'db>> {
-    TypeInspector::scope(env, |inspector| {
+    TypeInspector::scope(env, TypeInspectionKey::DescriptorWriteDomain, |inspector| {
         descriptor_write_domain_in(db, inspector, descriptor, receiver, storage_type)
     })
 }

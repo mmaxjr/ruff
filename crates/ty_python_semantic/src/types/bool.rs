@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use crate::types::typevar::TypeVarSet;
 use ruff_db::diagnostic::{Annotation, SubDiagnostic, SubDiagnosticSeverity};
@@ -61,6 +62,10 @@ struct TryBool {
 }
 
 impl<'db> TypeQuery<'db> for TryBool {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::TryBool(self.allow_short_circuit)
+    }
+
     type Output = Result<Truthiness, BoolError<'db>>;
 
     fn on_cycle(
@@ -74,7 +79,7 @@ impl<'db> TypeQuery<'db> for TryBool {
             // An exact back-edge adds no alternatives to the enclosing union. A different
             // specialization can introduce values with either truthiness.
             CycleKind::Exact => Truthiness::Uninhabited,
-            CycleKind::MatchingIdentity => Truthiness::Ambiguous,
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => Truthiness::Ambiguous,
         })
     }
 

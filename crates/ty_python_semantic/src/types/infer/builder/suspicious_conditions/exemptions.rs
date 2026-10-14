@@ -6,6 +6,7 @@
 //! may be fixed for the configured environment while still serving a purpose in code that is
 //! designed to support multiple environments.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::{self as ast, helpers::any_over_expr, name::Name};
@@ -581,6 +582,16 @@ fn resolved_condition_definition_info<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> ConditionDefinitionInfo<'db> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        resolved_condition_definition_info_from_source(db, source_operation, definition)
+    })
+}
+
+fn resolved_condition_definition_info_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> ConditionDefinitionInfo<'db> {
     let scope = definition.scope(db);
     let places = place_table(db, scope);
     let symbol_name = places
@@ -591,7 +602,7 @@ fn resolved_condition_definition_info<'db>(
         db,
         &resolve_definition(
             db,
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope)),
+            &source_operation.operations(ProgramEnvironment::from_scope(scope)),
             definition,
             symbol_name,
             ImportAliasResolution::ResolveAliases,
@@ -672,13 +683,35 @@ fn attribute_condition_definition_info<'db>(
     receiver: Type<'db>,
     name: Name,
 ) -> ConditionDefinitionInfo<'db> {
+    SourceTypeQuery::run(
+        db,
+        (program, receiver, name),
+        |db, source_operation, (program, receiver, name)| {
+            attribute_condition_definition_info_from_source(
+                db,
+                source_operation,
+                program,
+                receiver,
+                &name,
+            )
+        },
+    )
+}
+
+fn attribute_condition_definition_info_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    program: Program<'db>,
+    receiver: Type<'db>,
+    name: &str,
+) -> ConditionDefinitionInfo<'db> {
     ConditionDefinitionInfo::from_definitions(
         db,
         &definitions_for_attribute(
             db,
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program)),
+            &source_operation.operations(ProgramEnvironment::from_program(program)),
             receiver,
-            &name,
+            name,
         ),
     )
 }
@@ -703,11 +736,21 @@ fn definition_contains_special_cased_condition<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> bool {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        definition_contains_special_cased_condition_from_source(db, source_operation, definition)
+    })
+}
+
+fn definition_contains_special_cased_condition_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> bool {
     let module = parsed_module(db, definition.python_file(db)).load(db);
     let definition_kind = definition.kind(db);
     let file = definition.file(db);
     let program_file = definition.program_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
     let in_known_module = |known| {
         file_to_module(db, program_file.resolver_file(db))
@@ -881,6 +924,26 @@ fn predicate_contains_special_cased_condition<'db>(
     scope: ScopeId<'db>,
     predicate: ScopedPredicateId,
 ) -> bool {
+    SourceTypeQuery::run(
+        db,
+        (scope, predicate),
+        |db, source_operation, (scope, predicate)| {
+            predicate_contains_special_cased_condition_from_source(
+                db,
+                source_operation,
+                scope,
+                predicate,
+            )
+        },
+    )
+}
+
+fn predicate_contains_special_cased_condition_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    predicate: ScopedPredicateId,
+) -> bool {
     let expression = match use_def_map(db, scope).predicates()[predicate].node {
         PredicateNode::Expression { expression, .. }
         | PredicateNode::Condition(expression)
@@ -897,7 +960,7 @@ fn predicate_contains_special_cased_condition<'db>(
         | PredicateNode::StarImportPlaceholder(_) => return false,
     };
     let file = expression.program_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(file));
     let module = parsed_module(db, expression.python_file(db)).load(db);
     let mut inference = None;
 

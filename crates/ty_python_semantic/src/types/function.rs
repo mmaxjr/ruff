@@ -49,6 +49,7 @@
 //! the public type of `f` is resolved at position 3, correctly giving you all of the overloads
 //! (and the implementation).
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use smallvec::SmallVec;
@@ -419,6 +420,16 @@ impl<'db> OverloadLiteral<'db> {
     /// Returns the overload immediately before this one in the AST. Returns `None` if there is no
     /// previous overload.
     fn previous_overload(self, db: &'db dyn Db) -> Option<FunctionLiteral<'db>> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.previous_overload_from_source(db, source_operation)
+        })
+    }
+
+    fn previous_overload_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Option<FunctionLiteral<'db>> {
         // The semantic model records a use for each function on the name node. This is used
         // here to get the previous function definition with the same name.
         let scope = self.definition(db).scope(db);
@@ -433,7 +444,7 @@ impl<'db> OverloadLiteral<'db> {
             .name
             .scoped_use_id(db, self.program_file(db));
 
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
         let Place::Defined(DefinedPlace {
             ty: previous_type,
             definedness: Definedness::AlwaysDefined,
@@ -483,6 +494,16 @@ impl<'db> OverloadLiteral<'db> {
     /// a cross-module dependency directly on the full AST which will lead to cache
     /// over-invalidation.
     pub(crate) fn signature(self, db: &'db dyn Db) -> Signature<'db> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.signature_from_source(db, source_operation)
+        })
+    }
+
+    fn signature_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Signature<'db> {
         let scope = self.body_scope(db);
         let program_file = self.program_file(db);
         let python_file = program_file.python_file(db);
@@ -494,8 +515,7 @@ impl<'db> OverloadLiteral<'db> {
         let is_generator = file_scope_id.is_generator_function(index);
 
         if function_node.is_async && !is_generator {
-            let env =
-                TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+            let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
             signature.return_ty = KnownClass::CoroutineType.to_specialized_instance(
                 db,
                 &env,
@@ -549,6 +569,25 @@ impl<'db> OverloadLiteral<'db> {
     pub(super) fn raw_signature(
         self,
         db: &'db dyn Db,
+        return_callable_typevar_scope: ReturnCallableTypeVarScope,
+    ) -> Signature<'db> {
+        SourceTypeQuery::run(
+            db,
+            (self, return_callable_typevar_scope),
+            |db, source_operation, (source_self, return_callable_typevar_scope)| {
+                source_self.raw_signature_from_source(
+                    db,
+                    source_operation,
+                    return_callable_typevar_scope,
+                )
+            },
+        )
+    }
+
+    fn raw_signature_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
         return_callable_typevar_scope: ReturnCallableTypeVarScope,
     ) -> Signature<'db> {
         /// `self` or `cls` can be implicitly positional-only if:
@@ -606,8 +645,7 @@ impl<'db> OverloadLiteral<'db> {
                 .is_some_and(|class| class.is_protocol(db))
         }
 
-        let env =
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(self.body_scope(db)));
         let scope = self.body_scope(db);
         let program_file = self.program_file(db);
         let python_file = program_file.python_file(db);
@@ -911,10 +949,19 @@ impl<'db> FunctionLiteral<'db> {
     /// a cross-module dependency directly on the full AST which will lead to cache
     /// over-invalidation.
     fn signature(self, db: &'db dyn Db) -> CallableSignature<'db> {
-        let env = TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_definition(self.last_definition.definition(db)),
-        );
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.signature_from_source(db, source_operation)
+        })
+    }
+
+    fn signature_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> CallableSignature<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_definition(
+            self.last_definition.definition(db),
+        ));
         // We only include an implementation (i.e. a definition not decorated with `@overload`) if
         // it's the only definition.
         let (overloads, implementation) = self.overloads_and_implementation(db);
@@ -1019,11 +1066,24 @@ impl<'db> FunctionLiteral<'db> {
             db: &'db dyn Db,
             implementation: OverloadLiteral<'db>,
         ) -> FunctionBodyKind {
+            SourceTypeQuery::run(
+                db,
+                (implementation,),
+                |db, source_operation, (implementation,)| {
+                    implementation_body_kind_from_source(db, source_operation, implementation)
+                },
+            )
+        }
+
+        fn implementation_body_kind_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            implementation: OverloadLiteral<'db>,
+        ) -> FunctionBodyKind {
             let definition = implementation.definition(db);
             let program_file = definition.program_file(db);
             let python_file = program_file.python_file(db);
-            let env =
-                TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+            let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
             let file = python_file.file(db);
             let module = parsed_module(db, python_file).load(db);
             let node = implementation.node(db, file, &module);
@@ -1641,18 +1701,18 @@ impl<'db> FunctionType<'db> {
     /// computed signature changes. Updated signatures are already stored on the interned function.
     #[salsa::tracked(
         returns(ref),
-        cycle_initial=|db, id, function: FunctionType<'db>| {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(
+        cycle_initial=|db, id, function: FunctionType<'db>| SourceTypeQuery::run(db, (id, function), |db, source_operation, (id, function)| {
+            let env = source_operation.operations(ProgramEnvironment::from_scope(
                 function.literal(db).last_definition.body_scope(db),
             ));
             CallableSignature::cycle_initial(db, &env, id)
-        },
-        cycle_fn=|db, cycle, previous, value: CallableSignature<'db>, function: FunctionType<'db>| {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(
+        }),
+        cycle_fn=|db, cycle, previous, value: CallableSignature<'db>, function: FunctionType<'db>| SourceTypeQuery::run(db, (cycle, previous, value, function), |db, source_operation, (cycle, previous, value, function)| {
+            let env = source_operation.operations(ProgramEnvironment::from_scope(
                 function.literal(db).last_definition.body_scope(db),
             ));
             value.cycle_normalized(db, &env, previous, cycle)
-        },
+        }),
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn literal_signature(self, db: &'db dyn Db) -> CallableSignature<'db> {
@@ -1680,10 +1740,24 @@ impl<'db> FunctionType<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        let env = TypeOperations::for_inference(
+        SourceTypeQuery::run(
             db,
-            ProgramEnvironment::from_scope(self.literal(db).last_definition.body_scope(db)),
-        );
+            (self, typevar),
+            |db, source_operation, (source_self, typevar)| {
+                source_self.variance_equation_from_source(db, source_operation, typevar)
+            },
+        )
+    }
+
+    fn variance_equation_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(
+            self.literal(db).last_definition.body_scope(db),
+        ));
         self.signature(db).variance_of(db, &env, typevar)
     }
 
@@ -1773,7 +1847,7 @@ impl<'db> FunctionType<'db> {
         BoundMethodType::new(db, self, self_instance)
     }
 
-    pub(crate) fn find_legacy_typevars_impl(
+    pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,

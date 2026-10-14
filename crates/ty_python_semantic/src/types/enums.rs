@@ -1,6 +1,8 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use compact_str::ToCompactString;
 use ruff_db::parsed::parsed_module;
@@ -335,8 +337,17 @@ fn enum_class_literal<'db>(
     db: &'db dyn Db,
     class: ClassLiteral<'db>,
 ) -> Option<EnumClassLiteral<'db>> {
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_file(class.program_file(db)));
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        enum_class_literal_from_source(db, source_operation, class)
+    })
+}
+
+fn enum_class_literal_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: ClassLiteral<'db>,
+) -> Option<EnumClassLiteral<'db>> {
+    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
     let metadata = enum_metadata(db, class)?;
     let members = metadata
         .members
@@ -486,9 +497,11 @@ fn known_constructor_preserves_value_type<'db>(
     value: Type<'db>,
     annotation: Type<'db>,
 ) -> bool {
-    TypeInspector::scope(env, |inspector| {
-        known_constructor_preserves_value_type_in(db, inspector, value, annotation)
-    })
+    TypeInspector::scope(
+        env,
+        TypeInspectionKey::KnownConstructorPreservesValueType,
+        |inspector| known_constructor_preserves_value_type_in(db, inspector, value, annotation),
+    )
 }
 
 fn known_constructor_preserves_value_type_in<'db>(
@@ -514,9 +527,11 @@ fn value_has_exact_known_class<'db>(
     value: Type<'db>,
     data_type: KnownClass,
 ) -> bool {
-    TypeInspector::scope(env, |inspector| {
-        value_has_exact_known_class_in(db, inspector, value, data_type)
-    })
+    TypeInspector::scope(
+        env,
+        TypeInspectionKey::ValueHasExactKnownClass,
+        |inspector| value_has_exact_known_class_in(db, inspector, value, data_type),
+    )
 }
 
 fn value_has_exact_known_class_in<'db>(
@@ -966,6 +981,16 @@ impl<'db> EnumComplementType<'db> {
 /// Returns the set of names listed in an enum's `_ignore_` attribute.
 #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
 pub(crate) fn enum_ignored_names<'db>(db: &'db dyn Db, scope_id: ScopeId<'db>) -> FxHashSet<Name> {
+    SourceTypeQuery::run(db, (scope_id,), |db, source_operation, (scope_id,)| {
+        enum_ignored_names_from_source(db, source_operation, scope_id)
+    })
+}
+
+fn enum_ignored_names_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope_id: ScopeId<'db>,
+) -> FxHashSet<Name> {
     let use_def_map = use_def_map(db, scope_id);
     let table = place_table(db, scope_id);
 
@@ -974,7 +999,7 @@ pub(crate) fn enum_ignored_names<'db>(db: &'db dyn Db, scope_id: ScopeId<'db>) -
     };
 
     let ignore_bindings = use_def_map.reachable_symbol_bindings(ignore);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope_id));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope_id));
     let ignore_place = place_from_bindings(db, &env, ignore_bindings).place;
 
     match ignore_place {
@@ -1028,6 +1053,16 @@ pub(crate) fn enum_metadata<'db>(
     db: &'db dyn Db,
     class: ClassLiteral<'db>,
 ) -> Option<EnumMetadata<'db>> {
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        enum_metadata_from_source(db, source_operation, class)
+    })
+}
+
+fn enum_metadata_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: ClassLiteral<'db>,
+) -> Option<EnumMetadata<'db>> {
     let class = match class {
         ClassLiteral::Static(class) => class,
         ClassLiteral::Dynamic(..) => {
@@ -1048,10 +1083,8 @@ pub(crate) fn enum_metadata<'db>(
             if !spec.has_known_members(db) {
                 return None;
             }
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_scope(enum_lit.scope(db)),
-            );
+            let env =
+                source_operation.operations(ProgramEnvironment::from_scope(enum_lit.scope(db)));
             let value_construction = EnumValueConstruction {
                 data_type: inherited_enum_data_type(db, &env, ClassLiteral::DynamicEnum(enum_lit)),
                 ..EnumValueConstruction::default()
@@ -1100,8 +1133,7 @@ pub(crate) fn enum_metadata<'db>(
     // As a fast path, avoid looking up base classes if the class body is empty
     use_def_map.all_end_of_scope_symbol_bindings().next()?;
 
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_file(class.program_file(db)));
+    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
 
     if !is_enum_class_by_inheritance(db, &env, class) {
         return None;

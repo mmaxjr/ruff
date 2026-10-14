@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 use crate::types::{
     AwaitError, Bindings, CallArguments, CallDunderError, CycleKind, KnownClass,
@@ -630,6 +631,10 @@ impl<'db> Type<'db> {
 struct TryIterate(EvaluationMode);
 
 impl<'db> TypeQuery<'db, bool> for TryIterate {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::TryIterate(matches!(self.0, EvaluationMode::Async))
+    }
+
     type Output = Result<Option<Cow<'db, TupleSpec<'db>>>, IterationError<'db>>;
 
     fn on_cycle(
@@ -641,7 +646,7 @@ impl<'db> TypeQuery<'db, bool> for TryIterate {
     ) -> Self::Output {
         Ok(match kind {
             CycleKind::Exact => None,
-            CycleKind::MatchingIdentity => {
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => {
                 Some(Cow::Owned(TupleSpec::homogeneous(Type::unknown())))
             }
         })

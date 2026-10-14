@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::constraints::ConstraintSet;
 use crate::types::relation::{DisjointnessChecker, TypeRelation, TypeRelationChecker};
@@ -56,20 +57,30 @@ impl<'db> NewType<'db> {
 
     #[salsa::tracked(
         returns(copy),
-        cycle_initial=|db, _, self_: NewType<'db>| NewTypeBase::ClassType(ClassType::object(
+        cycle_initial=|db, _, self_: NewType<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| NewTypeBase::ClassType(ClassType::object(
             db,
-            &TypeOperations::for_inference(db, ProgramEnvironment::from_definition(self_.definition(db))),
-        )),
+            &source_operation.operations(ProgramEnvironment::from_definition(self_.definition(db))),
+        ))),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn lazy_base(self, db: &'db dyn Db) -> NewTypeBase<'db> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.lazy_base_from_source(db, source_operation)
+        })
+    }
+
+    fn lazy_base_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> NewTypeBase<'db> {
         // `TypeInferenceBuilder` emits diagnostics for invalid `NewType` definitions that show up
         // in assignments, but invalid definitions still get here, and also `NewType` might show up
         // in places that aren't definitions at all. Fall back to `object` in all error cases.
         let definition = self.definition(db);
         let program_file = definition.program_file(db);
         let python_file = program_file.python_file(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
         let object_fallback = NewTypeBase::ClassType(ClassType::object(db, &env));
         let module = parsed_module(db, python_file).load(db);
         let DefinitionKind::Assignment(assignment) = definition.kind(db) else {

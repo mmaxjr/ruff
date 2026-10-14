@@ -1,5 +1,7 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeWalkKey;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal, StructuralTypeVisit};
 use char_str::CharStr;
 use ruff_db::parsed::parsed_module;
@@ -587,8 +589,17 @@ pub(in crate::types) fn constructor_fields_are_keyword_only(
 
 #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
 fn is_root_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
-    let env =
-        &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        is_root_model_from_source(db, source_operation, class)
+    })
+}
+
+fn is_root_model_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: StaticClassLiteral<'db>,
+) -> bool {
+    let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
     class
         .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
@@ -660,8 +671,17 @@ pub(in crate::types) fn extend_settings_constructor_parameters<'db>(
     heap_size=ruff_memory_usage::heap_size,
 )]
 fn model_config<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> ModelConfig {
-    let env =
-        &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        model_config_from_source(db, source_operation, class)
+    })
+}
+
+fn model_config_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: StaticClassLiteral<'db>,
+) -> ModelConfig {
+    let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
     let mut config = ModelConfig::default();
 
     // Pydantic merges the effective config from each direct base from left to right. A later base
@@ -927,8 +947,22 @@ pub(in crate::types) fn has_before_or_plain_field_validator<'db>(
     class: StaticClassLiteral<'db>,
     field_name: Name,
 ) -> bool {
-    let env =
-        &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
+    SourceTypeQuery::run(
+        db,
+        (class, field_name),
+        |db, source_operation, (class, field_name)| {
+            has_before_or_plain_field_validator_from_source(db, source_operation, class, field_name)
+        },
+    )
+}
+
+fn has_before_or_plain_field_validator_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: StaticClassLiteral<'db>,
+    field_name: Name,
+) -> bool {
+    let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
     let field_name = CharStr::from(field_name);
 
     // Pydantic inherits validators unless a subclass defines a symbol with the same method name.
@@ -1033,6 +1067,10 @@ struct LaxInputType;
 type LaxInputTraversal<'env, 'db> = StructuralTypeTraversal<'env, 'db, LaxInputType>;
 
 impl<'db> TypeWalk<'db, &mut FxHashSet<Type<'db>>, StructuralTraversal> for LaxInputType {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::LaxInputType
+    }
+
     type Output = Type<'db>;
 
     fn on_cycle(

@@ -310,6 +310,7 @@ impl<'db> TypeVisitorHooks<'db> for Dependencies<'_, 'db> {
                     visit.visit_type(db, Type::TypeVar(variable));
                 }
             }
+            SignatureSource::Projected(projection) => projection.walk_inputs(db, visit),
         }
     }
 

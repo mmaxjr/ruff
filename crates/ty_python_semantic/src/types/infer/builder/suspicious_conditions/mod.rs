@@ -54,6 +54,7 @@
 mod diagnostic;
 mod exemptions;
 
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use bitflags::bitflags;
 use ruff_python_ast::{
@@ -722,6 +723,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             TypeInspector::inspect_root(
                 db,
                 env,
+                TypeInspectionKey::ClassifyRedundantCondition,
                 value_type,
                 |ty, _| self.ambiguous_truthiness_condition(expression, ty, value_type),
                 |_, ty| ty.ambiguous_truthiness_condition(self, expression, value_type),
@@ -1359,6 +1361,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         TypeInspector::inspect_root(
             self.db(),
             self.program_environment(),
+            TypeInspectionKey::TruthinessTestOfNoneUnionFromType(
+                self.scope(),
+                ty_python_core::ExpressionNodeKey::from(expression),
+            ),
             ty,
             |_, _| None,
             |_, ty| ty.truthiness_none_union(self, expression),

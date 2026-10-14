@@ -61,6 +61,7 @@
 //! [test-discovery]: https://docs.pytest.org/en/stable/explanation/goodpractices.html#conventions-for-python-test-discovery
 //! [unittest-tests]: https://docs.pytest.org/en/stable/how-to/unittest.html
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
 use ruff_python_ast::StmtClassDef;
@@ -352,6 +353,16 @@ fn pytest_test_class_kind<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> Option<PytestTestKind> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        pytest_test_class_kind_from_source(db, source_operation, definition)
+    })
+}
+
+fn pytest_test_class_kind_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> Option<PytestTestKind> {
     let DefinitionKind::Class(class_ref) = definition.kind(db) else {
         return None;
     };
@@ -369,10 +380,8 @@ fn pytest_test_class_kind<'db>(
     }
 
     let class = original_class_type(db, definition)?;
-    let env = TypeOperations::for_inference(
-        db,
-        ProgramEnvironment::from_file(definition.program_file(db)),
-    );
+    let env =
+        source_operation.operations(ProgramEnvironment::from_file(definition.program_file(db)));
     if place_value_type(
         db,
         class
@@ -412,12 +421,21 @@ fn pytest_test_class_kind<'db>(
 }
 
 /// Returns whether `class` inherits both constructors from `object`.
-fn has_default_pytest_constructors(db: &dyn Db, class: ClassLiteral<'_>) -> bool {
+fn has_default_pytest_constructors<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> bool {
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        has_default_pytest_constructors_from_source(db, source_operation, class)
+    })
+}
+
+fn has_default_pytest_constructors_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: ClassLiteral<'db>,
+) -> bool {
     let Some(class) = class.as_static() else {
         return false;
     };
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_file(class.program_file(db)));
+    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
     let Some(object) = KnownClass::Object.try_to_class_literal(db, &env) else {
         return false;
     };
@@ -451,8 +469,17 @@ fn is_unittest_test_case<'db>(
 
 /// Unittest uses `runTest` only when no named test methods are available, including inherited ones.
 fn has_unittest_test_methods<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> bool {
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_file(class.program_file(db)));
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        has_unittest_test_methods_from_source(db, source_operation, class)
+    })
+}
+
+fn has_unittest_test_methods_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: ClassLiteral<'db>,
+) -> bool {
+    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
     class
         .iter_mro(db, &env)
         .filter_map(ClassBase::into_class)
@@ -473,7 +500,17 @@ fn has_unittest_test_methods<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> 
         })
 }
 
-fn is_default_pytest_test_file(db: &dyn Db, file: ProgramFile<'_>) -> bool {
+fn is_default_pytest_test_file<'db>(db: &'db dyn Db, file: ProgramFile<'db>) -> bool {
+    SourceTypeQuery::run(db, (file,), |db, source_operation, (file,)| {
+        is_default_pytest_test_file_from_source(db, source_operation, file)
+    })
+}
+
+fn is_default_pytest_test_file_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    file: ProgramFile<'db>,
+) -> bool {
     let Some(file_name) = file
         .file(db)
         .path(db)
@@ -491,7 +528,7 @@ fn is_default_pytest_test_file(db: &dyn Db, file: ProgramFile<'_>) -> bool {
         return false;
     }
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(file));
     !place_value_type(
         db,
         symbol(

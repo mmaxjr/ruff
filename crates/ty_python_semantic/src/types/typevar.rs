@@ -1,5 +1,7 @@
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeVisitorKey;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -459,7 +461,11 @@ impl<'db> TypeVarInstance<'db> {
     ) -> bool {
         let seen_typevars = RefCell::new(FxHashSet::default());
         let seen_types = RefCell::new(SmallVec::new());
-        let recursive = crate::types::recursive::TypeVisitorState::new(env, false);
+        let recursive = crate::types::recursive::TypeVisitorState::new(
+            env,
+            TypeVisitorKey::TypeVarDefault(self.identity(db)),
+            false,
+        );
         TypeVarDefaultSearch {
             db,
             env,
@@ -522,10 +528,20 @@ impl<'db> TypeVarInstance<'db> {
         heap_size=ruff_memory_usage::heap_size
     )]
     fn lazy_constraints_unchecked(self, db: &'db dyn Db) -> Option<TypeVarConstraints<'db>> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.lazy_constraints_unchecked_from_source(db, source_operation)
+        })
+    }
+
+    fn lazy_constraints_unchecked_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> Option<TypeVarConstraints<'db>> {
         let definition = self.definition(db)?;
         let program_file = definition.program_file(db);
         let python_file = program_file.python_file(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
         let module = parsed_module(db, python_file).load(db);
         let constraints = match definition.kind(db) {
             // PEP 695 typevar
@@ -1196,16 +1212,29 @@ impl<'db> BoundTypeVarInstance<'db> {
         db: &'db dyn Db,
         polarity: TypeVarVariance,
     ) -> TypeVarVariance {
+        SourceTypeQuery::run(
+            db,
+            (self, polarity),
+            |db, source_operation, (source_self, polarity)| {
+                source_self.variance_with_polarity_from_source(db, source_operation, polarity)
+            },
+        )
+    }
+
+    fn variance_with_polarity_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        polarity: TypeVarVariance,
+    ) -> TypeVarVariance {
         let _span = tracing::trace_span!("variance_with_polarity").entered();
 
         match self.typevar(db).explicit_variance(db) {
             Some(explicit_variance) => explicit_variance.compose(polarity),
             None => match self.binding_context(db) {
                 BindingContext::Definition(definition) => polarity.compose_thunk(|| {
-                    let env = TypeOperations::for_inference(
-                        db,
-                        ProgramEnvironment::from_definition(definition),
-                    );
+                    let env = source_operation
+                        .operations(ProgramEnvironment::from_definition(definition));
                     match binding_type(db, definition)
                         .variance_of(db, &env, self.identity(db))
                         .evaluate(db)
@@ -1377,10 +1406,27 @@ impl<'db> BoundTypeVarInstance<'db> {
             db: &'db dyn Db,
             bound_typevar: BoundTypeVarInstance<'db>,
         ) -> Option<Type<'db>> {
-            let env = TypeOperations::for_inference(
+            SourceTypeQuery::run(
                 db,
-                ProgramEnvironment::from_program(bound_typevar.binding_context(db).program(db)),
-            );
+                (bound_typevar,),
+                |db, source_operation, (bound_typevar,)| {
+                    top_materialized_upper_bound_inner_from_source(
+                        db,
+                        source_operation,
+                        bound_typevar,
+                    )
+                },
+            )
+        }
+
+        fn top_materialized_upper_bound_inner_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            bound_typevar: BoundTypeVarInstance<'db>,
+        ) -> Option<Type<'db>> {
+            let env = source_operation.operations(ProgramEnvironment::from_program(
+                bound_typevar.binding_context(db).program(db),
+            ));
 
             compute(db, &env, bound_typevar)
         }
@@ -1677,15 +1723,39 @@ fn lazy_bound_cycle_recover<'db>(
     current: Option<Type<'db>>,
     typevar: TypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
+    SourceTypeQuery::run(
+        db,
+        (cycle, *previous, current, typevar),
+        |db, source_operation, (cycle, previous, current, typevar)| {
+            lazy_bound_cycle_recover_from_source(
+                db,
+                source_operation,
+                cycle,
+                previous,
+                current,
+                typevar,
+            )
+        },
+    )
+}
+
+fn lazy_bound_cycle_recover_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    cycle: &salsa::Cycle,
+    previous: Option<Type<'db>>,
+    current: Option<Type<'db>>,
+    typevar: TypeVarInstance<'db>,
+) -> Option<Type<'db>> {
     // Normalize the bounds/constraints to ensure cycle convergence.
     let current = current?;
     let program_file = typevar
         .definition(db)
         .expect("a lazy TypeVar bound must have a source definition")
         .program_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     Some(match previous {
-        Some(prev) => current.cycle_normalized(db, &env, *prev, cycle),
+        Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
         None => current.recursive_type_normalized(db, &env, cycle),
     })
 }
@@ -1699,15 +1769,39 @@ fn lazy_constraints_cycle_recover<'db>(
     current: Option<TypeVarConstraints<'db>>,
     typevar: TypeVarInstance<'db>,
 ) -> Option<TypeVarConstraints<'db>> {
+    SourceTypeQuery::run(
+        db,
+        (cycle, *previous, current, typevar),
+        |db, source_operation, (cycle, previous, current, typevar)| {
+            lazy_constraints_cycle_recover_from_source(
+                db,
+                source_operation,
+                cycle,
+                previous,
+                current,
+                typevar,
+            )
+        },
+    )
+}
+
+fn lazy_constraints_cycle_recover_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    cycle: &salsa::Cycle,
+    previous: Option<TypeVarConstraints<'db>>,
+    current: Option<TypeVarConstraints<'db>>,
+    typevar: TypeVarInstance<'db>,
+) -> Option<TypeVarConstraints<'db>> {
     // Normalize the bounds/constraints to ensure cycle convergence.
     let current = current?;
     let program_file = typevar
         .definition(db)
         .expect("lazy TypeVar constraints must have a source definition")
         .program_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     Some(match previous {
-        Some(prev) => current.cycle_normalized(db, &env, *prev, cycle),
+        Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
         None => current.recursive_type_normalized(db, &env, cycle),
     })
 }
@@ -1720,15 +1814,39 @@ fn lazy_default_cycle_recover<'db>(
     current: Option<Type<'db>>,
     typevar: TypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
+    SourceTypeQuery::run(
+        db,
+        (cycle, *previous_default, current, typevar),
+        |db, source_operation, (cycle, previous_default, current, typevar)| {
+            lazy_default_cycle_recover_from_source(
+                db,
+                source_operation,
+                cycle,
+                previous_default,
+                current,
+                typevar,
+            )
+        },
+    )
+}
+
+fn lazy_default_cycle_recover_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    cycle: &salsa::Cycle,
+    previous_default: Option<Type<'db>>,
+    current: Option<Type<'db>>,
+    typevar: TypeVarInstance<'db>,
+) -> Option<Type<'db>> {
     // Normalize the default to ensure cycle convergence.
     let current = current?;
     let program_file = typevar
         .definition(db)
         .expect("a lazy TypeVar default must have a source definition")
         .program_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     Some(match previous_default {
-        Some(prev) => current.cycle_normalized(db, &env, *prev, cycle),
+        Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
         None => current.recursive_type_normalized(db, &env, cycle),
     })
 }
@@ -1782,7 +1900,22 @@ fn paramspec_attribute_upper_bound<'db>(
     program: Program<'db>,
     kind: ParamSpecAttrKind,
 ) -> Type<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+    SourceTypeQuery::run(
+        db,
+        (program, kind),
+        |db, source_operation, (program, kind)| {
+            paramspec_attribute_upper_bound_from_source(db, source_operation, program, kind)
+        },
+    )
+}
+
+fn paramspec_attribute_upper_bound_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    program: Program<'db>,
+    kind: ParamSpecAttrKind,
+) -> Type<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_program(program));
     match kind {
         ParamSpecAttrKind::Args => Type::homogeneous_tuple(db, &env, Type::object()),
         ParamSpecAttrKind::Kwargs => KnownClass::Dict
@@ -1968,7 +2101,21 @@ fn bound_typevar_default_type<'db>(
     db: &'db dyn Db,
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
-    let env = TypeOperations::for_inference(db, bound_typevar.default_environment(db));
+    SourceTypeQuery::run(
+        db,
+        (bound_typevar,),
+        |db, source_operation, (bound_typevar,)| {
+            bound_typevar_default_type_from_source(db, source_operation, bound_typevar)
+        },
+    )
+}
+
+fn bound_typevar_default_type_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    bound_typevar: BoundTypeVarInstance<'db>,
+) -> Option<Type<'db>> {
+    let env = source_operation.operations(bound_typevar.default_environment(db));
     bound_typevar.compute_default_type(db, &env)
 }
 
@@ -1980,10 +2127,34 @@ fn bound_typevar_default_type_cycle_recover<'db>(
     default: Option<Type<'db>>,
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
+    SourceTypeQuery::run(
+        db,
+        (cycle, *previous_default, default, bound_typevar),
+        |db, source_operation, (cycle, previous_default, default, bound_typevar)| {
+            bound_typevar_default_type_cycle_recover_from_source(
+                db,
+                source_operation,
+                cycle,
+                previous_default,
+                default,
+                bound_typevar,
+            )
+        },
+    )
+}
+
+fn bound_typevar_default_type_cycle_recover_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    cycle: &salsa::Cycle,
+    previous_default: Option<Type<'db>>,
+    default: Option<Type<'db>>,
+    bound_typevar: BoundTypeVarInstance<'db>,
+) -> Option<Type<'db>> {
     let default = default?;
-    let env = TypeOperations::for_inference(db, bound_typevar.default_environment(db));
+    let env = source_operation.operations(bound_typevar.default_environment(db));
     Some(match previous_default {
-        Some(previous) => default.cycle_normalized(db, &env, *previous, cycle),
+        Some(previous) => default.cycle_normalized(db, &env, previous, cycle),
         None => default.recursive_type_normalized(db, &env, cycle),
     })
 }
@@ -2475,7 +2646,7 @@ pub(super) struct TypeVarDefaultSearch<'db, 'a> {
     target: TypeVarIdentity<'db>,
     seen_typevars: &'a RefCell<FxHashSet<TypeVarInstance<'db>>>,
     seen_types: &'a RefCell<SmallVec<[TypeIdentity<'db>; 1]>>,
-    recursive: &'a crate::types::recursive::TypeVisitorState<'a, 'db, (), Type<'db>, bool, 1>,
+    recursive: &'a crate::types::recursive::TypeVisitorState<'a, 'db, Type<'db>, bool>,
 }
 
 impl<'db> TypeVarDefaultSearch<'db, '_> {

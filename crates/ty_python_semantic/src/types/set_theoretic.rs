@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::StructuralTypeVisit;
+use crate::types::recursive::TypeWalkKey;
 use itertools::Either;
 use rustc_hash::FxHashSet;
 
@@ -39,6 +40,10 @@ struct UnionExpansionState {
 }
 
 impl<'db> TypeWalk<'db, UnionExpansionState, StructuralTraversal> for ExpandUnion<'_, 'db> {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::ExpandUnion(self.unpack_aliases, self.cycle_recovery, self.expand_named)
+    }
+
     type Output = Result<Vec<Type<'db>>, ()>;
 
     fn on_cycle(
@@ -50,7 +55,7 @@ impl<'db> TypeWalk<'db, UnionExpansionState, StructuralTraversal> for ExpandUnio
     ) -> Self::Output {
         match kind {
             CycleKind::Exact => Ok(Vec::new()),
-            CycleKind::MatchingIdentity => Err(()),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => Err(()),
         }
     }
 

@@ -12,6 +12,7 @@ mod constructor;
 mod property;
 
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::borrow::Cow;
@@ -291,6 +292,7 @@ fn normalize_constraint_bound<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::NormalizeConstraintBound,
         bound,
         |_, _| None,
         |_, bound| bound.paramspec_bound(db),
@@ -2404,13 +2406,25 @@ impl<'db> Bindings<'db> {
                                         signature_generic_context(function.signature(db))
                                     }
 
-                                    Type::BoundMethod(bound_method) => bound_method
-                                        .unbound_signatures(db)
-                                        .and_then(signature_generic_context),
+                                    Type::BoundMethod(bound_method) => {
+                                        bound_method.unbound_callable(db).and_then(|callable| {
+                                            UnionType::try_from_elements(
+                                                db,
+                                                env,
+                                                callable.generic_contexts(db).map(|context| {
+                                                    context.map(wrap_generic_context)
+                                                }),
+                                            )
+                                        })
+                                    }
 
-                                    Type::Callable(callable) => callable
-                                        .explicit_signatures(db)
-                                        .and_then(signature_generic_context),
+                                    Type::Callable(callable) => UnionType::try_from_elements(
+                                        db,
+                                        env,
+                                        callable
+                                            .generic_contexts(db)
+                                            .map(|context| context.map(wrap_generic_context)),
+                                    ),
 
                                     Type::KnownInstance(KnownInstanceType::TypeAliasType(
                                         alias,
@@ -6013,6 +6027,7 @@ impl<'db> ArgumentTypeChecker<'_, 'db> {
                         let prefix_len = TypeInspector::inspect_root(
                             db,
                             env,
+                            TypeInspectionKey::ParamspecParameterSource,
                             declared_type,
                             |_, _| None,
                             |_, declared_type| {
@@ -6028,8 +6043,8 @@ impl<'db> ArgumentTypeChecker<'_, 'db> {
                                 KnownInstanceType::FunctoolsPartial(partial)
                                 | KnownInstanceType::FunctoolsPartialCall(partial),
                             ) => {
-                                let signatures =
-                                    &partial.partial(db).explicit_signatures(db)?.overloads;
+                                let signatures: Vec<_> =
+                                    partial.partial(db).parameter_signatures(db).collect();
                                 (
                                     partial.wrapped(db).inner(db),
                                     signatures
@@ -6038,7 +6053,8 @@ impl<'db> ArgumentTypeChecker<'_, 'db> {
                                             signature.source_overload_index()
                                                 == Some(overload_index)
                                         })
-                                        .or_else(|| signatures.get(overload_index)),
+                                        .or_else(|| signatures.get(overload_index))
+                                        .copied(),
                                 )
                             }
                             _ => (argument_type, None),
@@ -7189,11 +7205,8 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             return false;
         }
 
-        let Some(signatures) = callable.explicit_signatures(db) else {
-            return false;
-        };
-        let signatures = &signatures.overloads;
-        if signatures.is_empty() {
+        let signatures = callable.parameter_signatures(db);
+        if signatures.len() == 0 {
             return false;
         }
 
@@ -7215,8 +7228,10 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
             };
         let error_argument_indices = error_argument_indices.as_deref();
 
-        let callable_binding =
-            CallableBinding::from_overloads(self.signature_type, signatures.iter().cloned());
+        let callable_binding = CallableBinding::from_overloads(
+            self.signature_type,
+            signatures.map(|parameters| parameters.with_return_type(Type::unknown())),
+        );
         let bindings = match Bindings::from(callable_binding)
             .match_parameters(db, self.env, &sub_arguments)
             .check_types(
@@ -7897,7 +7912,9 @@ impl<'db> Binding<'db> {
 
         let specialized_binding = CallableBinding::from_overloads(
             self.signature_type,
-            callable.explicit_signatures(db)?.iter().cloned(),
+            callable
+                .parameter_signatures(db)
+                .map(|parameters| parameters.with_return_type(Type::unknown())),
         );
 
         let mut sub_arguments = arguments_types.select_for_paramspec(

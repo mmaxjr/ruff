@@ -298,7 +298,8 @@ impl<'db> Extend<SemanticCompletion<'db>> for Completions<'db> {
         T: IntoIterator<Item = SemanticCompletion<'db>>,
     {
         let db = self.db;
-        let env = TypeOperations::for_file(db, self.program_file);
+        let env =
+            ty_python_semantic::SemanticModel::new(db, self.program_file).program_environment();
         for c in it {
             self.add_semantic(db, &env, c);
         }
@@ -506,7 +507,8 @@ impl<'db> CompletionBuilder<'db> {
             // but aren't marked here. That is, false negatives are
             // possible but false positives are not.
             if let Some(exception_ty) = collection_context.exception_ty {
-                let env = TypeOperations::for_file(db, program_file);
+                let env =
+                    ty_python_semantic::SemanticModel::new(db, program_file).program_environment();
                 self.is_context_specific |= ty.is_assignable_to(db, &env, exception_ty);
             }
             if collection_context.is_in_class_def() {
@@ -526,7 +528,11 @@ impl<'db> CompletionBuilder<'db> {
         }
         let kind = self.kind.or_else(|| {
             self.ty.and_then(|ty| {
-                completion_kind_from_type(db, &TypeOperations::for_file(db, program_file), ty)
+                completion_kind_from_type(
+                    db,
+                    &ty_python_semantic::SemanticModel::new(db, program_file).program_environment(),
+                    ty,
+                )
             })
         });
         let relevance = Relevance::new(db, program_file, collection_context, query, &self);
@@ -3186,7 +3192,8 @@ fn add_import_completions_impl<'db>(
     semantic_completions: impl IntoIterator<Item = SemanticCompletion<'db>>,
     module_dependency_kind: impl Fn(&SemanticCompletion<'db>) -> Option<ModuleDependencyKind>,
 ) {
-    let env = TypeOperations::for_file(db, completions.program_file);
+    let env =
+        ty_python_semantic::SemanticModel::new(db, completions.program_file).program_environment();
     for semantic in semantic_completions {
         let module_dependency_kind = module_dependency_kind(&semantic);
         let is_from_type_check_only_module = matches!(

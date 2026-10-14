@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeVisitorKey;
 use compact_str::CompactString;
 use ruff_python_ast::{self as ast, AnyNodeRef};
 
@@ -25,14 +26,8 @@ enum BinaryExpressionOperandTypes<'db> {
     TypedDictResult(Type<'db>),
 }
 
-type BinaryExpressionVisitor<'env, 'db> = TypeVisitorState<
-    'env,
-    'db,
-    ast::Operator,
-    (Type<'db>, ast::Operator, Type<'db>),
-    Option<Type<'db>>,
-    1,
->;
+type BinaryExpressionVisitor<'env, 'db> =
+    TypeVisitorState<'env, 'db, (Type<'db>, ast::Operator, Type<'db>), Option<Type<'db>>>;
 
 /// The inference state borrowed while an alias supplies one binary operand.
 pub(in crate::types) struct BinaryOperand<'a, 'db, 'ast> {
@@ -494,7 +489,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             left_ty,
             right_ty,
             op,
-            &BinaryExpressionVisitor::new(self.program_environment(), Some(Type::Never)),
+            &BinaryExpressionVisitor::new(
+                self.program_environment(),
+                TypeVisitorKey::BinaryExpression,
+                Some(Type::Never),
+            ),
             state,
         )?;
         Some(state.limit_tuple_addition_result(self.db(), self.program_environment(), result))

@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspectionKey;
 use crate::types::recursive::TypeInspector;
 use crate::types::{ClassBase, IntersectionBuilder, KnownClass, Type, UnionBuilder};
 
@@ -19,7 +20,9 @@ fn containment_behavior<'db>(
     env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> ContainmentBehavior<'db> {
-    TypeInspector::scope(env, |inspector| containment_behavior_in(db, inspector, ty))
+    TypeInspector::scope(env, TypeInspectionKey::ContainmentBehavior, |inspector| {
+        containment_behavior_in(db, inspector, ty)
+    })
 }
 
 fn containment_behavior_in<'db>(
@@ -61,6 +64,7 @@ pub(super) fn narrow_string_membership<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::NarrowStringMembership,
         lhs_ty,
         |_, _| None,
         |inspector, lhs_ty| lhs_ty.narrow_string_membership(db, inspector, haystack, is_contained),

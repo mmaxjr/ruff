@@ -10,7 +10,7 @@
 //! parameter cannot connect two components. Conversely, reaching invariance does not erase
 //! later dependencies, even though ordinary evaluation can stop there.
 
-use crate::types::TypeOperations;
+use crate::types::SourceTypeQuery;
 use std::collections::VecDeque;
 
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -240,6 +240,16 @@ impl<'db> VarianceVariable<'db> {
     /// ordinary evaluation and declaration validation.
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| VarianceTerm::BIVARIANT, heap_size=ruff_memory_usage::heap_size)]
     fn equation(self, db: &'db dyn Db) -> VarianceTerm<'db> {
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.equation_from_source(db, source_operation)
+        })
+    }
+
+    fn equation_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> VarianceTerm<'db> {
         let typevar = self.typevar(db);
         match self.origin(db) {
             // Checking structural support opens the protocol's interface. Defer that work until
@@ -257,16 +267,15 @@ impl<'db> VarianceVariable<'db> {
             VarianceOrigin::GenericAlias(alias) => alias.variance_equation(db, typevar),
             VarianceOrigin::TypeAlias(alias) => alias.variance_equation(db, typevar),
             VarianceOrigin::Recursive(recursive) => {
-                let env = TypeOperations::for_inference(db, recursive.environment(db));
+                let env = source_operation.operations(recursive.environment(db));
                 recursive.variance_equation(db, &env, typevar)
             }
             VarianceOrigin::Function(function) => function.variance_equation(db, typevar),
             VarianceOrigin::LambdaReturn(source) => source.return_variance(db, typevar),
             VarianceOrigin::TypedDict(class) => {
-                let env = TypeOperations::for_inference(
-                    db,
-                    ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
-                );
+                let env = source_operation.operations(ProgramEnvironment::from_file(
+                    class.class_literal(db).program_file(db),
+                ));
                 TypedDictType::new(class).variance_of_items(db, &env, typevar)
             }
         }

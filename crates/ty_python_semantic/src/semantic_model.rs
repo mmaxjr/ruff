@@ -64,10 +64,18 @@ pub struct SemanticModel<'db> {
 
 impl<'db> SemanticModel<'db> {
     pub fn new(db: &'db dyn Db, file: ProgramFile<'db>) -> Self {
+        TypeOperations::semantic_model(db, file)
+    }
+
+    pub(crate) fn with_operations(
+        db: &'db dyn Db,
+        file: ProgramFile<'db>,
+        operations: TypeOperations<'db>,
+    ) -> Self {
         Self {
             db,
             file,
-            operations: TypeOperations::for_file(db, file),
+            operations,
             in_string_annotation_expr: None,
         }
     }
@@ -159,9 +167,11 @@ impl<'db> SemanticModel<'db> {
             .into_iter()
             .rev()
         {
-            for memberdef in
-                all_reachable_members(db, file_scope.to_scope_id(self.db, program_file))
-            {
+            for memberdef in all_reachable_members(
+                db,
+                &self.operations,
+                file_scope.to_scope_id(self.db, program_file),
+            ) {
                 members.insert(
                     memberdef.member.name,
                     MemberDefinition {
@@ -338,14 +348,17 @@ impl<'db> SemanticModel<'db> {
         let mut completions = vec![];
         for (file_scope, _) in index.ancestor_scopes(file_scope) {
             completions.extend(
-                all_reachable_members(db, file_scope.to_scope_id(self.db, program_file)).map(
-                    |memberdef| Completion {
-                        name: CompactString::new(memberdef.member.name),
-                        ty: Some(memberdef.member.ty),
-                        builtin: false,
-                        is_type_check_only: memberdef.member.is_type_check_only,
-                    },
-                ),
+                all_reachable_members(
+                    db,
+                    &self.operations,
+                    file_scope.to_scope_id(self.db, program_file),
+                )
+                .map(|memberdef| Completion {
+                    name: CompactString::new(memberdef.member.name),
+                    ty: Some(memberdef.member.ty),
+                    builtin: false,
+                    is_type_check_only: memberdef.member.is_type_check_only,
+                }),
             );
         }
 
@@ -354,11 +367,13 @@ impl<'db> SemanticModel<'db> {
         // keeps the correct types (e.g., `__file__` is `str` for the current module,
         // not `str | None`).
         completions.extend(
-            all_implicit_module_globals(self.db, self.file).map(|(name, ty)| Completion {
-                name: CompactString::new(name),
-                ty: Some(ty),
-                builtin: true,
-                is_type_check_only: false,
+            all_implicit_module_globals(self.db, &self.operations, self.file).map(|(name, ty)| {
+                Completion {
+                    name: CompactString::new(name),
+                    ty: Some(ty),
+                    builtin: true,
+                    is_type_check_only: false,
+                }
             }),
         );
 

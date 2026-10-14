@@ -42,6 +42,7 @@
 //!   available by that definition, including those reached through imports. Each exposure records the
 //!   fixture's public name, canonical declaration, and local and source bindings.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use std::cmp::Ordering;
 
@@ -133,7 +134,17 @@ pub fn fixture_bindings_for_parameter<'db>(
     db: &'db dyn Db,
     parameter: Definition<'db>,
 ) -> Box<[FixtureBinding<'db>]> {
-    let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_definition(parameter));
+    SourceTypeQuery::run(db, (parameter,), |db, source_operation, (parameter,)| {
+        fixture_bindings_for_parameter_from_source(db, source_operation, parameter)
+    })
+}
+
+fn fixture_bindings_for_parameter_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    parameter: Definition<'db>,
+) -> Box<[FixtureBinding<'db>]> {
+    let env = &source_operation.operations(ProgramEnvironment::from_definition(parameter));
     let Some(request) = fixture_request_for_parameter(db, env, parameter) else {
         return Box::default();
     };
@@ -530,7 +541,9 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
             return None;
         }
 
-        if !self.is_fixture_dependency && self.directly_parametrized(db, parameter_name.as_str()) {
+        if !self.is_fixture_dependency
+            && self.directly_parametrized(db, env, parameter_name.as_str())
+        {
             return None;
         }
 
@@ -575,12 +588,18 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
 
     /// Returns whether static parametrization on the function or an enclosing class prevents this
     /// fixture request.
-    fn directly_parametrized(&self, db: &'db dyn Db, parameter_name: &str) -> bool {
+    fn directly_parametrized(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        parameter_name: &str,
+    ) -> bool {
         if !self.function.decorator_list.is_empty() {
             let decorators = function_known_decorators(db, self.function_definition);
             if self.function.decorator_list.iter().any(|decorator| {
                 mark_excludes_fixture(
                     db,
+                    env,
                     self.function_definition,
                     &decorator.expression,
                     parameter_name,
@@ -605,6 +624,7 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
                 .any(|decorator| {
                     mark_excludes_fixture(
                         db,
+                        env,
                         definition,
                         &decorator.expression,
                         parameter_name,
@@ -1390,6 +1410,7 @@ fn non_type_parameter_parent(
 /// Returns whether a static mark supplies this parameter directly or cannot be interpreted.
 fn mark_excludes_fixture<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     definition: Definition<'db>,
     expression: &ast::Expr,
     parameter_name: &str,
@@ -1408,7 +1429,7 @@ fn mark_excludes_fixture<'db>(
         .arguments
         .find_argument_value("argnames", 0)
         .and_then(|argnames| {
-            statically_known_parametrize_names(db, definition, argnames, &expression_type)
+            statically_known_parametrize_names(db, env, definition, argnames, &expression_type)
         })
     else {
         return true;
@@ -1419,6 +1440,7 @@ fn mark_excludes_fixture<'db>(
 
     is_indirect(
         db,
+        env,
         definition,
         &call.arguments,
         parameter_name,
@@ -1427,20 +1449,42 @@ fn mark_excludes_fixture<'db>(
 }
 
 /// Returns whether a type is an instance of `class_name` from one of `modules`.
-fn is_known_class_instance(
-    db: &dyn Db,
-    definition: Definition<'_>,
-    ty: Option<Type<'_>>,
+fn is_known_class_instance<'db>(
+    db: &'db dyn Db,
+    definition: Definition<'db>,
+    ty: Option<Type<'db>>,
+    class_name: &str,
+    modules: &[KnownModule],
+) -> bool {
+    SourceTypeQuery::run(
+        db,
+        (definition, ty, class_name, modules),
+        |db, source_operation, (definition, ty, class_name, modules)| {
+            is_known_class_instance_from_source(
+                db,
+                source_operation,
+                definition,
+                ty,
+                class_name,
+                modules,
+            )
+        },
+    )
+}
+
+fn is_known_class_instance_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+    ty: Option<Type<'db>>,
     class_name: &str,
     modules: &[KnownModule],
 ) -> bool {
     let Some(Type::NominalInstance(instance)) = ty else {
         return false;
     };
-    let environment = TypeOperations::for_inference(
-        db,
-        ProgramEnvironment::from_file(definition.program_file(db)),
-    );
+    let environment =
+        source_operation.operations(ProgramEnvironment::from_file(definition.program_file(db)));
     let Some(class) = instance
         .class(db, &environment)
         .class_literal(db)
@@ -1461,6 +1505,7 @@ fn is_known_class_instance(
 /// direct, and `None` preserves uncertainty when the argument cannot be interpreted statically.
 fn is_indirect<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     definition: Definition<'db>,
     arguments: &ast::Arguments,
     parameter_name: &str,
@@ -1476,13 +1521,14 @@ fn is_indirect<'db>(
     if ty == Type::bool_literal(false) {
         return Some(false);
     }
-    statically_known_parametrize_names(db, definition, expression, expression_type)
+    statically_known_parametrize_names(db, env, definition, expression, expression_type)
         .map(|names| names.contains(&parameter_name))
 }
 
 /// Returns statically known pytest parametrization names from a string or fixed-length iterable.
 fn statically_known_parametrize_names<'db>(
     db: &'db dyn Db,
+    env: &crate::types::TypeOperations<'db>,
     definition: Definition<'db>,
     expression: &ast::Expr,
     expression_type: &impl Fn(&ast::Expr) -> Option<Type<'db>>,
@@ -1498,10 +1544,8 @@ fn statically_known_parametrize_names<'db>(
         );
     }
 
-    let environment = TypeOperations::for_inference(
-        db,
-        ProgramEnvironment::from_file(definition.program_file(db)),
-    );
+    let environment =
+        env.in_environment(ProgramEnvironment::from_file(definition.program_file(db)));
     extract_fixed_length_iterable_element_types(db, &environment, expression, |element| {
         expression_type(element).unwrap_or_else(Type::unknown)
     })?
@@ -1557,6 +1601,26 @@ fn static_string_sequence_from_expression<'db>(
     definition: Definition<'db>,
     expression: &ast::Expr,
 ) -> Option<Vec<String>> {
+    SourceTypeQuery::run(
+        db,
+        (definition, expression),
+        |db, source_operation, (definition, expression)| {
+            static_string_sequence_from_expression_from_source(
+                db,
+                source_operation,
+                definition,
+                expression,
+            )
+        },
+    )
+}
+
+fn static_string_sequence_from_expression_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+    expression: &ast::Expr,
+) -> Option<Vec<String>> {
     if let ast::Expr::BinOp(binary) = expression
         && binary.op == ast::Operator::Add
     {
@@ -1569,8 +1633,7 @@ fn static_string_sequence_from_expression<'db>(
         return Some(strings);
     }
 
-    let environment =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
+    let environment = source_operation.operations(ProgramEnvironment::from_definition(definition));
     extract_fixed_length_iterable_element_types(db, &environment, expression, |element| {
         definition_expression_type(db, definition, element)
     })?

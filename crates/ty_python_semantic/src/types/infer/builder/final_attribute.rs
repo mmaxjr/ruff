@@ -1,4 +1,5 @@
 use crate::types::TypeOperations;
+use crate::types::recursive::{TypeQueryKey, TypeWalkKey};
 use crate::types::recursive::{TypeQueryVisit, TypeWalkVisit};
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span};
 use ruff_db::parsed::parsed_module;
@@ -335,6 +336,10 @@ struct FinalAttributeAssignment<'a> {
 impl<'db, 'ast> TypeWalk<'db, &mut TypeInferenceBuilder<'db, 'ast>>
     for FinalAttributeAssignment<'_>
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::FinalAttributeAssignment(ruff_python_ast::name::Name::new(self.attribute))
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -401,6 +406,10 @@ pub(super) fn final_attribute_receiver<'db>(
 struct FindFinalAttribute<'a>(&'a str);
 
 impl<'db> TypeQuery<'db> for FindFinalAttribute<'_> {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::FindFinalAttribute(self.0.into())
+    }
+
     type Output = Option<Type<'db>>;
 
     fn on_cycle(

@@ -13,6 +13,7 @@
 //! of an unpacking assignment. A `tuple` specialization can include `Never` as a fixed-length
 //! element because a user-defined tuple subclass can inhabit that type.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::typevar::TypeVarSet;
@@ -319,8 +320,17 @@ impl<'db> TupleType<'db> {
     // from `NominalInstanceType::class()`, which is a very hot method.
     #[salsa::tracked(returns(copy), cycle_initial=to_class_type_cycle_initial, heap_size=ruff_memory_usage::heap_size)]
     fn cached_class_type(self, db: &'db dyn Db) -> ClassType<'db> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_program(self.program(db)));
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.cached_class_type_from_source(db, source_operation)
+        })
+    }
+
+    fn cached_class_type_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> ClassType<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(self.program(db)));
         self.to_class_type_impl(db, &env)
     }
 
@@ -375,7 +385,7 @@ impl<'db> TupleType<'db> {
         )
     }
 
-    pub(crate) fn find_legacy_typevars_impl(
+    pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
@@ -943,8 +953,18 @@ fn to_class_type_cycle_initial<'db>(
     id: salsa::Id,
     self_: TupleType<'db>,
 ) -> ClassType<'db> {
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_program(self_.program(db)));
+    SourceTypeQuery::run(db, (id, self_), |db, source_operation, (id, self_)| {
+        to_class_type_cycle_initial_from_source(db, source_operation, id, self_)
+    })
+}
+
+fn to_class_type_cycle_initial_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    id: salsa::Id,
+    self_: TupleType<'db>,
+) -> ClassType<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_program(self_.program(db)));
     self_
         .class_literal(db)
         .apply_specialization(db, |generic_context| {

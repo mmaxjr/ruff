@@ -1,3 +1,4 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::name::Name;
@@ -19,14 +20,17 @@ pub(crate) fn dunder_all_names(db: &dyn Db, file: ProgramFile<'_>) -> Option<FxH
         return Some(names.iter().cloned().collect());
     }
 
-    let source_file = file.file(db);
-    let _span = tracing::trace_span!("dunder_all_names", file=?source_file.path(db)).entered();
+    SourceTypeQuery::run(db, file, |db, source, file| {
+        let env = source.operations(ProgramEnvironment::from_file(file));
+        let source_file = file.file(db);
+        let _span = tracing::trace_span!("dunder_all_names", file=?source_file.path(db)).entered();
 
-    let module = parsed_module(db, file.python_file(db)).load(db);
-    let index = semantic_index(db, file);
-    let mut collector = DunderAllNamesCollector::new(db, file, index);
-    collector.visit_body(module.suite());
-    collector.into_names()
+        let module = parsed_module(db, file.python_file(db)).load(db);
+        let index = semantic_index(db, file);
+        let mut collector = DunderAllNamesCollector::new(db, &env, file, index);
+        collector.visit_body(module.suite());
+        collector.into_names()
+    })
 }
 
 /// A visitor that collects the names in the `__all__` variable of a module.
@@ -50,10 +54,15 @@ struct DunderAllNamesCollector<'db> {
 }
 
 impl<'db> DunderAllNamesCollector<'db> {
-    fn new(db: &'db dyn Db, file: ProgramFile<'db>, index: &'db SemanticIndex<'db>) -> Self {
+    fn new(
+        db: &'db dyn Db,
+        env: &crate::types::TypeOperations<'db>,
+        file: ProgramFile<'db>,
+        index: &'db SemanticIndex<'db>,
+    ) -> Self {
         Self {
             db,
-            env: TypeOperations::for_inference(db, ProgramEnvironment::from_file(file)),
+            env: env.in_environment(ProgramEnvironment::from_file(file)),
             file,
             index,
             origin: None,
@@ -230,8 +239,8 @@ impl<'db> DunderAllNamesCollector<'db> {
     }
 }
 
-impl<'db> StatementVisitor<'db> for DunderAllNamesCollector<'db> {
-    fn visit_stmt(&mut self, stmt: &'db ast::Stmt) {
+impl<'ast> StatementVisitor<'ast> for DunderAllNamesCollector<'_> {
+    fn visit_stmt(&mut self, stmt: &'ast ast::Stmt) {
         if self.invalid {
             return;
         }

@@ -1,5 +1,6 @@
 //! Abstract-method discovery and diagnostics shared by class validation and constructor calls.
 
+use crate::types::SourceTypeQuery;
 use std::borrow::Cow;
 
 use crate::types::TypeOperations;
@@ -270,10 +271,19 @@ impl<'db> ClassType<'db> {
 
     #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size, cycle_initial=|_, _, _| FxIndexMap::default())]
     fn cached_abstract_methods(self, db: &'db dyn Db) -> FxIndexMap<Name, AbstractMethod<'db>> {
-        let env = TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
-        );
+        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
+            source_self.cached_abstract_methods_from_source(db, source_operation)
+        })
+    }
+
+    fn cached_abstract_methods_from_source(
+        self,
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+    ) -> FxIndexMap<Name, AbstractMethod<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            self.class_literal(db).program_file(db),
+        ));
         self.abstract_methods_in_operation(db, &env)
     }
 

@@ -8,6 +8,7 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::recursive::TypeWalkVisit;
+use crate::types::recursive::{TypeInspectionKey, TypeWalkKey};
 use crate::types::{CycleKind, TypeTraversal, TypeWalk};
 use std::cmp::Ordering;
 
@@ -37,9 +38,10 @@ use ty_python_core::{
 /// of the given scope.
 pub(crate) fn all_end_of_scope_members<'db>(
     db: &'db dyn Db,
+    env: &crate::types::TypeOperations<'db>,
     scope_id: ScopeId<'db>,
 ) -> impl Iterator<Item = MemberWithDefinition<'db>> + 'db {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope_id));
+    let env = env.in_environment(ProgramEnvironment::from_scope(scope_id));
 
     let use_def_map = use_def_map(db, scope_id);
     let table = place_table(db, scope_id);
@@ -93,9 +95,10 @@ pub(crate) fn all_end_of_scope_members<'db>(
 /// in the given scope.
 pub(crate) fn all_reachable_members<'db>(
     db: &'db dyn Db,
+    env: &crate::types::TypeOperations<'db>,
     scope_id: ScopeId<'db>,
 ) -> impl Iterator<Item = MemberWithDefinition<'db>> + 'db {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope_id));
+    let env = env.in_environment(ProgramEnvironment::from_scope(scope_id));
 
     let use_def_map = use_def_map(db, scope_id);
     let table = place_table(db, scope_id);
@@ -169,6 +172,10 @@ struct CollectMembers<'db> {
 }
 
 impl<'db> TypeWalk<'db> for CollectMembers<'db> {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::CollectMembers
+    }
+
     type Output = Option<FxHashSet<Member<'db>>>;
 
     fn on_cycle(
@@ -180,7 +187,7 @@ impl<'db> TypeWalk<'db> for CollectMembers<'db> {
     ) -> Self::Output {
         match kind {
             CycleKind::Exact => None,
-            CycleKind::MatchingIdentity => Some(all_members(
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => Some(all_members(
                 self.db,
                 traversal.environment(),
                 Type::object(),
@@ -551,7 +558,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
             self.extend_with_slot_members(db, env, ty, parent);
 
             let parent_scope = parent.body_scope(db);
-            for memberdef in all_end_of_scope_members(db, parent_scope) {
+            for memberdef in all_end_of_scope_members(db, env, parent_scope) {
                 let result = ty.member(db, env, memberdef.member.name.as_str());
                 let Some(ty) = result.place.ignore_possibly_undefined() else {
                     continue;
@@ -654,7 +661,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
         // class member. This gets us the right type for each
         // member, e.g., `SomeClass.__delattr__` is not a bound
         // method, but `instance_of_SomeClass.__delattr__` is.
-        for memberdef in all_end_of_scope_members(db, class_body_scope) {
+        for memberdef in all_end_of_scope_members(db, env, class_body_scope) {
             let result = ty.member(db, env, memberdef.member.name.as_str());
             let Some(ty) = result.place.ignore_possibly_undefined() else {
                 continue;
@@ -784,12 +791,14 @@ impl<'db> Member<'db> {
                 TypeInspector::inspect_root(
                     db,
                     &env,
+                    TypeInspectionKey::FunctionBinding,
                     binding,
                     |_, _| None,
                     |_, binding| {
                         TypeInspector::inspect_root(
                             db,
                             &env,
+                            TypeInspectionKey::ExposedFunctionBinding,
                             exposed,
                             |_, _| None,
                             |_, exposed_type| {

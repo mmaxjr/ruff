@@ -5,6 +5,7 @@ use super::{
 };
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryKey;
 use crate::types::recursive::TypeQueryVisit;
 
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
@@ -47,6 +48,10 @@ impl<'db> Type<'db> {
 struct TypeFormArgument;
 
 impl<'db> TypeQuery<'db> for TypeFormArgument {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::TypeFormArgument
+    }
+
     type Output = Option<Type<'db>>;
 
     fn on_cycle(

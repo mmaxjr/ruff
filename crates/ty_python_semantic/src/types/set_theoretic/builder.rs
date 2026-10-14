@@ -39,8 +39,10 @@
 //! shares exactly the same possible super-types, and none of them are subtypes of each other
 //! (unless exactly the same literal type), we can avoid many unnecessary redundancy checks.
 
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::{StructuralTypeVisit, TypeWalkVisit};
+use crate::types::recursive::{TypeInspectionKey, TypeWalkKey};
 use std::convert::Infallible;
 use std::hint::cold_path;
 use std::marker::PhantomData;
@@ -586,6 +588,10 @@ const MAX_NON_RECURSIVE_UNION_LITERALS: usize = 8192;
 struct BuildUnion;
 
 impl<'a, 'db> TypeWalk<'db, (&'a mut UnionBuilder<'db>, bool), StructuralTraversal> for BuildUnion {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::BuildUnion
+    }
+
     type Output = ();
 
     fn on_cycle(
@@ -595,7 +601,7 @@ impl<'a, 'db> TypeWalk<'db, (&'a mut UnionBuilder<'db>, bool), StructuralTravers
         kind: CycleKind,
         (builder, _unfold_named): (&'a mut UnionBuilder<'db>, bool),
     ) {
-        if kind == CycleKind::MatchingIdentity {
+        if matches!(kind, CycleKind::MatchingIdentity | CycleKind::Reentrant) {
             builder.push_type(ty, traversal);
         }
     }
@@ -1386,6 +1392,10 @@ impl IntersectionLimits for BoundedIntersection {
 struct IsDisjunctive;
 
 impl<'db> TypeWalk<'db, bool> for IsDisjunctive {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::IsDisjunctive
+    }
+
     type Output = bool;
 
     fn on_cycle(
@@ -1395,7 +1405,7 @@ impl<'db> TypeWalk<'db, bool> for IsDisjunctive {
         kind: CycleKind,
         _negated: bool,
     ) -> bool {
-        kind == CycleKind::MatchingIdentity
+        matches!(kind, CycleKind::MatchingIdentity | CycleKind::Reentrant)
     }
 
     fn visit(
@@ -1440,6 +1450,10 @@ impl<'a, 'db, L: IntersectionLimits>
     TypeWalk<'db, (&'a mut IntersectionBuilder<'db>, bool), StructuralTraversal>
     for BuildIntersection<L>
 {
+    fn recursion_key(&self) -> TypeWalkKey<'db> {
+        TypeWalkKey::BuildIntersection
+    }
+
     type Output = ControlFlow<L::Break>;
 
     fn visit_alias_like(
@@ -1896,8 +1910,22 @@ fn simplify_intersection_pair_query<'db>(
     types: TypePair<'db>,
     polarity: IntersectionPolarity,
 ) -> IntersectionSimplification {
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_program(types.program(db)));
+    SourceTypeQuery::run(
+        db,
+        (types, polarity),
+        |db, source_operation, (types, polarity)| {
+            simplify_intersection_pair_query_from_source(db, source_operation, types, polarity)
+        },
+    )
+}
+
+fn simplify_intersection_pair_query_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    types: TypePair<'db>,
+    polarity: IntersectionPolarity,
+) -> IntersectionSimplification {
+    let env = source_operation.operations(ProgramEnvironment::from_program(types.program(db)));
     compute_intersection_simplification(db, &env, types.first(db), types.second(db), polarity)
 }
 
@@ -2061,6 +2089,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
                 if let Some(narrowed) = TypeInspector::inspect_root(
                     db,
                     env,
+                    TypeInspectionKey::TypeFormSubclass,
                     typeform.type_argument(db),
                     |_, _| None,
                     |_, ty| ty.subclass_type(db),
@@ -2080,6 +2109,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
                             Type::TypeForm(typeform) => TypeInspector::inspect_root(
                                 db,
                                 env,
+                                TypeInspectionKey::TypeFormSubclass,
                                 typeform.type_argument(db),
                                 |_, _| None,
                                 |_, ty| ty.subclass_type(db).map(|narrowed| (index, narrowed)),

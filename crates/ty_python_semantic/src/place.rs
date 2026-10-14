@@ -1,6 +1,7 @@
 pub(crate) mod definitions;
 
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use itertools::Either;
 use ruff_index::IndexSlice;
@@ -521,7 +522,18 @@ pub(crate) fn global_symbol<'db>(
     file: ProgramFile<'db>,
     name: &str,
 ) -> PlaceAndQualifiers<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+    SourceTypeQuery::run(db, (file, name), |db, source_operation, (file, name)| {
+        global_symbol_from_source(db, source_operation, file, name)
+    })
+}
+
+fn global_symbol_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    file: ProgramFile<'db>,
+    name: &str,
+) -> PlaceAndQualifiers<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_file(file));
     explicit_global_symbol(db, file, name).or_fall_back_to(db, &env, || {
         module_type_implicit_global_symbol(db, file, name)
     })
@@ -1269,10 +1281,10 @@ impl<'db> From<Place<'db>> for PlaceAndQualifiers<'db> {
 #[salsa::tracked(
     returns(copy),
     cycle_initial=|_, id, _, _, _, _| Place::bound(Type::divergent(id)).into(),
-    cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, place: PlaceAndQualifiers<'db>, scope: ScopeId<'db>, _, _, _| {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, place: PlaceAndQualifiers<'db>, scope: ScopeId<'db>, _, _, _| SourceTypeQuery::run(db, (cycle, previous, place, scope), |db, source_operation, (cycle, previous, place, scope)| {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
         place.cycle_normalized(db, &env, *previous, cycle)
-    },
+    }),
     heap_size=ruff_memory_usage::heap_size
 )]
 pub(crate) fn place_by_id<'db>(
@@ -1282,7 +1294,38 @@ pub(crate) fn place_by_id<'db>(
     requires_explicit_reexport: RequiresExplicitReExport,
     considered_definitions: ConsideredDefinitions,
 ) -> PlaceAndQualifiers<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    SourceTypeQuery::run(
+        db,
+        (
+            scope,
+            place_id,
+            requires_explicit_reexport,
+            considered_definitions,
+        ),
+        |db,
+         source_operation,
+         (scope, place_id, requires_explicit_reexport, considered_definitions)| {
+            place_by_id_from_source(
+                db,
+                source_operation,
+                scope,
+                place_id,
+                requires_explicit_reexport,
+                considered_definitions,
+            )
+        },
+    )
+}
+
+fn place_by_id_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    place_id: ScopedPlaceId,
+    requires_explicit_reexport: RequiresExplicitReExport,
+    considered_definitions: ConsideredDefinitions,
+) -> PlaceAndQualifiers<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
     place_by_id_with_context(
         db,
         &env,
@@ -2423,6 +2466,7 @@ fn is_reexported(db: &dyn Db, definition: Definition<'_>) -> bool {
 }
 
 pub(crate) mod implicit_globals {
+    use crate::types::SourceTypeQuery;
     use ruff_db::parsed::parsed_module;
     use ruff_python_ast as ast;
     use ruff_python_ast::name::Name;
@@ -2502,7 +2546,17 @@ pub(crate) mod implicit_globals {
         db: &'db dyn Db,
         program: Program<'db>,
     ) -> Option<ScopeId<'db>> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
+            module_type_body_scope_inner_from_source(db, source_operation, program)
+        })
+    }
+
+    fn module_type_body_scope_inner_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+    ) -> Option<ScopeId<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
         let module_scope = core_module_scope(db, &env, KnownModule::Types)?;
         try_vendored_class_scope(db, module_scope, "ModuleType").or_else(|| {
             KnownClass::ModuleType
@@ -2556,7 +2610,18 @@ pub(crate) mod implicit_globals {
         file: ProgramFile<'db>,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+        SourceTypeQuery::run(db, (file, name), |db, source_operation, (file, name)| {
+            module_type_implicit_global_symbol_from_source(db, source_operation, file, name)
+        })
+    }
+
+    fn module_type_implicit_global_symbol_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        file: ProgramFile<'db>,
+        name: &str,
+    ) -> PlaceAndQualifiers<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(file));
         match name {
             // We special-case `__file__` here because we know that for an internal implicit global
             // lookup in a Python module, it is always a string, even though typeshed says `str |
@@ -2687,7 +2752,17 @@ pub(crate) mod implicit_globals {
         db: &'db dyn Db,
         program: Program<'db>,
     ) -> smallvec::SmallVec<[ast::name::Name; 8]> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
+            module_type_symbols_inner_from_source(db, source_operation, program)
+        })
+    }
+
+    fn module_type_symbols_inner_from_source<'db>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+    ) -> smallvec::SmallVec<[ast::name::Name; 8]> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
         let Some(module_type_scope) = module_type_body_scope(db, &env) else {
             // The most likely way we get here is if a user specified a `--custom-typeshed-dir`
             // without a resolvable `ModuleType` class in the `stdlib/types.pyi` stub.
@@ -2703,6 +2778,7 @@ pub(crate) mod implicit_globals {
     /// for the current module, not `str | None`).
     pub(crate) fn all_implicit_module_globals<'db>(
         db: &'db dyn Db,
+        env: &crate::types::TypeOperations<'db>,
         file: ProgramFile<'db>,
     ) -> impl Iterator<Item = (Name, Type<'db>)> + 'db {
         // Special-cased implicit globals that are not in `module_type_symbols`
@@ -2711,7 +2787,7 @@ pub(crate) mod implicit_globals {
             .map(Name::new_static);
 
         // All symbols from ModuleType (already includes `__file__`, `__name__`, etc.)
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+        let env = env.in_environment(ProgramEnvironment::from_file(file));
         let module_type_syms = module_type_symbols(db, &env).iter().cloned();
 
         // Combine and map to (name, type) pairs

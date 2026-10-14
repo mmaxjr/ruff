@@ -1,7 +1,9 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::recursive::TypeInspector;
 use crate::types::recursive::TypeQueryVisit;
+use crate::types::recursive::{TypeInspectionKey, TypeQueryKey};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, btree_map::Entry};
@@ -229,6 +231,16 @@ fn declared_typed_dict_openness<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> Option<TypedDictOpenness<'db>> {
+    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+        declared_typed_dict_openness_from_source(db, source_operation, class)
+    })
+}
+
+fn declared_typed_dict_openness_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    class: StaticClassLiteral<'db>,
+) -> Option<TypedDictOpenness<'db>> {
     let file = class.program_file(db);
     let module = parsed_module(db, file.python_file(db)).load(db);
     let arguments = class.node(db, &module).arguments.as_ref()?;
@@ -241,7 +253,7 @@ fn declared_typed_dict_openness<'db>(
         }));
     }
     let closed = arguments.find_keyword("closed")?;
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(file));
     let closed_ty = definition_expression_type(db, definition, &closed.value);
     Some(if closed_ty.bool(db, &env).is_always_true() {
         TypedDictOpenness::Closed
@@ -369,10 +381,19 @@ impl<'db> TypedDictType<'db> {
             db: &'db dyn Db,
             class: ClassType<'db>,
         ) -> TypedDictOpenness<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
-            );
+            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+                class_based_openness_from_source(db, source_operation, class)
+            })
+        }
+
+        fn class_based_openness_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            class: ClassType<'db>,
+        ) -> TypedDictOpenness<'db> {
+            let env = source_operation.operations(ProgramEnvironment::from_file(
+                class.class_literal(db).program_file(db),
+            ));
             compute(db, &env, class)
         }
 
@@ -696,10 +717,19 @@ impl<'db> TypedDictType<'db> {
             heap_size=ruff_memory_usage::heap_size
         )]
         fn class_based_items<'db>(db: &'db dyn Db, class: ClassType<'db>) -> TypedDictSchema<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
-            );
+            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
+                class_based_items_from_source(db, source_operation, class)
+            })
+        }
+
+        fn class_based_items_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            class: ClassType<'db>,
+        ) -> TypedDictSchema<'db> {
+            let env = source_operation.operations(ProgramEnvironment::from_file(
+                class.class_literal(db).program_file(db),
+            ));
             compute(db, &env, class)
         }
 
@@ -1622,9 +1652,19 @@ pub(super) fn deferred_functional_typed_dict_schema<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> TypedDictSchema<'db> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        deferred_functional_typed_dict_schema_from_source(db, source_operation, definition)
+    })
+}
+
+fn deferred_functional_typed_dict_schema_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> TypedDictSchema<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     let node = definition
         .kind(db)
@@ -1687,9 +1727,19 @@ pub(super) fn deferred_functional_typed_dict_openness<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> TypedDictOpenness<'db> {
+    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
+        deferred_functional_typed_dict_openness_from_source(db, source_operation, definition)
+    })
+}
+
+fn deferred_functional_typed_dict_openness_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    definition: Definition<'db>,
+) -> TypedDictOpenness<'db> {
     let program_file = definition.program_file(db);
     let python_file = program_file.python_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
     let module = parsed_module(db, python_file).load(db);
     let node = definition
         .kind(db)
@@ -2100,6 +2150,10 @@ pub(crate) fn extract_unpacked_typed_dict_from_value_type<'db>(
 struct UnpackTypedDict;
 
 impl<'db> TypeQuery<'db> for UnpackTypedDict {
+    fn recursion_key(&self) -> TypeQueryKey<'db> {
+        TypeQueryKey::UnpackTypedDict
+    }
+
     // `Ok(None)` adds no union alternatives. `Err(())` means an alternative is not known to be
     // a TypedDict, so the whole union cannot be unpacked as a TypedDict.
     type Output = Result<Option<UnpackedTypedDict<'db>>, ()>;
@@ -2115,7 +2169,7 @@ impl<'db> TypeQuery<'db> for UnpackTypedDict {
             // Revisiting an exact union alternative adds no new possible keys. A changing
             // specialization can introduce other value types, so it cannot be skipped.
             CycleKind::Exact => Ok(None),
-            CycleKind::MatchingIdentity => Err(()),
+            CycleKind::MatchingIdentity | CycleKind::Reentrant => Err(()),
         }
     }
 
@@ -2341,6 +2395,7 @@ pub(crate) fn extract_unpacked_typed_dict_keys_from_kwargs_annotation<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::ExtractUnpackedTypedDictKeysFromKwargsAnnotation,
         annotated_type,
         |_, _| None,
         |_, annotated_type| {
@@ -2396,6 +2451,7 @@ fn unpacked_keyword_is_gradual<'db>(
     TypeInspector::inspect_root(
         db,
         env,
+        TypeInspectionKey::UnpackedKeywordIsGradual,
         ty,
         |_, _| false,
         |_, ty| ty.unpacked_keyword_is_gradual(db),

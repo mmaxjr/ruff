@@ -11,6 +11,39 @@ use super::cyclic::GuardToken;
 use super::{ApplyTypeMappingVisitor, TypeRecursionState};
 use crate::{Db, ProgramEnvironment};
 
+/// Starts an independent source computation with explicit inputs. The function cannot capture
+/// an active operation, and neither its inputs nor its result can contain operation state.
+/// All environments created within the computation share this root's recursion guards.
+pub(crate) struct SourceTypeQuery<'db> {
+    db: &'db dyn Db,
+    context: TypeRecursionContext<'db>,
+}
+
+impl<'db> SourceTypeQuery<'db> {
+    fn new(db: &'db dyn Db) -> Self {
+        Self {
+            db,
+            context: TypeRecursionContext(Rc::new(TypeRecursionState::default())),
+        }
+    }
+
+    pub(crate) fn run<Input: Send + Sync, Output: Send + Sync>(
+        db: &'db dyn Db,
+        input: Input,
+        compute: fn(&'db dyn Db, &Self, Input) -> Output,
+    ) -> Output {
+        compute(db, &Self::new(db), input)
+    }
+
+    pub(crate) fn operations(&self, env: ProgramEnvironment<'db>) -> TypeOperations<'db> {
+        TypeOperations {
+            db: self.db,
+            env,
+            context: self.context.clone(),
+        }
+    }
+}
+
 /// Active guards shared by every semantic operation descended from the same root.
 /// Transformation caches remain local to each mapping.
 #[derive(Clone)]
@@ -65,23 +98,24 @@ impl<'db> Deref for TypeOperations<'db> {
 }
 
 impl<'db> TypeOperations<'db> {
-    /// Start semantic work for a file at an IDE or command-line entry point.
-    pub fn for_file(db: &'db dyn Db, file: ProgramFile<'db>) -> Self {
-        Self::for_inference(db, ProgramEnvironment::from_file(file))
+    pub(super) fn db(&self) -> &'db dyn Db {
+        self.db
     }
-
-    /// Start semantic work that is independent of a particular source file.
-    pub fn for_program(db: &'db dyn Db, program: Program<'db>) -> Self {
-        Self::for_inference(db, ProgramEnvironment::from_program(program))
-    }
-
-    /// Create the owner of a source-inference operation.
-    pub(crate) fn for_inference(db: &'db dyn Db, env: ProgramEnvironment<'db>) -> Self {
-        Self {
+    pub(crate) fn semantic_model(
+        db: &'db dyn Db,
+        file: ProgramFile<'db>,
+    ) -> crate::SemanticModel<'db> {
+        let source = SourceTypeQuery::new(db);
+        crate::SemanticModel::with_operations(
             db,
-            env,
-            context: TypeRecursionContext(Rc::new(TypeRecursionState::default())),
-        }
+            file,
+            source.operations(ProgramEnvironment::from_file(file)),
+        )
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub fn for_test_program(db: &'db dyn Db, program: Program<'db>) -> Self {
+        SourceTypeQuery::new(db).operations(ProgramEnvironment::from_program(program))
     }
 
     /// Keep global query caches unavailable while a local recursive operation is active.

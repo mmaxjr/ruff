@@ -194,6 +194,7 @@
 //! [bdd]: https://en.wikipedia.org/wiki/Binary_decision_diagram
 
 use crate::ProgramEnvironment;
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use std::cell::RefCell;
 
@@ -255,16 +256,34 @@ pub(crate) fn type_narrowed_by_previous_patterns<'db>(
     predicate: PatternPredicate<'db>,
     expansion: PatternSubjectExpansion,
 ) -> Type<'db> {
+    SourceTypeQuery::run(
+        db,
+        (predicate, expansion),
+        |db, source_operation, (predicate, expansion)| {
+            type_narrowed_by_previous_patterns_from_source(
+                db,
+                source_operation,
+                predicate,
+                expansion,
+            )
+        },
+    )
+}
+
+fn type_narrowed_by_previous_patterns_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    predicate: PatternPredicate<'db>,
+    expansion: PatternSubjectExpansion,
+) -> Type<'db> {
     let Some(previous) = predicate.previous_predicate(db) else {
         let subject = predicate.subject(db);
         let subject_ty = infer_same_file_expression_type(db, subject, TypeContext::default());
         return match expansion {
             PatternSubjectExpansion::Raw => subject_ty,
             PatternSubjectExpansion::Expanded => {
-                let env = TypeOperations::for_inference(
-                    db,
-                    ProgramEnvironment::from_scope(subject.scope(db)),
-                );
+                let env =
+                    source_operation.operations(ProgramEnvironment::from_scope(subject.scope(db)));
                 expand_type(db, &env, subject_ty)
                     .map(|types| UnionType::from_elements(db, &env, types))
                     .unwrap_or(subject_ty)
@@ -285,10 +304,10 @@ pub(crate) fn type_narrowed_by_previous_patterns<'db>(
 #[salsa::tracked(
     returns(copy),
     cycle_initial = |_, id, _, _| Type::divergent(id),
-    cycle_fn = |db: &'db dyn Db, cycle, previous: &Type<'db>, result: Type<'db>, predicate: PatternPredicate<'db>, _| {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(predicate.subject(db).scope(db)));
+    cycle_fn = |db: &'db dyn Db, cycle, previous: &Type<'db>, result: Type<'db>, predicate: PatternPredicate<'db>, _| SourceTypeQuery::run(db, (cycle, previous, result, predicate), |db, source_operation, (cycle, previous, result, predicate)| {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(predicate.subject(db).scope(db)));
         result.cycle_normalized(db, &env, *previous, cycle)
-    },
+    }),
     heap_size = ruff_memory_usage::heap_size
 )]
 fn type_narrowed_after_pattern<'db>(
@@ -296,10 +315,23 @@ fn type_narrowed_after_pattern<'db>(
     predicate: PatternPredicate<'db>,
     expansion: PatternSubjectExpansion,
 ) -> Type<'db> {
-    let env = TypeOperations::for_inference(
+    SourceTypeQuery::run(
         db,
-        ProgramEnvironment::from_file(predicate.program_file(db)),
-    );
+        (predicate, expansion),
+        |db, source_operation, (predicate, expansion)| {
+            type_narrowed_after_pattern_from_source(db, source_operation, predicate, expansion)
+        },
+    )
+}
+
+fn type_narrowed_after_pattern_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    predicate: PatternPredicate<'db>,
+    expansion: PatternSubjectExpansion,
+) -> Type<'db> {
+    let env =
+        source_operation.operations(ProgramEnvironment::from_file(predicate.program_file(db)));
     let narrowed_by_previous_patterns =
         type_narrowed_by_previous_patterns(db, predicate, expansion);
 
@@ -495,10 +527,19 @@ fn analyze_enum_literal_union_pattern_predicate<'db>(
     heap_size = get_size2::GetSize::get_heap_size
 )]
 fn analyze_pattern_predicate<'db>(db: &'db dyn Db, predicate: PatternPredicate<'db>) -> Truthiness {
-    let env = TypeOperations::for_inference(
-        db,
-        ProgramEnvironment::from_scope(predicate.subject(db).scope(db)),
-    );
+    SourceTypeQuery::run(db, (predicate,), |db, source_operation, (predicate,)| {
+        analyze_pattern_predicate_from_source(db, source_operation, predicate)
+    })
+}
+
+fn analyze_pattern_predicate_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    predicate: PatternPredicate<'db>,
+) -> Truthiness {
+    let env = source_operation.operations(ProgramEnvironment::from_scope(
+        predicate.subject(db).scope(db),
+    ));
     let subject_ty =
         infer_same_file_expression_type(db, predicate.subject(db), TypeContext::default());
 
@@ -685,8 +726,24 @@ fn analyze_non_terminal_call_range<'db>(
     level: u32,
     index: usize,
 ) {
+    SourceTypeQuery::run(
+        db,
+        (scope, level, index),
+        |db, source_operation, (scope, level, index)| {
+            analyze_non_terminal_call_range_from_source(db, source_operation, scope, level, index);
+        },
+    );
+}
+
+fn analyze_non_terminal_call_range_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    level: u32,
+    index: usize,
+) {
     if level == 0 {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
         let use_def = use_def_map(db, scope);
         let call_predicates = non_terminal_call_predicates(db, scope);
         let start = index * NON_TERMINAL_CALL_CHUNK_SIZE;
@@ -807,55 +864,72 @@ fn evaluate_reachability_path<'db>(
     constraints: &ReachabilityConstraints,
     predicates: &IndexSlice<ScopedPredicateId, Predicate<'db>>,
     call_predicates: Option<&[ScopedPredicateId]>,
-    mut id: ScopedReachabilityConstraintId,
-    mut use_checkpoint: bool,
+    id: ScopedReachabilityConstraintId,
+    use_checkpoint: bool,
 ) -> Truthiness {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
-    let mut visited = 0;
-    let mut pending = SmallVec::<[ScopedReachabilityConstraintId; 2]>::new();
-    let mut seen: Option<FxHashSet<ScopedReachabilityConstraintId>> = None;
-    let mut result = Truthiness::AlwaysTrue;
+    SourceTypeQuery::run(
+        db,
+        (
+            scope,
+            constraints,
+            predicates,
+            call_predicates,
+            id,
+            use_checkpoint,
+        ),
+        |db,
+         source_operation,
+         (scope, constraints, predicates, call_predicates, mut id, mut use_checkpoint)| {
+            let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
+            let mut visited = 0;
+            let mut pending = SmallVec::<[ScopedReachabilityConstraintId; 2]>::new();
+            let mut seen: Option<FxHashSet<ScopedReachabilityConstraintId>> = None;
+            let mut result = Truthiness::AlwaysTrue;
 
-    loop {
-        let reachability = if seen.as_mut().is_some_and(|seen| !seen.insert(id)) {
-            // Every visited suffix already contributes to the conjunction.
-            Truthiness::AlwaysTrue
-        } else if let Some(reachability) = terminal_reachability(id) {
-            reachability
-        } else {
-            let node = constraints.get_interior_node(id);
-            if use_checkpoint && is_reachability_checkpoint(call_predicates, node.atom(), visited) {
-                evaluate_reachability_checkpoint(db, scope, id)
-            } else {
-                id = match analyze_single(db, &env, &predicates[node.atom()]) {
-                    Truthiness::AlwaysTrue => node.if_true(),
-                    Truthiness::Ambiguous => node.if_ambiguous(),
-                    Truthiness::AlwaysFalse => node.if_false(),
-                    Truthiness::Uninhabited => {
-                        // An uninhabited condition cannot take either branch. Retain only paths
-                        // that bypass the condition, which are represented in both branches.
-                        pending.push(node.if_false());
-                        seen.get_or_insert_with(FxHashSet::default);
-                        node.if_true()
+            loop {
+                let reachability = if seen.as_mut().is_some_and(|seen| !seen.insert(id)) {
+                    // Every visited suffix already contributes to the conjunction.
+                    Truthiness::AlwaysTrue
+                } else if let Some(reachability) = terminal_reachability(id) {
+                    reachability
+                } else {
+                    let node = constraints.get_interior_node(id);
+                    if use_checkpoint
+                        && is_reachability_checkpoint(call_predicates, node.atom(), visited)
+                    {
+                        evaluate_reachability_checkpoint(db, scope, id)
+                    } else {
+                        id = match analyze_single(db, &env, &predicates[node.atom()]) {
+                            Truthiness::AlwaysTrue => node.if_true(),
+                            Truthiness::Ambiguous => node.if_ambiguous(),
+                            Truthiness::AlwaysFalse => node.if_false(),
+                            Truthiness::Uninhabited => {
+                                // An uninhabited condition cannot take either branch. Retain only paths
+                                // that bypass the condition, which are represented in both branches.
+                                pending.push(node.if_false());
+                                seen.get_or_insert_with(FxHashSet::default);
+                                node.if_true()
+                            }
+                        };
+                        use_checkpoint = true;
+                        visited += 1;
+                        continue;
                     }
                 };
-                use_checkpoint = true;
-                visited += 1;
-                continue;
-            }
-        };
 
-        result = result.and(reachability);
-        if result.is_always_false() {
-            return result;
-        }
-        let Some(next) = pending.pop() else {
-            return result;
-        };
-        id = next;
-        use_checkpoint = true;
-        visited = 0;
-    }
+                result = result.and(reachability);
+                if result.is_always_false() {
+                    return result;
+                }
+                let Some(next) = pending.pop() else {
+                    return result;
+                };
+                id = next;
+                use_checkpoint = true;
+                visited = 0;
+            }
+        },
+    )
 }
 
 /// Evaluates a canonical suffix of a reachability decision diagram.
@@ -1065,14 +1139,14 @@ impl<'db> ProjectedNarrowingCheckpoint<'db> {
 #[salsa::tracked(
     returns(copy),
     cycle_initial = |_, id, _, _, _, _| ProjectedNarrowingCheckpoint::Narrowed(Type::divergent(id)),
-    cycle_fn = |db: &'db dyn Db, cycle, previous: &ProjectedNarrowingCheckpoint<'db>, result: ProjectedNarrowingCheckpoint<'db>, scope: ScopeId<'db>, _, _, base_ty| {
+    cycle_fn = |db: &'db dyn Db, cycle, previous: &ProjectedNarrowingCheckpoint<'db>, result: ProjectedNarrowingCheckpoint<'db>, scope: ScopeId<'db>, _, _, base_ty| SourceTypeQuery::run(db, (cycle, previous, result, scope, base_ty), |db, source_operation, (cycle, previous, result, scope, base_ty)| {
         match result {
             ProjectedNarrowingCheckpoint::Narrowed(ty) => ProjectedNarrowingCheckpoint::Narrowed(
-                ty.cycle_normalized(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope)), previous.ty(base_ty), cycle)
+                ty.cycle_normalized(db, &source_operation.operations(ProgramEnvironment::from_scope(scope)), previous.ty(base_ty), cycle)
             ),
             _ => result,
         }
-    },
+    }),
     heap_size = get_size2::GetSize::get_heap_size
 )]
 fn evaluate_projected_narrowing_checkpoint<'db>(
@@ -1082,7 +1156,31 @@ fn evaluate_projected_narrowing_checkpoint<'db>(
     constraint: ScopedNarrowingConstraint,
     base_ty: Type<'db>,
 ) -> ProjectedNarrowingCheckpoint<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    SourceTypeQuery::run(
+        db,
+        (scope, place, constraint, base_ty),
+        |db, source_operation, (scope, place, constraint, base_ty)| {
+            evaluate_projected_narrowing_checkpoint_from_source(
+                db,
+                source_operation,
+                scope,
+                place,
+                constraint,
+                base_ty,
+            )
+        },
+    )
+}
+
+fn evaluate_projected_narrowing_checkpoint_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    scope: ScopeId<'db>,
+    place: ScopedPlaceId,
+    constraint: ScopedNarrowingConstraint,
+    base_ty: Type<'db>,
+) -> ProjectedNarrowingCheckpoint<'db> {
+    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
     let use_def = use_def_map(db, scope);
     let evaluator = use_def.narrowing_evaluator(constraint);
     let mut projector = NarrowingProjector::new(
@@ -1804,8 +1902,18 @@ fn analyze_single_pattern_predicate_kind<'db>(
     heap_size = get_size2::GetSize::get_heap_size
 )]
 fn analyze_non_terminal_call<'db>(db: &'db dyn Db, call: CallableAndCallExpr<'db>) -> Truthiness {
+    SourceTypeQuery::run(db, (call,), |db, source_operation, (call,)| {
+        analyze_non_terminal_call_from_source(db, source_operation, call)
+    })
+}
+
+fn analyze_non_terminal_call_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    call: CallableAndCallExpr<'db>,
+) -> Truthiness {
     let callable = call.callable(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(callable.scope(db)));
+    let env = source_operation.operations(ProgramEnvironment::from_scope(callable.scope(db)));
     // We first infer just the type of the callable. In the most likely case that the function is
     // not marked with `NoReturn`, or that it always returns `NoReturn`, doing so allows us to avoid
     // the more expensive work of inferring the entire call expression (which could involve
@@ -1904,8 +2012,27 @@ fn context_manager_suppresses<'db>(
     expression: Expression<'db>,
     evaluation_mode: EvaluationMode,
 ) -> bool {
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_scope(expression.scope(db)));
+    SourceTypeQuery::run(
+        db,
+        (expression, evaluation_mode),
+        |db, source_operation, (expression, evaluation_mode)| {
+            context_manager_suppresses_from_source(
+                db,
+                source_operation,
+                expression,
+                evaluation_mode,
+            )
+        },
+    )
+}
+
+fn context_manager_suppresses_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    expression: Expression<'db>,
+    evaluation_mode: EvaluationMode,
+) -> bool {
+    let env = source_operation.operations(ProgramEnvironment::from_scope(expression.scope(db)));
     infer_same_file_expression_type(db, expression, TypeContext::default()).can_suppress_exceptions(
         db,
         &env,
@@ -1956,8 +2083,22 @@ fn expression_truthiness<'db>(
     expression: Expression<'db>,
     context: ExpressionContext,
 ) -> Truthiness {
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_scope(expression.scope(db)));
+    SourceTypeQuery::run(
+        db,
+        (expression, context),
+        |db, source_operation, (expression, context)| {
+            expression_truthiness_from_source(db, source_operation, expression, context)
+        },
+    )
+}
+
+fn expression_truthiness_from_source<'db>(
+    db: &'db dyn Db,
+    source_operation: &SourceTypeQuery<'db>,
+    expression: Expression<'db>,
+    context: ExpressionContext,
+) -> Truthiness {
+    let env = source_operation.operations(ProgramEnvironment::from_scope(expression.scope(db)));
     let module = parsed_module(db, expression.python_file(db)).load(db);
     let inference = infer_expression_types(db, expression, TypeContext::default());
     let node = expression.node_ref(db).node(&module);

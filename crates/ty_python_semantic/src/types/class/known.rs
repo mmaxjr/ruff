@@ -1,3 +1,4 @@
+use crate::types::SourceTypeQuery;
 use crate::types::TypeOperations;
 use crate::{
     Db, Program, ProgramEnvironment,
@@ -1210,20 +1211,28 @@ impl KnownClass {
         #[salsa::tracked(
             returns(copy),
             cycle_initial=|_, id, _| Type::divergent(id),
-            cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, argument: KnownClassArgument<'db>| {
-                let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(argument.program(db)));
+            cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, argument: KnownClassArgument<'db>| SourceTypeQuery::run(db, (cycle, previous, result, argument), |db, source_operation, (cycle, previous, result, argument)| {
+                let env = source_operation.operations(ProgramEnvironment::from_program(argument.program(db)));
                 result.cycle_normalized(db, &env, *previous, cycle)
-            },
+            }),
             heap_size=ruff_memory_usage::heap_size,
         )]
         fn known_class_to_instance<'db>(
             db: &'db dyn Db,
             argument: KnownClassArgument<'db>,
         ) -> Type<'db> {
-            let env = &TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(argument.program(db)),
-            );
+            SourceTypeQuery::run(db, (argument,), |db, source_operation, (argument,)| {
+                known_class_to_instance_from_source(db, source_operation, argument)
+            })
+        }
+
+        fn known_class_to_instance_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            argument: KnownClassArgument<'db>,
+        ) -> Type<'db> {
+            let env = &source_operation
+                .operations(ProgramEnvironment::from_program(argument.program(db)));
             argument
                 .class(db)
                 .to_class_literal(db, env)
@@ -1351,8 +1360,18 @@ impl KnownClass {
             db: &'db dyn Db,
             argument: KnownClassArgument<'db>,
         ) -> Result<Option<StaticClassLiteral<'db>>, KnownClassLookupError<'db>> {
+            SourceTypeQuery::run(db, (argument,), |db, source_operation, (argument,)| {
+                known_class_to_class_literal_from_source(db, source_operation, argument)
+            })
+        }
+
+        fn known_class_to_class_literal_from_source<'db>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            argument: KnownClassArgument<'db>,
+        ) -> Result<Option<StaticClassLiteral<'db>>, KnownClassLookupError<'db>> {
             let program = argument.program(db);
-            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
             let python_version = env.python_version(db);
             let class = argument.class(db);
             let module = class.canonical_module(python_version);
