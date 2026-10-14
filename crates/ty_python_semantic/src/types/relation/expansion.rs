@@ -64,7 +64,7 @@ impl<'a, 'c, 'db> GuardedRelation<'a, 'c, 'db> {
         by_arguments.or(db, self.checker.constraints, || {
             self.expansion
                 .expand_recursive(db, source)
-                .map(|source| self.checker.check_type_pair(db, source, target))
+                .map(|source| source.relate_as_source(db, self.checker, target))
                 .unwrap_or(ConstraintSet::from_bool(
                     self.checker.constraints,
                     self.checker.relation.is_assignability(),
@@ -80,7 +80,7 @@ impl<'a, 'c, 'db> GuardedRelation<'a, 'c, 'db> {
     ) -> ConstraintSet<'db, 'c> {
         self.expansion
             .expand_recursive(db, target)
-            .map(|target| self.checker.check_type_pair(db, source, target))
+            .map(|target| target.relate_as_target(db, self.checker, source))
             .unwrap_or(ConstraintSet::from_bool(
                 self.checker.constraints,
                 self.checker.relation.is_assignability(),
@@ -149,7 +149,7 @@ impl<'a, 'c, 'db> GuardedDisjointness<'a, 'c, 'db> {
     ) -> ConstraintSet<'db, 'c> {
         self.expansion
             .expand_recursive(db, source)
-            .map(|source| self.checker.check_type_pair(db, source, target))
+            .map(|source| source.disjoint_as_source(db, self.checker, target))
             .unwrap_or(self.checker.never())
     }
 
@@ -161,7 +161,7 @@ impl<'a, 'c, 'db> GuardedDisjointness<'a, 'c, 'db> {
     ) -> ConstraintSet<'db, 'c> {
         self.expansion
             .expand_recursive(db, target)
-            .map(|target| self.checker.check_type_pair(db, source, target))
+            .map(|target| target.disjoint_as_target(db, self.checker, source))
             .unwrap_or(self.checker.never())
     }
 }

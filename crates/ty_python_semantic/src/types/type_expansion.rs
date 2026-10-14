@@ -148,7 +148,10 @@ impl<'db> TypeExpander<'_, 'db> {
             Type::Recursive(recursive) => {
                 self.visitor
                     .visit_with_expansion(db, ty, &self.mapping, |expansion| {
-                        self.expand(expansion.expand_recursive(db, recursive).into_unfolded()?)
+                        expansion
+                            .expand_recursive(db, recursive)
+                            .into_unfolded()?
+                            .alternatives(self)
                     })
             }
             // We don't handle `type[A | B]` here because it's already stored in the expanded form

@@ -2717,3 +2717,5 @@ impl InferenceFlags {
 pub(super) use builder::{ContextualLambda, TransparentCallableReturn};
 
 pub(super) use builder::OverloadInconsistency;
+
+pub(super) use comparisons::{BinaryComparisonOperand, upcast_partial_body};

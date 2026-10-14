@@ -129,7 +129,7 @@ impl<'db> AliasCycleSummary<'db> {
 }
 
 /// Remove unguarded recursive edges while retaining the other union alternatives.
-struct AliasCycleRecovery<'a, 'db> {
+pub(super) struct AliasCycleRecovery<'a, 'db> {
     env: &'a TypeOperations<'db>,
     mapping: ApplyTypeMappingVisitor<'a, 'db>,
     cycle: Type<'db>,
@@ -137,7 +137,7 @@ struct AliasCycleRecovery<'a, 'db> {
 }
 
 impl<'db> AliasCycleRecovery<'_, 'db> {
-    fn recover(&self, db: &'db dyn Db, ty: Type<'db>) -> Option<Type<'db>> {
+    pub(super) fn recover(&self, db: &'db dyn Db, ty: Type<'db>) -> Option<Type<'db>> {
         if ty == self.cycle {
             return None;
         }
@@ -155,7 +155,10 @@ impl<'db> AliasCycleRecovery<'_, 'db> {
             Type::Recursive(recursive) => {
                 self.visitor
                     .visit_structure(db, ty, &self.mapping, |expansion| {
-                        self.recover(db, expansion.recursive_body(db, recursive).into_unfolded()?)
+                        expansion
+                            .recursive_body(db, recursive)
+                            .into_unfolded()?
+                            .recover_alias_cycle(db, self)
                     })
             }
             Type::Union(union) => {

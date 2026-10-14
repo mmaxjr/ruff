@@ -820,7 +820,10 @@ impl<'db> GenericContext<'db> {
                     &self.mapping,
                     || (),
                     |expansion| {
-                        self.visit_type(db, expansion.recursive_body(db, recursive).into_type());
+                        expansion
+                            .recursive_body(db, recursive)
+                            .body_or_reference()
+                            .visit(db, self);
                     },
                 );
             }
@@ -4161,12 +4164,10 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                     .infer_as_formal(self, actual, polarity, visitor);
             }
             (Type::Recursive(recursive), _) => {
-                return self.infer_map_impl(
-                    expansion.expand_recursive(db, recursive).into_type(),
-                    actual,
-                    polarity,
-                    visitor,
-                );
+                return expansion
+                    .expand_recursive(db, recursive)
+                    .body_or_reference()
+                    .infer_as_formal(self, actual, polarity, visitor);
             }
 
             (Type::TypeForm(formal_typeform), Type::TypeForm(actual_typeform)) => {
@@ -4900,12 +4901,10 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                     .infer_as_actual(self, formal, polarity, visitor);
             }
             (formal, Type::Recursive(recursive)) => {
-                return self.infer_map_impl(
-                    formal,
-                    expansion.expand_recursive(db, recursive).into_type(),
-                    polarity,
-                    visitor,
-                );
+                return expansion
+                    .expand_recursive(db, recursive)
+                    .body_or_reference()
+                    .infer_as_actual(self, formal, polarity, visitor);
             }
 
             // TODO: Add more forms that we can structurally induct into: type[C], callables

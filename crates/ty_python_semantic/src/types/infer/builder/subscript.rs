@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
-use crate::types::recursive::{TypeInspector, TypeVisitorState};
+use crate::types::recursive::TypeInspector;
+use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use itertools::{Either, EitherOrBoth, Itertools};
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span};
 use ruff_db::parsed::parsed_module;
@@ -68,59 +69,10 @@ fn string_literal_values<'db>(
 
 impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     pub(super) fn typed_dict_key_expected_type(&self, ty: Type<'db>) -> Option<Type<'db>> {
-        struct TypedDictKeyExpectedType;
-        type TypedDictKeyExpectedTypeVisitor<'env, 'db> =
-            TypeVisitorState<'env, 'db, TypedDictKeyExpectedType, Type<'db>, Option<Type<'db>>, 3>;
-
-        fn imp<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            ty: Type<'db>,
-            visitor: &TypedDictKeyExpectedTypeVisitor<'_, 'db>,
-        ) -> Option<Type<'db>> {
-            match ty {
-                Type::TypedDict(typed_dict) => {
-                    if typed_dict.explicit_extra_items(db).is_some() {
-                        return Some(KnownClass::Str.to_instance(db, env));
-                    }
-                    let keys = typed_dict
-                        .items(db)
-                        .keys()
-                        .map(|key| Type::string_literal(db, key))
-                        .collect_vec();
-                    (!keys.is_empty()).then(|| UnionType::from_elements(db, env, keys))
-                }
-                Type::Union(union) => {
-                    let keys = union
-                        .elements(db)
-                        .iter()
-                        .filter_map(|element| imp(db, env, *element, visitor))
-                        .collect_vec();
-                    (!keys.is_empty()).then(|| UnionType::from_elements(db, env, keys))
-                }
-                Type::Intersection(intersection) => {
-                    let keys = intersection
-                        .positive(db)
-                        .iter()
-                        .filter_map(|element| imp(db, env, *element, visitor))
-                        .collect_vec();
-                    (!keys.is_empty()).then(|| UnionType::from_elements(db, env, keys))
-                }
-                Type::TypeAlias(_) | Type::Recursive(_) => {
-                    visitor.visit_with_expansion(db, ty, |expansion| {
-                        imp(db, env, expansion.normalize(db, ty), visitor)
-                    })
-                }
-                _ => None,
-            }
-        }
-        let db = self.db();
-
-        imp(
-            db,
+        TypeQueryContext::with_root(
             self.program_environment(),
-            ty,
-            &TypedDictKeyExpectedTypeVisitor::new(self.program_environment(), None),
+            TypedDictKeyExpectedType,
+            |context| context.visit(self.db(), ty),
         )
     }
 
@@ -2662,5 +2614,55 @@ impl AnnotatedExprContext {
                 TypeAndQualifiers::declared(outer).with_qualifier(inner.qualifiers())
             }
         }
+    }
+}
+
+struct TypedDictKeyExpectedType;
+
+impl<'db> TypeQuery<'db> for TypedDictKeyExpectedType {
+    type Output = Option<Type<'db>>;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> Self::Output {
+        None
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> Self::Output {
+        let env = context.environment();
+        let keys = match ty {
+            Type::TypedDict(typed_dict) => {
+                if typed_dict.explicit_extra_items(db).is_some() {
+                    return Some(KnownClass::Str.to_instance(db, env));
+                }
+                typed_dict
+                    .items(db)
+                    .keys()
+                    .map(|key| Type::string_literal(db, key))
+                    .collect_vec()
+            }
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .filter_map(|ty| context.visit(db, *ty))
+                .collect_vec(),
+            Type::Intersection(intersection) => intersection
+                .positive(db)
+                .iter()
+                .filter_map(|ty| context.visit(db, *ty))
+                .collect_vec(),
+            _ => return None,
+        };
+        (!keys.is_empty()).then(|| UnionType::from_elements(db, env, keys))
     }
 }

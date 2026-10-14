@@ -129,7 +129,127 @@ pub(super) struct ExpandedType<'scope, 'db> {
     mapping: &'scope ApplyTypeMappingVisitor<'scope, 'db>,
 }
 
+/// The result of unfolding under an operation's guard.
+pub(super) struct ExpandedRecursive<'scope, 'db> {
+    result: UnfoldResult<'db>,
+    mapping: &'scope ApplyTypeMappingVisitor<'scope, 'db>,
+}
+
+impl<'scope, 'db> ExpandedRecursive<'scope, 'db> {
+    pub(super) fn into_unfolded(self) -> Option<ExpandedType<'scope, 'db>> {
+        self.result.into_unfolded().map(|ty| ExpandedType {
+            ty,
+            mapping: self.mapping,
+        })
+    }
+
+    pub(super) fn body_or_reference(self) -> ExpandedType<'scope, 'db> {
+        ExpandedType {
+            ty: self.result.into_type(),
+            mapping: self.mapping,
+        }
+    }
+
+    pub(super) fn map<R>(
+        self,
+        consume: impl FnOnce(ExpandedType<'scope, 'db>) -> R,
+    ) -> UnfoldResult<'db, R> {
+        self.result.map(|ty| {
+            consume(ExpandedType {
+                ty,
+                mapping: self.mapping,
+            })
+        })
+    }
+}
+
 impl<'db> ExpandedType<'_, 'db> {
+    pub(super) fn enum_values(
+        self,
+        db: &'db dyn Db,
+        visitor: &super::equality::EnumDomainVisitor<'_, 'db>,
+    ) -> Option<super::equality::EnumValueSet<'db>> {
+        super::equality::EnumValueSet::from_normalized(db, self.mapping.env, self.ty, visitor)
+    }
+
+    pub(super) fn collect_enum_partition(
+        self,
+        db: &'db dyn Db,
+        collector: &mut super::equality::EnumPartitionCollector<'_, '_, 'db>,
+        original: Type<'db>,
+    ) -> Option<()> {
+        collector.consume(db, self.ty, original)
+    }
+
+    pub(super) fn collect_enum_domains(
+        self,
+        db: &'db dyn Db,
+        collector: &mut super::equality::EnumDomainCollector<'_, '_, 'db>,
+    ) -> Option<()> {
+        collector.consume(db, self.ty)
+    }
+
+    pub(super) fn is_union(&self) -> bool {
+        self.ty.is_union()
+    }
+
+    pub(super) fn evaluate_comparison(
+        self,
+        target: ExpandedType<'_, 'db>,
+        evaluator: &super::equality::ComparisonEvaluator<'_, 'db>,
+        branch: super::equality::ComparisonBranch,
+        operator: super::equality::ComparisonOperator,
+    ) -> super::equality::ComparisonResult<'db> {
+        evaluator.evaluate_expanded(self.ty, target.ty, branch, operator)
+    }
+
+    pub(super) fn infer_comparison(
+        self,
+        operand: super::infer::BinaryComparisonOperand<'_, 'db, '_>,
+    ) -> Result<Type<'db>, super::infer::UnsupportedComparisonError<'db>> {
+        operand.infer(self.ty)
+    }
+
+    pub(super) fn partial_identity(
+        self,
+        db: &'db dyn Db,
+    ) -> Option<super::known_instance::FunctoolsPartialInstance<'db>> {
+        super::infer::upcast_partial_body(db, self.ty)
+    }
+
+    pub(super) fn visit(
+        self,
+        db: &'db dyn Db,
+        visitor: &(impl super::visitor::TypeVisitor<'db> + ?Sized),
+    ) {
+        visitor.visit_type(db, self.ty);
+    }
+
+    pub(super) fn recover_alias_cycle(
+        self,
+        db: &'db dyn Db,
+        recovery: &super::type_alias::AliasCycleRecovery<'_, 'db>,
+    ) -> Option<Type<'db>> {
+        recovery.recover(db, self.ty)
+    }
+
+    pub(super) fn display_alias_declaration(
+        self,
+        db: &'db dyn Db,
+        recursive: RecursiveType<'db>,
+    ) -> Option<String> {
+        let (definition, name) = recursive.alias(db)?;
+        Some(super::display::render_alias_declaration(
+            db,
+            self.mapping.env,
+            Type::Recursive(recursive),
+            definition,
+            name,
+            recursive.parameters(db),
+            self.ty,
+        ))
+    }
+
     pub(super) fn search_aliases(
         self,
         db: &'db dyn Db,
@@ -361,14 +481,24 @@ impl<'db> TypeExpansionContext<'_, '_, 'db> {
         &self,
         db: &'db dyn Db,
         recursive: RecursiveType<'db>,
-    ) -> UnfoldResult<'db> {
-        recursive
-            .unfold(db, self.mapping)
-            .map(|body| self.normalize(db, body))
+    ) -> ExpandedRecursive<'_, 'db> {
+        ExpandedRecursive {
+            result: recursive
+                .unfold(db, self.mapping)
+                .map(|body| self.normalized_type(db, body)),
+            mapping: self.mapping,
+        }
     }
 
     /// Normalize outer aliases and unions under the caller's active recursion guard.
-    pub(super) fn normalize(&self, db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
+    pub(super) fn normalize(&self, db: &'db dyn Db, ty: Type<'db>) -> ExpandedType<'_, 'db> {
+        ExpandedType {
+            ty: self.normalized_type(db, ty),
+            mapping: self.mapping,
+        }
+    }
+
+    fn normalized_type(&self, db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
         TypeInspector::with_mapping_visitor(self.mapping, |inspector| {
             inspector.inspect(db, ty, |ty, _| ty, |_, ty| ty)
         })
@@ -431,8 +561,11 @@ impl<'db> StructuralExpansionContext<'_, '_, 'db> {
         &self,
         db: &'db dyn Db,
         recursive: RecursiveType<'db>,
-    ) -> UnfoldResult<'db> {
-        recursive.unfold(db, self.mapping)
+    ) -> ExpandedRecursive<'_, 'db> {
+        ExpandedRecursive {
+            result: recursive.unfold(db, self.mapping),
+            mapping: self.mapping,
+        }
     }
 }
 
@@ -1890,19 +2023,6 @@ impl<'db, T> UnfoldResult<'db, T> {
         }
     }
 
-    /// Return whether unfolding made progress and the contained value satisfies `predicate`.
-    #[inline]
-    #[expect(
-        clippy::wrong_self_convention,
-        reason = "Like Option::is_some_and, the predicate consumes the contained value."
-    )]
-    pub(crate) fn is_unfolded_and(self, predicate: impl FnOnce(T) -> bool) -> bool {
-        match self {
-            Self::Unfolded(value) => predicate(value),
-            Self::Unchanged(_) => false,
-        }
-    }
-
     /// Transform the contained value, preserving the original recursive type if unfolding made no progress.
     #[inline]
     pub(crate) fn map<U>(self, operation: impl FnOnce(T) -> U) -> UnfoldResult<'db, U> {
@@ -2154,8 +2274,8 @@ mod query_tests {
                 pairs.visit_active_with_expansion(&db, (left, right), &mapping, |expansion| {
                     expansion.ok().map(|expansion| {
                         (
-                            expansion.normalize(&db, left),
-                            expansion.normalize(&db, right),
+                            expansion.normalize(&db, left).ty,
+                            expansion.normalize(&db, right).ty,
                         )
                     })
                 });

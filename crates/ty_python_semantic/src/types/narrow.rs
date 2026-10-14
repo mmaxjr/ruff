@@ -605,10 +605,10 @@ impl<'db> ClassInfoConstraint<'_, 'db> {
             Type::TypeAlias(alias) => expansion
                 .alias_body(db, alias)
                 .classinfo_constraint(db, self),
-            Type::Recursive(recursive) => self.generate(
-                db,
-                expansion.expand_recursive(db, recursive).into_unfolded()?,
-            ),
+            Type::Recursive(recursive) => expansion
+                .expand_recursive(db, recursive)
+                .into_unfolded()?
+                .classinfo_constraint(db, self),
             Type::ClassLiteral(class_literal) => Some(constraint_from_class_literal(class_literal)),
             Type::SubclassOf(subclass_of_ty) => {
                 // We can't narrow negatively from a `SubclassOf` type. `if !isinstance(x, y)`

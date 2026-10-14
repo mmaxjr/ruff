@@ -591,11 +591,11 @@ impl<'db> SubscriptChecker<'_, 'db> {
                         }
                         (Type::Recursive(recursive), _) => expansion
                             .expand_recursive(db, recursive)
-                            .map(|body| self.check(db, body, slice_ty))
+                            .map(|body| body.subscript_as_value(db, self, slice_ty))
                             .unwrap_or(Ok(value_ty)),
                         (_, Type::Recursive(recursive)) => expansion
                             .expand_recursive(db, recursive)
-                            .map(|body| self.check(db, value_ty, body))
+                            .map(|body| body.subscript_as_index(db, self, value_ty))
                             .unwrap_or(Ok(value_ty)),
                         (Type::TypeAlias(alias), _) => expansion
                             .alias_body(db, alias)

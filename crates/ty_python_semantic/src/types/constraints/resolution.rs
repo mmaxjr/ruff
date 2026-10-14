@@ -227,7 +227,7 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
             self.visited
                 .visit_structure(db, ty, &self.mapping, |expansion| {
                     if let Some(body) = expansion.recursive_body(db, recursive).into_unfolded() {
-                        self.visit_type(db, body);
+                        body.visit(db, self);
                     }
                 });
         } else if let TypeKind::NonAtomic(non_atomic) = TypeKind::from(ty) {

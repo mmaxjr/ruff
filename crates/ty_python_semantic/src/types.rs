@@ -169,7 +169,6 @@ mod protocol_class;
 mod recursive;
 pub use operations::TypeOperations;
 pub(crate) use recursive::RecursiveMapping;
-pub(crate) use recursive::UnfoldResult;
 pub use recursive::{RecursiveType, RecursiveVar, TypeQuery, TypeQueryContext};
 use recursive::{TypeInspector, TypeVisitorState};
 pub(crate) use recursive::{TypeTraversal, TypeWalk};
@@ -9460,8 +9459,8 @@ impl<'db> Type<'db> {
                         visitor,
                     );
                 }
-                if let UnfoldResult::Unfolded(unfolded) = expansion.recursive_body(db, recursive) {
-                    unfolded.find_legacy_typevars_impl(db, env, binding_context, typevars, visitor);
+                if let Some(unfolded) = expansion.recursive_body(db, recursive).into_unfolded() {
+                    unfolded.collect_legacy_typevars(db, binding_context, typevars, visitor);
                 }
             }),
 

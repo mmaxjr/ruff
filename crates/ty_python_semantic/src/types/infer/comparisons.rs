@@ -560,14 +560,15 @@ fn infer_binary_type_comparison_inner<'db>(
         (Type::TypeAlias(_) | Type::Recursive(_), right) => {
             Some(
                 visitor.visit_with_expansion(db, (left, op, right), |expansion| {
-                    infer_binary_type_comparison_inner(
-                        context,
-                        expansion.normalize(db, left),
-                        op,
-                        right,
-                        range,
-                        visitor,
-                    )
+                    expansion
+                        .normalize(db, left)
+                        .infer_comparison(BinaryComparisonOperand {
+                            context,
+                            other: OtherComparisonOperand::Right(right),
+                            op,
+                            range,
+                            visitor,
+                        })
                 }),
             )
         }
@@ -575,14 +576,15 @@ fn infer_binary_type_comparison_inner<'db>(
         (left, Type::TypeAlias(_) | Type::Recursive(_)) => {
             Some(
                 visitor.visit_with_expansion(db, (left, op, right), |expansion| {
-                    infer_binary_type_comparison_inner(
-                        context,
-                        left,
-                        op,
-                        expansion.normalize(db, right),
-                        range,
-                        visitor,
-                    )
+                    expansion
+                        .normalize(db, right)
+                        .infer_comparison(BinaryComparisonOperand {
+                            context,
+                            other: OtherComparisonOperand::Left(left),
+                            op,
+                            range,
+                            visitor,
+                        })
                 }),
             )
         }
@@ -1577,10 +1579,18 @@ fn upcast_partial<'db>(
     partial: FunctoolsPartialInstance<'db>,
     expansion: &crate::types::recursive::TypeExpansionContext<'_, '_, 'db>,
 ) -> Option<FunctoolsPartialInstance<'db>> {
+    expansion
+        .normalize(db, partial.wrapped(db).inner(db))
+        .partial_identity(db)
+}
+
+pub(in crate::types) fn upcast_partial_body<'db>(
+    db: &'db dyn Db,
+    ty: Type<'db>,
+) -> Option<FunctoolsPartialInstance<'db>> {
     // A partial's wrapped function is fixed, but its reduced signature can differ between
     // views. A structural callable does not identify a particular wrapped function.
-    let Type::FunctionLiteral(function) = expansion.normalize(db, partial.wrapped(db).inner(db))
-    else {
+    let Type::FunctionLiteral(function) = ty else {
         return None;
     };
     Some(FunctoolsPartialInstance::new(
@@ -1603,7 +1613,7 @@ fn upcast<'db>(
         Type::Recursive(recursive) => visit_type(db, ty, visitor, |expansion| {
             expansion
                 .expand_recursive(db, recursive)
-                .map(|unfolded| upcast(db, env, unfolded, visitor))
+                .map(|unfolded| unfolded.identity_projection(db, visitor))
                 .unwrap_or(IdentityUpcastResult::unstable(ty))
         }),
         Type::RecursiveVar(_) => {
@@ -1831,5 +1841,38 @@ fn upcast<'db>(
         | Type::BoundSuper(_)
         | Type::TypeForm(_)
         | Type::TypedDict(_) => IdentityUpcastResult::stable(ty),
+    }
+}
+
+enum OtherComparisonOperand<'db> {
+    Left(Type<'db>),
+    Right(Type<'db>),
+}
+
+pub(in crate::types) struct BinaryComparisonOperand<'a, 'db, 'ast> {
+    context: &'a InferContext<'db, 'ast>,
+    other: OtherComparisonOperand<'db>,
+    op: NonIdentityOperator,
+    range: TextRange,
+    visitor: &'a BinaryComparisonVisitor<'a, 'db>,
+}
+
+impl<'db> BinaryComparisonOperand<'_, 'db, '_> {
+    pub(in crate::types) fn infer(
+        self,
+        ty: Type<'db>,
+    ) -> Result<Type<'db>, UnsupportedComparisonError<'db>> {
+        let (left, right) = match self.other {
+            OtherComparisonOperand::Left(left) => (left, ty),
+            OtherComparisonOperand::Right(right) => (ty, right),
+        };
+        infer_binary_type_comparison_inner(
+            self.context,
+            left,
+            self.op,
+            right,
+            self.range,
+            self.visitor,
+        )
     }
 }

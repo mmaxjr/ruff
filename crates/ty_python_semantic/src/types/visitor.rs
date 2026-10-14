@@ -652,7 +652,10 @@ pub(super) fn dynamic_content_impl<'db>(
                 &self.mapping,
                 || self.record(DynamicContent::Indeterminate),
                 |expansion| {
-                    self.visit_type(db, expansion.recursive_body(db, recursive).into_type());
+                    expansion
+                        .recursive_body(db, recursive)
+                        .body_or_reference()
+                        .visit(db, self);
                 },
             );
         }
@@ -1040,7 +1043,10 @@ impl<'db> AliasSearch<'_, 'db> {
                         &self.mapping,
                         || true,
                         |expansion| {
-                            self.search(db, expansion.recursive_body(db, recursive).into_type())
+                            expansion
+                                .recursive_body(db, recursive)
+                                .body_or_reference()
+                                .search_aliases(db, self)
                         },
                     ),
                     _ => false,

@@ -2508,7 +2508,10 @@ impl<'db> TypeVarDefaultSearch<'db, '_> {
                     seen.push(identity);
                 }
                 self.recursive.visit_structure(db, inner, |expansion| {
-                    self.visit(expansion.recursive_body(db, recursive).into_type())
+                    expansion
+                        .recursive_body(db, recursive)
+                        .body_or_reference()
+                        .references_typevar_default(self)
                 })
             }
             _ => false,

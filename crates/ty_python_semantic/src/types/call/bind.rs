@@ -10590,7 +10590,8 @@ impl<'db> ClassInfoValidator<'_, 'db> {
                 .validate_classinfo(db, self, mode),
             Type::Recursive(recursive) => expansion
                 .expand_recursive(db, recursive)
-                .is_unfolded_and(validate),
+                .into_unfolded()
+                .is_some_and(|body| body.validate_classinfo(db, self, mode)),
             _ => {
                 if let Some(tuple) = ty.tuple_instance_spec(db, self.env) {
                     tuple.iter_element_types(db).all(validate)

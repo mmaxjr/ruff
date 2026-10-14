@@ -1,8 +1,10 @@
+use crate::Db;
+use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use ruff_python_ast::{self as ast};
 
 use super::TypeInferenceBuilder;
 use crate::types::diagnostic::INVALID_TYPE_FORM;
-use crate::types::recursive::{TypeInspector, TypeVisitorState};
+use crate::types::recursive::TypeInspector;
 use crate::types::{KnownClass, Type, TypeContext, TypeFormType};
 
 impl<'db> TypeInferenceBuilder<'db, '_> {
@@ -77,66 +79,13 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     }
 
     fn contains_type_form_value(&self, expression: &ast::Expr, ty: Type<'db>) -> bool {
-        struct ContainsTypeFormValue;
-        type ContainsTypeFormValueVisitor<'env, 'db> =
-            TypeVisitorState<'env, 'db, ContainsTypeFormValue, Type<'db>, bool, 3>;
-
-        fn imp<'db>(
-            builder: &TypeInferenceBuilder<'db, '_>,
-            expression: &ast::Expr,
-            ty: Type<'db>,
-            visitor: &ContainsTypeFormValueVisitor<'_, 'db>,
-        ) -> bool {
-            let db = builder.db();
-            let env = builder.program_environment();
-            match ty {
-                Type::TypeForm(_) | Type::SubclassOf(_) => true,
-                // A bare class object is valid type-expression syntax and should still be
-                // interpreted as a `TypeForm`. Preserve its ordinary value type only when
-                // it was produced by an expression that is not itself a type expression.
-                Type::ClassLiteral(_) => builder
-                    .speculate_without_diagnostics()
-                    .infer_type_expression_no_store(expression)
-                    .is_unknown(),
-                Type::NominalInstance(instance)
-                    if instance.has_known_class(builder.db(), KnownClass::Type) =>
-                {
-                    true
-                }
-                Type::Union(union) => union
-                    .elements(builder.db())
-                    .iter()
-                    .any(|element| imp(builder, expression, *element, visitor)),
-                Type::Intersection(intersection) => intersection
-                    .iter_positive(builder.db())
-                    .any(|element| imp(builder, expression, element, visitor)),
-                Type::TypeAlias(_) | Type::Recursive(_) => {
-                    visitor.visit_with_expansion(db, ty, |expansion| {
-                        imp(builder, expression, expansion.normalize(db, ty), visitor)
-                    })
-                }
-                Type::TypeVar(typevar) => visitor.visit(db, ty, || {
-                    typevar
-                        .typevar(builder.db())
-                        .bound_or_constraints(db, env)
-                        .is_some_and(|bound_or_constraints| {
-                            imp(
-                                builder,
-                                expression,
-                                bound_or_constraints.as_type(db, env),
-                                visitor,
-                            )
-                        })
-                }),
-                _ => false,
-            }
-        }
-
-        imp(
-            self,
-            expression,
-            ty,
-            &ContainsTypeFormValueVisitor::new(self.program_environment(), false),
+        TypeQueryContext::with_root(
+            self.program_environment(),
+            ContainsTypeFormValue {
+                builder: self,
+                expression,
+            },
+            |context| context.visit(self.db(), ty),
         )
     }
 
@@ -173,5 +122,55 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         }
 
         Type::unknown()
+    }
+}
+
+struct ContainsTypeFormValue<'a, 'db, 'ast> {
+    builder: &'a TypeInferenceBuilder<'db, 'ast>,
+    expression: &'a ast::Expr,
+}
+
+impl<'db> TypeQuery<'db> for ContainsTypeFormValue<'_, 'db, '_> {
+    type Output = bool;
+
+    fn on_cycle(
+        &self,
+        _context: &TypeQueryContext<'_, 'db, Self>,
+        _ty: Type<'db>,
+        _kind: CycleKind,
+        (): (),
+    ) -> bool {
+        false
+    }
+
+    fn visit(
+        &self,
+        db: &'db dyn Db,
+        context: &TypeQueryContext<'_, 'db, Self>,
+        ty: Type<'db>,
+        (): (),
+    ) -> bool {
+        let env = context.environment();
+        match ty {
+            Type::TypeForm(_) | Type::SubclassOf(_) => true,
+            // Class objects written as type expressions should still be interpreted as TypeForm.
+            Type::ClassLiteral(_) => self
+                .builder
+                .speculate_without_diagnostics()
+                .infer_type_expression_no_store(self.expression)
+                .is_unknown(),
+            Type::NominalInstance(instance) if instance.has_known_class(db, KnownClass::Type) => {
+                true
+            }
+            Type::Union(union) => union.elements(db).iter().any(|ty| context.visit(db, *ty)),
+            Type::Intersection(intersection) => intersection
+                .iter_positive(db)
+                .any(|ty| context.visit(db, ty)),
+            Type::TypeVar(typevar) => typevar
+                .typevar(db)
+                .bound_or_constraints(db, env)
+                .is_some_and(|bound| context.visit(db, bound.as_type(db, env))),
+            _ => false,
+        }
     }
 }

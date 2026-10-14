@@ -30,7 +30,7 @@ use self::enums::evaluate_enum_comparison;
 /// narrowed. A comparison can therefore be ambiguous at runtime while still constraining that
 /// operand in either branch.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum ComparisonResult<'db> {
+pub(super) enum ComparisonResult<'db> {
     /// The comparison always evaluates to true.
     ///
     /// For equality comparisons, this does not necessarily indicate anything about whether the
@@ -65,7 +65,7 @@ enum ComparisonResult<'db> {
 
 /// The branch of a comparison for which a narrowing constraint is being computed.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum ComparisonBranch {
+pub(super) enum ComparisonBranch {
     Positive,
     Negative,
 }
@@ -462,7 +462,7 @@ impl ComparisonSoundnessPolicy {
 }
 
 /// Tracks comparisons that are already in progress so recursive evaluation terminates.
-struct ComparisonEvaluator<'env, 'db> {
+pub(super) struct ComparisonEvaluator<'env, 'db> {
     db: &'db dyn Db,
     env: &'env TypeOperations<'db>,
     active: CycleDetector<
@@ -561,7 +561,7 @@ impl<'env, 'db> ComparisonEvaluator<'env, 'db> {
                 };
                 let left = expansion.normalize(db, left);
                 let right = expansion.normalize(db, right);
-                evaluate_comparison_once(self, left, right, branch, operator)
+                left.evaluate_comparison(right, self, branch, operator)
             },
         )
     }
@@ -1853,7 +1853,7 @@ fn evaluate_container_element_equality<'db>(
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-enum ComparisonOperator {
+pub(super) enum ComparisonOperator {
     Equality,
     Inequality,
 }
@@ -2298,3 +2298,19 @@ fn same_enum_member<'db>(
     enum_class_literal.resolve_member(db, left.name(db))
         == enum_class_literal.resolve_member(db, right.name(db))
 }
+
+impl<'db> ComparisonEvaluator<'_, 'db> {
+    pub(super) fn evaluate_expanded(
+        &self,
+        left: Type<'db>,
+        right: Type<'db>,
+        branch: ComparisonBranch,
+        operator: ComparisonOperator,
+    ) -> ComparisonResult<'db> {
+        evaluate_comparison_once(self, left, right, branch, operator)
+    }
+}
+
+pub(super) use enums::{
+    EnumDomainCollector, EnumDomainVisitor, EnumPartitionCollector, EnumValueSet,
+};

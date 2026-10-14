@@ -744,7 +744,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
                     let Some(body) = expansion.recursive_body(db, recursive).into_unfolded() else {
                         return false;
                     };
-                    self.visit_type(db, body);
+                    body.visit(db, self);
                     !self.has_unresolved_type.get()
                 });
             }
