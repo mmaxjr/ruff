@@ -380,7 +380,7 @@ where
             }
 
             Type::ProtocolInstance(protocol) => protocol
-                .interface(db)
+                .interface(db, env)
                 .instance_write_requirement(db, env, object_ty, attribute)
                 .map_or_else(
                     || instance_attribute_write_requirement(db, env, object_ty, attribute),
@@ -991,7 +991,7 @@ pub(super) fn assignment_attribute_members<'db>(
         ) {
         object_ty.member(db, env, attribute)
     } else if let Type::ProtocolInstance(protocol) = object_ty
-        && let Some(origin) = protocol.materialized_origin_property(db, attribute)
+        && let Some(origin) = protocol.materialized_origin_property(db, env, attribute)
     {
         Type::instance(db, env, *origin).class_member(db, env, attribute)
     } else {

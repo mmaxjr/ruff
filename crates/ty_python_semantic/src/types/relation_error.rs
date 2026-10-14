@@ -873,8 +873,9 @@ impl<'db> ErrorContextNode<'db> {
             && let ErrorContext::ParameterNameMismatch { target_name, .. }
             | ErrorContext::ParameterMustAcceptKeywordArguments { target_name, .. } =
                 &single_grandchild.context
-            && let Some(protocol_member) =
-                proto_instance.interface(db).member_by_name(db, member_name)
+            && let Some(protocol_member) = proto_instance
+                .interface(db, env)
+                .member_by_name(db, member_name)
             && let Some(definition) = protocol_member.definition()
             && let Some(declaring_protocol) = nearest_enclosing_class(
                 db,

@@ -1963,7 +1963,7 @@ impl KnownFunction {
                     );
                     diag.annotate(Annotation::primary(span).message(format_args!(
                         "`{}`",
-                        protocol_class.interface(db).display(db, env)
+                        protocol_class.interface(db, env).display(db, env)
                     )));
                 }
             }
@@ -2218,7 +2218,9 @@ fn check_classinfo_in_isinstance<'db>(
                         function,
                     );
                 } else if function == KnownFunction::IsSubclass {
-                    let non_method_members = protocol_class.interface(db).non_method_members(db);
+                    let non_method_members = protocol_class
+                        .interface(db, context.program_environment())
+                        .non_method_members(db);
                     if !non_method_members.is_empty() {
                         report_issubclass_check_against_protocol_with_non_method_members(
                             context,

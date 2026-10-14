@@ -964,7 +964,12 @@ pub(super) fn dynamic_content_impl<'db>(
             else {
                 // The synthesized interface is immutable. A changed member produces a different
                 // protocol type; lazy types inside its members are still inspected here.
-                walk_protocol_instance_interface(db, protocol.interface(db), protocol_ty, visit);
+                walk_protocol_instance_interface(
+                    db,
+                    protocol.interface(db, self.env),
+                    protocol_ty,
+                    visit,
+                );
                 return;
             };
 
@@ -986,7 +991,7 @@ pub(super) fn dynamic_content_impl<'db>(
                 || {
                     walk_protocol_instance_interface(
                         db,
-                        protocol.interface(db),
+                        protocol.interface(db, self.env),
                         protocol_ty,
                         visit,
                     );
@@ -1136,7 +1141,12 @@ pub(super) fn contains_growing_type<'db>(
                 .class_origin(db)
                 .and_then(|class| class.static_class_literal(db))
             else {
-                walk_protocol_instance_interface(db, protocol.interface(db), protocol_ty, visit);
+                walk_protocol_instance_interface(
+                    db,
+                    protocol.interface(db, self.env),
+                    protocol_ty,
+                    visit,
+                );
                 return;
             };
 
@@ -1158,7 +1168,7 @@ pub(super) fn contains_growing_type<'db>(
                     // own. Explicitly recursive method signatures still need to be inspected.
                     walk_protocol_instance_interface(
                         db,
-                        protocol.interface(db),
+                        protocol.interface(db, self.env),
                         protocol_ty,
                         visit,
                     );

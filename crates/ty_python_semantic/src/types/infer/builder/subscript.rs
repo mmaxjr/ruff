@@ -484,7 +484,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 .into_protocol_class(db)
                 .is_some_and(|protocol| {
                     protocol
-                        .interface(db)
+                        .interface(db, env)
                         .includes_generic_writable_instance_member(
                             db,
                             env,

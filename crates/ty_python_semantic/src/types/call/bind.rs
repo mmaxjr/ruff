@@ -2564,7 +2564,7 @@ impl<'db> Bindings<'db> {
                                 && let Some(protocol_class) = class.into_protocol_class(db)
                             {
                                 let member_names = protocol_class
-                                    .interface(db)
+                                    .interface(db, env)
                                     .members(db)
                                     .map(|member| Type::string_literal(db, member.name()));
                                 let specialization =

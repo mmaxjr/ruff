@@ -184,7 +184,7 @@ impl<'db> SubclassOfType<'db> {
             return None;
         };
         protocol
-            .interface(db)
+            .interface(db, env)
             .meta_write_requirement(db, env, Type::ProtocolInstance(protocol), name)
             .map(|(write_ty, mut qualifiers)| {
                 // `ClassVar` prohibits instance writes, not writes through the class object.
@@ -299,7 +299,7 @@ impl<'db> SubclassOfType<'db> {
         policy: MemberLookupPolicy,
     ) -> Option<PlaceAndQualifiers<'db>> {
         if let SubclassOfInner::Protocol(protocol) = self.subclass_of
-            && let Some(member) = protocol.interface(db).meta_member(db, env, name)
+            && let Some(member) = protocol.interface(db, env).meta_member(db, env, name)
         {
             return Some(member);
         }

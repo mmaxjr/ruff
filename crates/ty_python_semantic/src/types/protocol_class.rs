@@ -83,9 +83,16 @@ impl<'db> ProtocolClass<'db> {
     /// It is illegal for a protocol class to have any instance attributes that are not declared
     /// in the protocol's class body. If any are assigned to, they are not taken into account in
     /// the protocol's list of members.
-    pub(super) fn interface(self, db: &'db dyn Db) -> ProtocolInterface<'db> {
+    pub(super) fn interface(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> ProtocolInterface<'db> {
         let _span = tracing::trace_span!("protocol_members", "class='{}'", self.name(db)).entered();
-        cached_protocol_interface(db, *self)
+        env.cached_query(
+            || cached_protocol_interface(db, *self),
+            || compute_protocol_interface(db, env, *self),
+        )
     }
 
     /// Structural variance inference currently excludes recursive type aliases and descriptor
@@ -105,13 +112,17 @@ impl<'db> ProtocolClass<'db> {
     /// invariant type variable as a read and then reuse that result as its write. Strip only the
     /// pending marker while constructing the shared interface so reads and writes can each apply
     /// the original materialization in their own variance position.
-    pub(super) fn unmaterialized_interface(self, db: &'db dyn Db) -> ProtocolInterface<'db> {
+    pub(super) fn unmaterialized_interface(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> ProtocolInterface<'db> {
         let ClassType::Generic(alias) = *self else {
-            return self.interface(db);
+            return self.interface(db, env);
         };
         let specialization = alias.specialization(db);
         if specialization.materialization_kind(db).is_none() {
-            return self.interface(db);
+            return self.interface(db, env);
         }
 
         let alias = GenericAlias::new(
@@ -119,7 +130,7 @@ impl<'db> ProtocolClass<'db> {
             alias.origin(db),
             specialization.with_materialization_kind(db, None),
         );
-        ProtocolClass(ClassType::Generic(alias)).interface(db)
+        ProtocolClass(ClassType::Generic(alias)).interface(db, env)
     }
 
     /// Walk the effective non-method member types declared by this protocol.
@@ -288,7 +299,7 @@ impl<'db> ProtocolClass<'db> {
     /// class body, or are declared in a superclass of the protocol class.
     pub(super) fn validate_members(self, context: &InferContext<'db, '_>) {
         let db = context.db();
-        let interface = self.interface(db);
+        let interface = self.interface(db, context.program_environment());
         let Some((class_literal, _)) = self.static_class_literal(db) else {
             return;
         };
@@ -2959,7 +2970,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
     ) -> ConstraintSet<'db, 'c> {
         let env = self.env;
         protocol
-            .interface(db)
+            .interface(db, env)
             .members(db)
             .when_all(db, self.constraints, |member| {
                 let required = member.access(ProtocolMemberAccessMode::Class);
@@ -3412,7 +3423,9 @@ fn supports_protocol_variance_inference<'db>(
     let Some(protocol) = class.identity_specialization(db).into_protocol_class(db) else {
         return false;
     };
-    let interface = protocol.interface(db);
+    let env =
+        TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
+    let interface = protocol.interface(db, &env);
     if interface.members(db).any(|member| {
         matches!(
             member.data.kind,
@@ -3425,8 +3438,6 @@ fn supports_protocol_variance_inference<'db>(
         return false;
     }
 
-    let env =
-        TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
     interface.variance_types(db, &env).all(|(ty, _)| {
         if let Type::Callable(callable) = ty {
             // Bound receivers constrain when a method can be called, but they are not input
@@ -3457,6 +3468,17 @@ fn cached_protocol_interface<'db>(
         db,
         ProgramEnvironment::from_file(class.class_literal(db).program_file(db)),
     );
+    compute_protocol_interface(db, &env, class)
+}
+
+fn compute_protocol_interface<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    class: ClassType<'db>,
+) -> ProtocolInterface<'db> {
+    let env = env.in_environment(ProgramEnvironment::from_file(
+        class.class_literal(db).program_file(db),
+    ));
     let mut members = BTreeMap::default();
 
     ProtocolClass(class).for_each_member_candidate(db, &env, |name, candidate, specialization| {
@@ -3656,11 +3678,11 @@ pub(super) fn has_all_protocol_members_defined<'db>(
     ty: Type<'db>,
     protocol: ProtocolInstanceType<'db>,
 ) -> bool {
-    let target_interface = protocol.interface(db);
+    let target_interface = protocol.interface(db, env);
 
     match ty {
         Type::ProtocolInstance(source_protocol) => {
-            let source_interface = source_protocol.interface(db);
+            let source_interface = source_protocol.interface(db, env);
 
             (source_interface.member_count(db) >= target_interface.member_count(db)
                 || source_interface.member_count(db)

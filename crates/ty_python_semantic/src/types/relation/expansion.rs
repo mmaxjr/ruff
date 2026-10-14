@@ -206,15 +206,10 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         source: CallableType<'db>,
         target: CallableType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        self.with_recursion_guard(
-            db,
-            Type::Callable(source),
-            Type::Callable(target),
-            |expansion| self.check_callable_pair_inner(db, source, target, expansion),
-        )
+        self.check_type_pair(db, Type::Callable(source), Type::Callable(target))
     }
 
-    fn check_callable_pair_inner(
+    pub(super) fn check_callable_pair_inner(
         &self,
         db: &'db dyn Db,
         source: CallableType<'db>,

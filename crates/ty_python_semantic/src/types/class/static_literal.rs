@@ -3509,7 +3509,7 @@ impl<'db> StaticClassLiteral<'db> {
             && let Some(protocol) = self.identity_specialization(db).into_protocol_class(db)
             && protocol.supports_variance_inference(db)
         {
-            return protocol.interface(db).variance_of(db, &env, typevar);
+            return protocol.interface(db, &env).variance_of(db, &env, typevar);
         }
 
         let class_body_scope = self.body_scope(db);

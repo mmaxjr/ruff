@@ -4343,7 +4343,7 @@ impl<'db> Type<'db> {
         if let Type::ProtocolInstance(protocol) = ty
             && let Some(origin) = protocol.materialized_origin(db)
         {
-            let interface = protocol.interface(db);
+            let interface = protocol.interface(db, env);
             return if interface.includes_member(db, name) {
                 interface.instance_member(db, env, name)
             } else {
@@ -6484,7 +6484,7 @@ impl<'db> Type<'db> {
                 Type::ProtocolInstance(protocol)
                     if protocol.class_origin(db).is_none()
                         && policy.mro_no_object_fallback()
-                        && !protocol.interface(db).includes_member(db, name_str) =>
+                        && !protocol.interface(db, env).includes_member(db, name_str) =>
                 {
                     Place::Undefined.into()
                 }

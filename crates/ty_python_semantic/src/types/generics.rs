@@ -4701,7 +4701,9 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
 
                             let when = if source_origin
                                 .is_subtype_of_class_literal(db, target_origin.class_literal(db))
-                                || target.interface(db).has_only_finite_members(db, self.env)
+                                || target
+                                    .interface(db, self.env)
+                                    .has_only_finite_members(db, self.env)
                             {
                                 Type::ProtocolInstance(source)
                                     .when_constraint_set_assignable_to_owned(
@@ -4712,7 +4714,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                             } else {
                                 Cow::Borrowed(
                                     source.when_non_recursive_members_assignable_to_owned(
-                                        db, target,
+                                        db, self.env, target,
                                     )?,
                                 )
                             };
