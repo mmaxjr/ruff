@@ -183,7 +183,7 @@ fn check_inherited_method_conflicts<'db>(
             _ => return,
         }
     }
-    if direct_bases.len() < 2 || class.try_mro(db, None).is_err() {
+    if direct_bases.len() < 2 || class.try_mro(db, env, None).is_err() {
         return;
     }
 

@@ -10,8 +10,8 @@ use crate::types::mro::MroIterator;
 use crate::types::tuple::TupleType;
 use crate::types::{
     ApplyTypeMappingVisitor, ClassLiteral, ClassType, CycleKind, DivergentType, DynamicType,
-    KnownClass, KnownInstanceType, MaterializationKind, SpecialFormType, StaticMroError, Type,
-    TypeContext, TypeMapping, TypeQuery, TypeQueryContext, TypingModule, todo_type,
+    KnownClass, KnownInstanceType, MaterializationKind, SpecialFormType, Type, TypeContext,
+    TypeMapping, TypeQuery, TypeQueryContext, TypingModule, todo_type,
 };
 use crate::{Db, DisplaySettings};
 
@@ -258,7 +258,7 @@ impl<'db> ClassBase<'db> {
         )
     }
 
-    pub(super) fn has_cyclic_mro(self, db: &'db dyn Db) -> bool {
+    pub(super) fn has_cyclic_mro(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
         match self {
             ClassBase::Class(class) => {
                 let Some((class_literal, specialization)) = class.static_class_literal(db) else {
@@ -269,8 +269,8 @@ impl<'db> ClassBase<'db> {
                     return false;
                 };
                 class_literal
-                    .try_mro(db, specialization)
-                    .is_err_and(StaticMroError::is_cycle)
+                    .try_mro(db, env, specialization)
+                    .is_err_and(|error| error.is_cycle())
             }
             ClassBase::Any
             | ClassBase::Dynamic(_)

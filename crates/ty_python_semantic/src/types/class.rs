@@ -1,6 +1,7 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use std::borrow::Cow;
 use std::cell::LazyCell;
 use std::fmt::Write;
 
@@ -555,31 +556,71 @@ impl<'db> VarianceInferable<'db> for GenericAlias<'db> {
 
 #[salsa::tracked]
 impl<'db> GenericAlias<'db> {
-    /// Resolve the MRO with this alias's type arguments applied to its base classes.
-    #[salsa::tracked(
-        returns(as_ref),
-        cycle_initial=|db, _, alias: GenericAlias<'db>| {
-            let origin = alias.origin(db);
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(origin.body_scope(db)));
-            Err(Box::new(StaticMroError::cycle(
-                db,
-                &env,
-                origin.apply_optional_specialization(db, &env, Some(alias.specialization(db))),
-            )))
-        },
-        heap_size=ruff_memory_usage::heap_size
-    )]
+    /// Resolve the specialized ancestry within the consuming operation.
     pub(in crate::types) fn try_mro(
         self,
         db: &'db dyn Db,
-    ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
-        let origin = self.origin(db);
-        tracing::trace!("GenericAlias::try_mro: {}", origin.name(db));
-        let env = TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_scope(origin.body_scope(db)),
-        );
-        Mro::of_static_class(db, &env, origin, Some(self.specialization(db))).map_err(Box::new)
+        env: &TypeOperations<'db>,
+    ) -> Result<Cow<'db, Mro<'db>>, Cow<'db, StaticMroError<'db>>> {
+        #[salsa::tracked(
+            returns(as_ref),
+            cycle_initial=|db, _, alias: GenericAlias<'db>| {
+                let origin = alias.origin(db);
+                let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(origin.body_scope(db)));
+                Err(Box::new(StaticMroError::cycle(
+                    db,
+                    &env,
+                    origin.apply_optional_specialization(db, &env, Some(alias.specialization(db))),
+                )))
+            },
+            heap_size=ruff_memory_usage::heap_size
+        )]
+        fn cached<'db>(
+            db: &'db dyn Db,
+            alias: GenericAlias<'db>,
+        ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
+            let origin = alias.origin(db);
+            tracing::trace!("GenericAlias::try_mro: {}", origin.name(db));
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_scope(origin.body_scope(db)),
+            );
+            Mro::of_static_class(db, &env, origin, Some(alias.specialization(db))).map_err(Box::new)
+        }
+
+        let env = env.in_environment(ProgramEnvironment::from_scope(
+            self.origin(db).body_scope(db),
+        ));
+        env.cached_query(
+            || {
+                cached(db, self)
+                    .map(Cow::Borrowed)
+                    .map_err(|error| Cow::Borrowed(error.as_ref()))
+            },
+            || {
+                env.context().state().specialized_mro.visit(
+                    &env,
+                    &self,
+                    || {
+                        Err(Cow::Owned(StaticMroError::cycle(
+                            db,
+                            &env,
+                            ClassType::Generic(self),
+                        )))
+                    },
+                    || {
+                        Mro::of_static_class(
+                            db,
+                            &env,
+                            self.origin(db),
+                            Some(self.specialization(db)),
+                        )
+                        .map(Cow::Owned)
+                        .map_err(Cow::Owned)
+                    },
+                )
+            },
+        )
     }
 
     /// Compose each type argument's variance with its formal parameter's variance. Inferred
@@ -1446,7 +1487,7 @@ impl<'db> ClassType<'db> {
     /// [method resolution order]: https://docs.python.org/3/glossary.html#term-method-resolution-order
     pub(super) fn iter_mro(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> MroIterator<'db> {
         match self {
-            Self::NonGeneric(class) => class.iter_mro(db),
+            Self::NonGeneric(class) => MroIterator::new(db, env, class, None),
             Self::Generic(generic) => MroIterator::new(
                 db,
                 env,
@@ -1510,7 +1551,7 @@ impl<'db> ClassType<'db> {
         std::iter::from_fn(move || {
             loop {
                 let class = pending.pop()?;
-                if !seen.insert(class) || ClassBase::Class(class).has_cyclic_mro(db) {
+                if !seen.insert(class) || ClassBase::Class(class).has_cyclic_mro(db, env) {
                     continue;
                 }
                 let (literal, specialization) = class.class_literal_and_specialization(db);
@@ -1636,7 +1677,7 @@ impl<'db> ClassType<'db> {
 
         // A cyclic MRO uses an unknown base for recovery. It need not correspond to an
         // explicit unknown base, and rejecting it here can make recursive inference oscillate.
-        if ClassBase::Class(self).has_cyclic_mro(db) {
+        if ClassBase::Class(self).has_cyclic_mro(db, env) {
             return true;
         }
 

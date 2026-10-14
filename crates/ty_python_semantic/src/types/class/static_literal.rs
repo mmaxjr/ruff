@@ -11,6 +11,7 @@ use ruff_db::{
 use ruff_python_ast as ast;
 use ruff_python_ast::{PythonVersion, name::Name};
 use ruff_text_size::{Ranged, TextRange};
+use std::borrow::Cow;
 use std::cell::RefCell;
 
 use super::implicit_attributes::implicit_attribute_names;
@@ -874,13 +875,16 @@ impl<'db> StaticClassLiteral<'db> {
     pub(in crate::types) fn try_mro(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
-    ) -> Result<&'db Mro<'db>, &'db StaticMroError<'db>> {
+    ) -> Result<Cow<'db, Mro<'db>>, Cow<'db, StaticMroError<'db>>> {
         match specialization {
-            None => self.try_mro_unspecialized(db),
-            Some(specialization) => GenericAlias::new(db, self, specialization).try_mro(db),
+            None => self
+                .try_mro_unspecialized(db)
+                .map(Cow::Borrowed)
+                .map_err(|error| Cow::Borrowed(error.as_ref())),
+            Some(specialization) => GenericAlias::new(db, self, specialization).try_mro(db, env),
         }
-        .map_err(Box::as_ref)
     }
 
     #[salsa::tracked(
@@ -1267,7 +1271,9 @@ impl<'db> StaticClassLiteral<'db> {
             let mut base_classes = class.metaclass_bases(db, &env).peekable();
 
             if (base_classes.peek().is_some() && class.inheritance_cycle(db).is_some())
-                || class.try_mro(db, None).is_err_and(StaticMroError::is_cycle)
+                || class
+                    .try_mro(db, &env, None)
+                    .is_err_and(|error| error.is_cycle())
             {
                 // We emit diagnostics for cyclic class definitions elsewhere.
                 // Avoid attempting to infer the metaclass if the class is cyclically defined.

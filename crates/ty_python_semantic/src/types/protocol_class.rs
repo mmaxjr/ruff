@@ -347,7 +347,11 @@ impl<'db> ProtocolClass<'db> {
         else {
             return;
         };
-        if class.has_pep_695_type_params(db) || class.try_mro(db, None).is_err() {
+        if class.has_pep_695_type_params(db)
+            || class
+                .try_mro(db, context.program_environment(), None)
+                .is_err()
+        {
             return;
         }
         let env = context.program_environment();
