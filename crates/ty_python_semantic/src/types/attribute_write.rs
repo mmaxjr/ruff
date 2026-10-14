@@ -1158,23 +1158,7 @@ fn single_descriptor_setter_domain<'db>(
     for callable in &callables {
         let domain = callable
             .inspect_signatures_root(db, env, |_, signatures| {
-                let mut write_types = Vec::new();
-                for signature in signatures {
-                    match descriptor_setter_signature_domain(
-                        db,
-                        env,
-                        signature,
-                        self_ty,
-                        receiver_ty,
-                    ) {
-                        DescriptorSetterSignatureDomain::Inapplicable => {}
-                        DescriptorSetterSignatureDomain::Known(write_ty) => {
-                            write_types.push(write_ty);
-                        }
-                        DescriptorSetterSignatureDomain::Deferred => return None,
-                    }
-                }
-                Some(UnionType::from_elements(db, env, write_types))
+                signatures.descriptor_setter_domain(db, self_ty, receiver_ty)
             })
             .flatten();
         let Some(domain) = domain else {
@@ -1770,4 +1754,24 @@ impl<'c, 'db> TypeWalk<'db, &TypeRelationChecker<'_, 'c, 'db>> for CheckDescript
             self.value_ty,
         )
     }
+}
+
+pub(super) fn signatures_setter_domain<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    signatures: &super::signatures::CallableSignature<'db>,
+    self_ty: Type<'db>,
+    receiver_ty: Type<'db>,
+) -> Option<Type<'db>> {
+    let mut write_types = Vec::new();
+    for signature in signatures {
+        match descriptor_setter_signature_domain(db, env, signature, self_ty, receiver_ty) {
+            DescriptorSetterSignatureDomain::Inapplicable => {}
+            DescriptorSetterSignatureDomain::Known(write_ty) => {
+                write_types.push(write_ty);
+            }
+            DescriptorSetterSignatureDomain::Deferred => return None,
+        }
+    }
+    Some(UnionType::from_elements(db, env, write_types))
 }

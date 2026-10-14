@@ -7083,7 +7083,7 @@ impl<'db> Type<'db> {
             }
             Type::Callable(callable) => {
                 return traversal.inspect_signatures(db, callable, |signatures| {
-                    CallableBinding::from_overloads(self, signatures.iter().cloned()).into()
+                    signatures.bindings(self, None)
                 });
             }
 
@@ -7125,14 +7125,10 @@ impl<'db> Type<'db> {
                                         callables.iter().map(|callable| {
                                             traversal
                                                 .inspect_signatures(db, *callable, |signatures| {
-                                                    CallableBinding::from_overloads(
+                                                    signatures.bindings(
                                                         self,
-                                                        signatures.overloads.iter().cloned(),
+                                                        Some(bound_method.signature_receiver(db)),
                                                     )
-                                                    .with_bound_type(
-                                                        bound_method.signature_receiver(db),
-                                                    )
-                                                    .into()
                                                 })
                                                 .unwrap_or_else(|| {
                                                     CallableBinding::not_callable(self).into()
@@ -7144,53 +7140,7 @@ impl<'db> Type<'db> {
                     );
                 };
                 return traversal.inspect_signatures(db, callable, |signature| {
-                    let self_instance = bound_method.self_instance(db);
-                    let signature_receiver = bound_method.signature_receiver(db);
-                    // Class-based protocol member lookup has already specialized the method for this
-                    // receiver. Bake an implicit positional receiver into the signature instead of
-                    // checking it structurally again during call inference.
-                    let protocol_receiver_is_specialized = self_instance
-                        .as_protocol_instance()
-                        .is_some_and(|protocol| protocol.class_origin(db).is_some())
-                        && signature
-                            .overloads
-                            .iter()
-                            .all(Signature::has_implicit_positional_receiver_annotation);
-                    // Synthesized signatures can contain `Self` without a function's generic
-                    // context, so substitute it when capturing the receiver.
-                    if bound_method.function(db).is_none()
-                        || protocol_receiver_is_specialized
-                        || signature_receiver != self_instance
-                    {
-                        let mut binding = CallableBinding::from_overloads(
-                            self,
-                            signature.overloads.iter().cloned(),
-                        )
-                        .with_bound_type(signature_receiver);
-                        binding.bake_bound_type_into_overloads(db, env);
-                        binding.into()
-                    } else {
-                        // Solve exact receiver constraints before checking the other arguments, but
-                        // retain the receiver itself for call inference and receiver diagnostics.
-                        let overloads = signature.overloads.iter().flat_map(|overload| {
-                            if overload.has_receiver_determined_method_typevar(db, env)
-                                && let Some(specialized) = overload.specialize_for_bound_receiver(
-                                    db,
-                                    env,
-                                    self_instance,
-                                    bound_method.typing_self_type(db, env),
-                                )
-                            {
-                                specialized.overloads
-                            } else {
-                                smallvec_inline![overload.clone()]
-                            }
-                        });
-
-                        CallableBinding::from_overloads(self, overloads)
-                            .with_bound_type(self_instance)
-                            .into()
-                    }
+                    signature.bind_bound_method(db, bound_method)
                 });
             }
 
@@ -7208,11 +7158,7 @@ impl<'db> Type<'db> {
                         callables.iter().map(|callable| {
                             traversal
                                 .inspect_signatures(db, *callable, |signatures| {
-                                    CallableBinding::from_overloads(
-                                        self,
-                                        signatures.iter().cloned(),
-                                    )
-                                    .into()
+                                    signatures.bindings(self, None)
                                 })
                                 .unwrap_or_else(|| CallableBinding::not_callable(self).into())
                         }),
@@ -9576,7 +9522,7 @@ impl<'db> Type<'db> {
             }),
 
             Type::Callable(callable) => {
-                callable.find_legacy_typevars_impl(db, env, binding_context, typevars, visitor);
+                callable.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
             }
 
             Type::PropertyInstance(property) => visitor.visit(db, self, || {
@@ -9705,13 +9651,7 @@ impl<'db> Type<'db> {
                     );
                 }
                 KnownInstanceType::Callable(callable_type) => {
-                    callable_type.find_legacy_typevars_impl(
-                        db,
-                        env,
-                        binding_context,
-                        typevars,
-                        visitor,
-                    );
+                    callable_type.find_legacy_typevars_impl(db, binding_context, typevars, visitor);
                 }
                 KnownInstanceType::TypeGenericAlias(ty)
                 | KnownInstanceType::LiteralStringAlias(ty) => {

@@ -26,7 +26,7 @@ use crate::{
         ApplyTypeMappingVisitor, BindingContext, BoundTypeVarIdentity, BoundTypeVarInstance,
         CallableType, ClassBase, ClassLiteral, ClassType, ErrorContext, FindLegacyTypeVarsVisitor,
         GenericAlias, GenericContext, InstanceFallbackShadowsNonDataDescriptor, KnownFunction,
-        KnownInstanceType, MaterializationKind, MemberLookupKey, MemberLookupPolicy, Parameter,
+        KnownInstanceType, MaterializationKind, MemberLookupKey, MemberLookupPolicy,
         ProtocolInstanceType, SelfBinding, StaticClassLiteral, Type, TypeMapping, TypeQualifiers,
         TypeVarVariance, UnionType, VarianceInferable, VarianceTerm,
         constraints::{ConstraintSet, IteratorConstraintsExtension, OptionConstraintsExtension},
@@ -2263,32 +2263,7 @@ impl<'a, 'db> ProtocolMember<'a, 'db> {
         };
         callable
             .inspect_signatures_root(db, env, |_, signatures| {
-                let finite_priority = match signatures.iter().len() {
-                    0 => return StructuralMemberPriority::Recursive,
-                    1 => StructuralMemberPriority::Simple,
-                    _ => StructuralMemberPriority::FiniteOverload,
-                };
-
-                let is_recursive = signatures.iter().any(|signature| {
-                    signature
-                        .receiver_constraint_types()
-                        .chain(
-                            signature
-                                .parameters()
-                                .iter()
-                                .skip(usize::from(
-                                    signature.has_implicit_positional_receiver_annotation(),
-                                ))
-                                .map(Parameter::annotated_type),
-                        )
-                        .chain(std::iter::once(signature.return_ty))
-                        .any(is_recursive_type)
-                });
-                if is_recursive {
-                    return StructuralMemberPriority::Recursive;
-                }
-
-                finite_priority
+                signatures.structural_member_priority(db)
             })
             .unwrap_or(StructuralMemberPriority::Recursive)
     }
@@ -2473,19 +2448,18 @@ fn property_get_member_type<'db>(
     env: &TypeOperations<'db>,
     getter: Type<'db>,
 ) -> Option<ProtocolAnnotation<'db>> {
-    let mut get_types = Vec::new();
-    let mut definition = None;
+    let mut returns = PropertyReturns {
+        types: Vec::new(),
+        definition: None,
+    };
     for callable in &getter.try_upcast_to_callable(db, env)? {
         callable.inspect_signatures_root(db, env, |_, signatures| {
-            for signature in signatures {
-                get_types.push(signature.return_ty);
-                definition = definition.or(signature.definition());
-            }
+            signatures.collect_property_returns(&mut returns);
         })?;
     }
     Some(ProtocolAnnotation {
-        ty: UnionType::from_elements(db, env, get_types),
-        self_binding_context: definition.map(BindingContext::Definition),
+        ty: UnionType::from_elements(db, env, returns.types),
+        self_binding_context: returns.definition.map(BindingContext::Definition),
     })
 }
 
@@ -2740,34 +2714,13 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                             // method otherwise loses no parameters while the protocol loses `self`.
                             callable
                                 .inspect_signatures(db, env, |original| {
-                                    let signatures = CallableSignature::from_overloads(
-                                        original
-                                            .iter()
-                                            .filter(|signature| {
-                                                let parameters = signature.parameters();
-                                                parameters.get_positional(0).is_some()
-                                                    || parameters.variadic().is_some()
-                                            })
-                                            .map(|signature| {
-                                                signature.bind_self(
-                                                    db,
-                                                    env,
-                                                    Some(implementation_self_binding_ty),
-                                                )
-                                            }),
-                                    );
-                                    if signatures.overloads.is_empty() {
-                                        return self.never();
-                                    }
-                                    self.check_callable_pair(
+                                    original.compare_protocol_method(
                                         db,
-                                        callable.with_signatures(db, signatures),
-                                        protocol_bind_self(
-                                            db,
-                                            env.program(db),
-                                            required_callable,
-                                            Some(protocol_self_binding_ty),
-                                        ),
+                                        self,
+                                        *callable,
+                                        required_callable,
+                                        implementation_self_binding_ty,
+                                        protocol_self_binding_ty,
                                     )
                                 })
                                 .unwrap_or_else(|| self.never())
@@ -3450,31 +3403,17 @@ fn supports_protocol_variance_inference<'db>(
 
     let env =
         TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.body_scope(db)));
-    let supports_type = |ty| {
-        !any_over_type_expanding_aliases(db, &env, ty, |nested| {
-            matches!(nested, Type::ProtocolInstance(protocol) if protocol
-                .class_origin(db)
-                .is_none_or(|class| !class.supports_variance_inference(db)))
-        })
-    };
     interface.variance_types(db, &env).all(|(ty, _)| {
         if let Type::Callable(callable) = ty {
             // Bound receivers constrain when a method can be called, but they are not input
             // or output positions in variance inference. Match `Signature::variance_of`.
             callable
                 .inspect_signatures_root(db, &env, |_, signatures| {
-                    signatures.iter().all(|signature| {
-                        signature
-                            .parameters()
-                            .iter()
-                            .map(Parameter::annotated_type)
-                            .chain(std::iter::once(signature.return_ty))
-                            .all(supports_type)
-                    })
+                    signatures.supports_protocol_variance_inference(db)
                 })
                 .unwrap_or(false)
         } else {
-            supports_type(ty)
+            supports_protocol_variance_type(db, &env, ty)
         }
     })
 }
@@ -3677,4 +3616,69 @@ pub(super) fn has_all_protocol_members_defined<'db>(
                     .is_definitely_bound()
         }),
     }
+}
+
+pub(super) struct PropertyReturns<'db> {
+    types: Vec<Type<'db>>,
+    definition: Option<Definition<'db>>,
+}
+
+impl<'db> PropertyReturns<'db> {
+    pub(super) fn collect(&mut self, signatures: &CallableSignature<'db>) {
+        for signature in signatures {
+            self.types.push(signature.return_ty);
+            self.definition = self.definition.or(signature.definition());
+        }
+    }
+}
+
+impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
+    pub(super) fn check_protocol_method_signatures(
+        &self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        required_callable: CallableType<'db>,
+        implementation_self_binding_ty: Type<'db>,
+        protocol_self_binding_ty: Type<'db>,
+        original: &CallableSignature<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        let env = self.env;
+        let signatures = CallableSignature::from_overloads(
+            original
+                .iter()
+                .filter(|signature| {
+                    let parameters = signature.parameters();
+                    parameters.get_positional(0).is_some() || parameters.variadic().is_some()
+                })
+                .map(|signature| {
+                    signature.bind_self(db, env, Some(implementation_self_binding_ty))
+                }),
+        );
+        if signatures.overloads.is_empty() {
+            return self.never();
+        }
+        self.check_callable_pair(
+            db,
+            callable.with_signatures(db, signatures),
+            protocol_bind_self(
+                db,
+                env.program(db),
+                required_callable,
+                Some(protocol_self_binding_ty),
+            ),
+        )
+    }
+}
+
+pub(super) fn supports_protocol_variance_type<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    ty: Type<'db>,
+) -> bool {
+    !any_over_type_expanding_aliases(
+        db,
+        env,
+        ty,
+        |nested| matches!(nested, Type::ProtocolInstance(protocol) if protocol.class_origin(db).is_none_or(|class| !class.supports_variance_inference(db))),
+    )
 }

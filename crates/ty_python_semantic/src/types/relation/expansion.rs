@@ -4,10 +4,9 @@ use crate::Db;
 use crate::types::callable::{CallableTypes, SignatureSource};
 use crate::types::constraints::{ConstraintSet, IteratorConstraintsExtension};
 use crate::types::recursive::{RecursiveType, TypeExpansionContext};
-use crate::types::signatures::CallableSignature;
 use crate::types::type_alias::TypeAliasType;
 use crate::types::typevar::TypeVarSet;
-use crate::types::{CallableType, ErrorContext, Type, TypeOperations};
+use crate::types::{CallableType, Type};
 
 use super::{ComparisonKind, ComparisonPolicy, DisjointnessChecker, TypeRelationChecker};
 
@@ -98,8 +97,7 @@ impl<'a, 'c, 'db> GuardedRelation<'a, 'c, 'db> {
             .inspect_signatures(db, source, |source| {
                 self.expansion
                     .inspect_signatures(db, target, |target| {
-                        self.checker
-                            .check_callable_signature_pair(db, source, target)
+                        source.compare(db, target, self.checker)
                     })
                     .unwrap_or_else(|| self.checker.never())
             })
@@ -303,55 +301,18 @@ impl<'c, 'db> GuardedDisjointness<'_, 'c, 'db> {
         // belongs to disjointness; the signature guards also cover nested single-type queries.
         source
             .inspect_signatures(db, env, |source| {
-                if !signatures_have_only_non_never_returns(db, env, source) {
+                if !source.has_only_non_never_returns(db) {
                     return checker.never();
                 }
                 target
                     .inspect_signatures(db, env, |target| {
-                        if !signatures_have_only_non_never_returns(db, env, target) {
+                        if !target.has_only_non_never_returns(db) {
                             return checker.never();
                         }
-                        // Disjointness distributes over unions. Comparing the overload arms directly
-                        // avoids building and normalizing a union of recursive return types.
-                        source.iter().when_all(db, checker.constraints, |source| {
-                            target.iter().when_all(db, checker.constraints, |target| {
-                                let result =
-                                    checker.check_type_pair(db, source.return_ty, target.return_ty);
-                                if let Some(context) = checker.report_context()
-                                    && result.is_always_satisfied(db, env, checker.inferable)
-                                {
-                                    context.push(ErrorContext::DisjointReturnTypes {
-                                        left: source.return_ty,
-                                        right: target.return_ty,
-                                    });
-                                }
-                                result
-                            })
-                        })
+                        source.compare_return_disjointness(db, target, checker)
                     })
                     .unwrap_or_else(|| checker.never())
             })
             .unwrap_or_else(|| checker.never())
     }
-}
-
-/// Return `true` if a callable has at least one overload and none return `Never`.
-///
-/// Return-type disjointness is a pragmatic approximation for method members: a callable returning
-/// `Never` could satisfy otherwise-incompatible signatures, so it must not establish disjointness.
-fn signatures_have_only_non_never_returns<'db>(
-    db: &'db dyn Db,
-    env: &TypeOperations<'db>,
-    signatures: &CallableSignature<'db>,
-) -> bool {
-    let mut signatures = signatures.iter();
-    let Some(first) = signatures.next() else {
-        return false;
-    };
-    !first.return_ty.has_outer_type(db, env, |ty| ty.is_never())
-        && signatures.all(|signature| {
-            !signature
-                .return_ty
-                .has_outer_type(db, env, |ty| ty.is_never())
-        })
 }

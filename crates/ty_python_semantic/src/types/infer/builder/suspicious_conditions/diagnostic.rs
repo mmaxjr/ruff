@@ -238,10 +238,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             let should_await = callables.iter().all(|callable| {
                 callable
                     .inspect_signatures_root(db, env, |_, signatures| {
-                        self.should_await_call(
-                            test,
-                            signatures.iter().map(|signature| signature.return_ty),
-                        )
+                        self.can_await_here(test) && signatures.all_returns_awaitable(db)
                     })
                     .unwrap_or(false)
             });
@@ -481,10 +478,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 let should_await = function
                     .callable()
                     .inspect_signatures_root(db, env, |_, signatures| {
-                        self.should_await_call(
-                            test,
-                            signatures.iter().map(|signature| signature.return_ty),
-                        )
+                        self.can_await_here(test) && signatures.all_returns_awaitable(db)
                     })
                     .unwrap_or(false);
 
@@ -1084,32 +1078,6 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 }
             }
         }
-    }
-
-    /// Whether every callable return type is known to be awaitable in this context.
-    fn should_await_call(
-        &self,
-        expression: &ast::Expr,
-        return_types: impl IntoIterator<Item = Type<'db>>,
-    ) -> bool {
-        if !self.can_await_here(expression) {
-            return false;
-        }
-
-        let db = self.db();
-        let env = self.program_environment();
-
-        // Use the top materialization so concrete return types can be subtypes regardless of
-        // the awaitable's generic arguments. `Any`, `Unknown`, and `Never` do not establish
-        // that a call returns an awaitable.
-        let awaitable = KnownClass::Awaitable
-            .to_instance(db, env)
-            .top_materialization(db, env);
-
-        return_types.into_iter().all(|return_ty| {
-            !return_ty.is_equivalent_to(db, env, Type::Never)
-                && return_ty.is_subtype_of(db, env, awaitable)
-        })
     }
 
     /// Return a [`TextRange`] spanning from `branch_start` up to

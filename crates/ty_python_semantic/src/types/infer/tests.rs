@@ -137,17 +137,22 @@ fn lambda_body_uses_its_parameter_context() -> anyhow::Result<()> {
             };
             let returned = callable
                 .inspect_signatures_root(&db, &env, |_, signatures| {
-                    signatures.overloads[0].return_ty
+                    signatures.single_return_display(&db)
                 })
+                .flatten()
                 .ok_or_else(|| anyhow::anyhow!("unexpected recursive signature"))?;
             if expression.contains("captured=") {
                 assert_eq!(
-                    returned.display(&db, &env).to_string(),
+                    returned,
                     format!("Unknown | {}", parameter.display(&db, &env)),
                     "{expression}"
                 );
             } else {
-                assert_eq!(returned, parameter, "{expression}");
+                assert_eq!(
+                    returned,
+                    parameter.display(&db, &env).to_string(),
+                    "{expression}"
+                );
             }
         }
     }

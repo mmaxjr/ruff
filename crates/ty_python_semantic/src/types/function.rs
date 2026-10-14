@@ -50,6 +50,7 @@
 //! (and the implementation).
 
 use crate::types::TypeOperations;
+use smallvec::SmallVec;
 use std::{borrow::Cow, str::FromStr};
 
 use bitflags::bitflags;
@@ -558,7 +559,13 @@ impl<'db> OverloadLiteral<'db> {
                         &env.in_environment(ProgramEnvironment::from_definition(
                             self.definition(db),
                         )),
-                        |_, signatures| signatures.overloads.clone(),
+                        |_, signatures| {
+                            let mut result = DefinitionSignatures {
+                                overloads: SmallVec::new(),
+                            };
+                            signatures.collect_definition_signatures(&mut result);
+                            result.overloads
+                        },
                     )
                     .unwrap_or_default()
                     .into_iter(),
@@ -1254,10 +1261,15 @@ impl<'db> FunctionType<'db> {
                 db,
                 &env.in_environment(ProgramEnvironment::from_definition(self.definition(db))),
                 |_, signatures| {
-                    let [signature] = signatures.overloads.as_slice() else {
-                        return None;
+                    let mut result = DefinitionSignatures {
+                        overloads: SmallVec::new(),
                     };
-                    Some(signature.clone())
+                    signatures.collect_definition_signatures(&mut result);
+                    if result.overloads.len() == 1 {
+                        result.overloads.pop()
+                    } else {
+                        None
+                    }
                 },
             )
             .flatten()
@@ -1320,12 +1332,10 @@ impl<'db> FunctionType<'db> {
                                 self.definition(db),
                             )),
                             |_, signatures| {
-                                callable.with_signatures(
+                                signatures.inherit_generic_context(
                                     db,
-                                    signatures.with_inherited_generic_context(
-                                        db,
-                                        inherited_generic_context,
-                                    ),
+                                    *callable,
+                                    inherited_generic_context,
                                 )
                             },
                         )
@@ -2316,5 +2326,16 @@ pub(crate) mod tests {
                 "The strum `EnumString` implementation appears to be incorrect for `{function_name}`"
             );
         }
+    }
+}
+
+/// Collect signatures while inferring a function definition's source-level type.
+pub(super) struct DefinitionSignatures<'db> {
+    overloads: SmallVec<[Signature<'db>; 1]>,
+}
+
+impl<'db> DefinitionSignatures<'db> {
+    pub(super) fn extend(&mut self, signatures: &CallableSignature<'db>) {
+        self.overloads.extend(signatures.iter().cloned());
     }
 }

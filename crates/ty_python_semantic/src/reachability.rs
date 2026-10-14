@@ -1891,12 +1891,11 @@ pub(crate) fn is_non_terminal_call<'db>(
     for callable in &callables {
         callable
             .inspect_signatures_root(db, env, |_, signatures| {
-                for overload in signatures {
-                    let returns_never = overload.return_ty.is_equivalent_to(db, env, Type::Never);
-                    no_overloads_return_never &= !returns_never;
-                    all_overloads_return_never &= returns_never;
-                    any_overload_is_generic |= overload.return_ty.has_typevar(db, env);
-                }
+                let (none_return_never, all_return_never, any_generic) =
+                    signatures.return_behavior(db);
+                no_overloads_return_never &= none_return_never;
+                all_overloads_return_never &= all_return_never;
+                any_overload_is_generic |= any_generic;
             })
             .unwrap_or_else(|| {
                 all_overloads_return_never = false;

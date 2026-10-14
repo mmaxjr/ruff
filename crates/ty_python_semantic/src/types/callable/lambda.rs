@@ -1231,7 +1231,7 @@ function = lambda value: (value, 1, C)
             .ok_or_else(|| anyhow::anyhow!("expected a callable"))?;
         let explicit = function
             .inspect_signatures_root(&db, &env, |_, signatures| {
-                function.with_signatures(&db, signatures.clone())
+                function.with_signatures(&db, signatures.signatures.clone())
             })
             .ok_or_else(|| anyhow::anyhow!("unexpected recursive signature"))?;
         let promote = |callable, kind| {
@@ -1258,7 +1258,7 @@ function = lambda value: (value, 1, C)
                 eager = promote(eager, kind);
                 deferred
                     .inspect_signatures_root(&db, &env, |_, signatures| {
-                        assert_eq!(Some(signatures), eager.explicit_signatures(&db));
+                        assert_eq!(Some(signatures.signatures), eager.explicit_signatures(&db));
                     })
                     .ok_or_else(|| anyhow::anyhow!("unexpected recursive signature"))?;
             }

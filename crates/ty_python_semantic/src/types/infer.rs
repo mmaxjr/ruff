@@ -2713,3 +2713,7 @@ impl InferenceFlags {
         }
     }
 }
+
+pub(super) use builder::{ContextualLambda, TransparentCallableReturn};
+
+pub(super) use builder::OverloadInconsistency;

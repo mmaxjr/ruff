@@ -1759,29 +1759,10 @@ impl<'db> StaticClassLiteral<'db> {
             && let Some(root_method_ty) = self.total_ordering_root_method(db, env, specialization)
             && let Some(callables) = root_method_ty.try_upcast_to_callable(db, env)
         {
-            let bool_ty = KnownClass::Bool.to_instance(db, env);
             let synthesized_callables = callables.map(|callable| {
                 callable
                     .inspect_signatures_root(db, env, |_, original| {
-                        let signatures =
-                            CallableSignature::from_overloads(original.iter().map(|signature| {
-                                // The generated methods return a union of the root method's return type
-                                // and `bool`. This is because `@total_ordering` synthesizes methods like:
-                                //     def __gt__(self, other): return not (self == other or self < other)
-                                // If `__lt__` returns `int`, then `__gt__` could return `int | bool`.
-                                let return_ty = UnionType::from_two_elements(
-                                    db,
-                                    env,
-                                    signature.return_ty,
-                                    bool_ty,
-                                );
-                                Signature::new_generic(
-                                    signature.generic_context,
-                                    signature.parameters().clone(),
-                                    return_ty,
-                                )
-                            }));
-                        CallableType::new(db, signatures, CallableTypeKind::FunctionLike)
+                        original.total_ordering_method(db)
                     })
                     .unwrap_or(callable)
             });

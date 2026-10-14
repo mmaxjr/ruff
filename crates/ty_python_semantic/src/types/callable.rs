@@ -1,3 +1,8 @@
+use super::DynamicType;
+use super::ErrorContext;
+use super::constraints::IteratorConstraintsExtension;
+use super::infer::TransparentCallableReturn;
+use super::protocol_class::StructuralMemberPriority;
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
 use itertools::Either;
@@ -9,11 +14,11 @@ use crate::{
     Db, FxOrderSet,
     place::Place,
     types::{
-        ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance, ClassType, CycleKind,
-        FindLegacyTypeVarsVisitor, FunctionType, InternedType, KnownBoundMethodType, KnownClass,
-        KnownInstanceType, LiteralValueTypeKind, MemberLookupPolicy, Parameter, Parameters,
-        Signature, SubclassOfInner, Type, TypeContext, TypeMapping, TypeQuery, TypeQueryContext,
-        TypeVarBoundOrConstraints, UnionType,
+        ApplyTypeMappingVisitor, BoundTypeVarIdentity, BoundTypeVarInstance, CallableBinding,
+        ClassType, CycleKind, FindLegacyTypeVarsVisitor, FunctionType, InternedType,
+        KnownBoundMethodType, KnownClass, KnownInstanceType, LiteralValueTypeKind,
+        MemberLookupPolicy, Parameter, Parameters, Signature, SubclassOfInner, Type, TypeContext,
+        TypeMapping, TypeQuery, TypeQueryContext, TypeVarBoundOrConstraints, UnionType,
         function::OverloadLiteral,
         infer::{InferenceEnvironment, ScopeInference},
         known_instance::{FunctoolsPartialInstance, MethodWrapperKind},
@@ -812,9 +817,7 @@ pub(super) fn walk_callable_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
     if visitor.should_visit_lazy_type_attributes() {
         if ty
             .inspect_signatures(db, visitor.program_environment(), |signatures| {
-                for signature in signatures {
-                    walk_signature(db, signature, visitor);
-                }
+                signatures.walk(db, visitor);
             })
             .is_none()
         {
@@ -942,6 +945,507 @@ pub(super) fn infer_lambda_signature<'db>(
     ))
 }
 
+/// Signatures borrowed while their expansion guard remains active.
+///
+/// Consumers can perform named operations, but cannot extract a signature or its return type.
+pub(crate) struct ExpandedSignatures<'scope, 'db> {
+    signatures: &'scope CallableSignature<'db>,
+    env: &'scope TypeOperations<'db>,
+}
+
+impl<'db> ExpandedSignatures<'_, 'db> {
+    #[cfg(test)]
+    pub(super) fn single_return_display(self, db: &'db dyn Db) -> Option<String> {
+        let [signature] = self.signatures.overloads.as_slice() else {
+            return None;
+        };
+        Some(signature.return_ty.display(db, self.env).to_string())
+    }
+    pub(super) fn structural_member_priority(
+        self,
+        db: &'db dyn Db,
+    ) -> super::protocol_class::StructuralMemberPriority {
+        let env = self.env;
+        let is_recursive_type = |ty| {
+            super::visitor::any_over_type_expanding_aliases(db, env, ty, |nested| {
+                matches!(nested, Type::ProtocolInstance(_))
+            })
+        };
+        let finite_priority = match self.signatures.iter().len() {
+            0 => return StructuralMemberPriority::Recursive,
+            1 => StructuralMemberPriority::Simple,
+            _ => StructuralMemberPriority::FiniteOverload,
+        };
+
+        let is_recursive = self.signatures.iter().any(|signature| {
+            signature
+                .receiver_constraint_types()
+                .chain(
+                    signature
+                        .parameters()
+                        .iter()
+                        .skip(usize::from(
+                            signature.has_implicit_positional_receiver_annotation(),
+                        ))
+                        .map(Parameter::annotated_type),
+                )
+                .chain(std::iter::once(signature.return_ty))
+                .any(is_recursive_type)
+        });
+        if is_recursive {
+            return StructuralMemberPriority::Recursive;
+        }
+
+        finite_priority
+    }
+
+    pub(super) fn collect_property_returns(
+        self,
+        output: &mut super::protocol_class::PropertyReturns<'db>,
+    ) {
+        output.collect(self.signatures);
+    }
+
+    pub(super) fn compare_protocol_method<'c>(
+        self,
+        db: &'db dyn Db,
+        checker: &super::relation::TypeRelationChecker<'_, 'c, 'db>,
+        callable: CallableType<'db>,
+        required: CallableType<'db>,
+        implementation_receiver: Type<'db>,
+        protocol_receiver: Type<'db>,
+    ) -> super::constraints::ConstraintSet<'db, 'c> {
+        checker.check_protocol_method_signatures(
+            db,
+            callable,
+            required,
+            implementation_receiver,
+            protocol_receiver,
+            self.signatures,
+        )
+    }
+
+    pub(super) fn supports_protocol_variance_inference(self, db: &'db dyn Db) -> bool {
+        self.signatures.iter().all(|signature| {
+            signature
+                .parameters()
+                .iter()
+                .map(Parameter::annotated_type)
+                .chain(std::iter::once(signature.return_ty))
+                .all(|ty| super::protocol_class::supports_protocol_variance_type(db, self.env, ty))
+        })
+    }
+
+    pub(super) fn overload_inconsistency(
+        self,
+        db: &'db dyn Db,
+        overload: &Signature<'db>,
+    ) -> Option<super::infer::OverloadInconsistency<'db>> {
+        super::infer::OverloadInconsistency::check(db, self.env, self.signatures, overload)
+    }
+
+    pub(super) fn infer_specialization(
+        &self,
+        formal: &ExpandedSignatures<'_, 'db>,
+        builder: &mut super::generics::SpecializationBuilder<'db, '_>,
+    ) -> Result<(), super::generics::SpecializationError<'db>> {
+        builder.infer_signature_pair(formal.signatures, self.signatures)
+    }
+
+    pub(super) fn rebind_return_typevars(
+        self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        inspector: &super::recursive::TypeInspector<'_, 'db>,
+        replacements: &crate::FxIndexMap<BoundTypeVarInstance<'db>, BoundTypeVarInstance<'db>>,
+    ) -> CallableType<'db> {
+        let signatures = inspector.map_signatures(
+            db,
+            self.signatures,
+            &TypeMapping::ApplySpecialization(
+                super::generics::ApplySpecialization::ReturnCallables(replacements),
+            ),
+            TypeContext::default(),
+        );
+        let context = super::generics::GenericContext::from_typevar_instances(
+            db,
+            self.env,
+            replacements.values().copied(),
+        );
+        callable.with_signatures(db, signatures.with_inherited_generic_context(db, context))
+    }
+
+    pub(super) fn inherit_generic_context(
+        self,
+        db: &'db dyn Db,
+        callable: CallableType<'db>,
+        context: super::generics::GenericContext<'db>,
+    ) -> CallableType<'db> {
+        callable.with_signatures(
+            db,
+            self.signatures.with_inherited_generic_context(db, context),
+        )
+    }
+
+    pub(super) fn collect_definition_signatures(
+        self,
+        output: &mut super::function::DefinitionSignatures<'db>,
+    ) {
+        output.extend(self.signatures);
+    }
+
+    pub(super) fn transparent_decorator_parameters(
+        self,
+        db: &'db dyn Db,
+    ) -> Option<(
+        BoundTypeVarInstance<'db>,
+        super::infer::TransparentCallableReturn<'db>,
+    )> {
+        let env = self.env;
+        let [signature] = self.signatures.overloads.as_slice() else {
+            return None;
+        };
+        let paramspec = signature.parameters().as_paramspec()?;
+        let return_typevar = if let Some(typevar) = signature.return_ty.as_typevar() {
+            TransparentCallableReturn::TypeVar(typevar)
+        } else {
+            let specialization =
+                signature
+                    .return_ty
+                    .known_specialization(db, env, KnownClass::Awaitable)?;
+            let [inner] = specialization.types(db) else {
+                return None;
+            };
+            TransparentCallableReturn::Awaitable(inner.as_typevar()?)
+        };
+        Some((paramspec, return_typevar))
+    }
+
+    pub(super) fn has_only_unknown_context(self) -> bool {
+        self.signatures.iter().all(|signature| {
+            let parameters = signature.parameters().as_slice();
+            (signature.return_ty.is_dynamic()
+                && parameters
+                    .iter()
+                    .all(|parameter| parameter.annotated_type().is_dynamic()))
+                || (parameters.is_empty()
+                    && matches!(
+                        signature.return_ty,
+                        Type::Dynamic(DynamicType::UnspecializedTypeVar)
+                    ))
+        })
+    }
+
+    pub(super) fn lambda_context(
+        self,
+        callable: CallableType<'db>,
+        tcx: TypeContext<'db>,
+    ) -> Option<super::infer::ContextualLambda<'db>> {
+        let [signature] = self.signatures.overloads.as_slice() else {
+            return None;
+        };
+        Some(super::infer::ContextualLambda::from_signature(
+            callable, signature, tcx,
+        ))
+    }
+
+    pub(super) fn total_ordering_method(self, db: &'db dyn Db) -> CallableType<'db> {
+        let env = self.env;
+        let bool_ty = KnownClass::Bool.to_instance(db, env);
+
+        let signatures =
+            CallableSignature::from_overloads(self.signatures.iter().map(|signature| {
+                // The generated methods return a union of the root method's return type
+                // and `bool`. This is because `@total_ordering` synthesizes methods like:
+                //     def __gt__(self, other): return not (self == other or self < other)
+                // If `__lt__` returns `int`, then `__gt__` could return `int | bool`.
+                let return_ty = UnionType::from_two_elements(db, env, signature.return_ty, bool_ty);
+                Signature::new_generic(
+                    signature.generic_context,
+                    signature.parameters().clone(),
+                    return_ty,
+                )
+            }));
+        CallableType::new(db, signatures, CallableTypeKind::FunctionLike)
+    }
+
+    pub(super) fn all_returns_awaitable(self, db: &'db dyn Db) -> bool {
+        let env = self.env;
+        // Gradual returns and Never do not establish that a call should be awaited.
+        let awaitable = KnownClass::Awaitable
+            .to_instance(db, env)
+            .top_materialization(db, env);
+        self.signatures.iter().all(|signature| {
+            !signature.return_ty.is_equivalent_to(db, env, Type::Never)
+                && signature.return_ty.is_subtype_of(db, env, awaitable)
+        })
+    }
+
+    pub(super) fn descriptor_setter_domain(
+        self,
+        db: &'db dyn Db,
+        self_ty: Type<'db>,
+        receiver_ty: Type<'db>,
+    ) -> Option<Type<'db>> {
+        super::attribute_write::signatures_setter_domain(
+            db,
+            self.env,
+            self.signatures,
+            self_ty,
+            receiver_ty,
+        )
+    }
+
+    pub(super) fn collect_generic_contexts(
+        self,
+        db: &'db dyn Db,
+        collector: &super::call::bind::GenericContextCollector<'_, 'db>,
+    ) {
+        collector.visit_signatures(db, self.signatures);
+    }
+
+    /// Return `true` if a callable has at least one overload and none return `Never`.
+    ///
+    /// Return-type disjointness is a pragmatic approximation for method members: a callable returning
+    /// `Never` could satisfy otherwise-incompatible signatures, so it must not establish disjointness.
+    pub(super) fn has_only_non_never_returns(&self, db: &'db dyn Db) -> bool {
+        let env = self.env;
+        let mut signatures = self.signatures.iter();
+        let Some(first) = signatures.next() else {
+            return false;
+        };
+        !first.return_ty.has_outer_type(db, env, |ty| ty.is_never())
+            && signatures.all(|signature| {
+                !signature
+                    .return_ty
+                    .has_outer_type(db, env, |ty| ty.is_never())
+            })
+    }
+
+    pub(super) fn compare_return_disjointness<'c>(
+        self,
+        db: &'db dyn Db,
+        target: ExpandedSignatures<'_, 'db>,
+        checker: &super::relation::DisjointnessChecker<'_, 'c, 'db>,
+    ) -> super::constraints::ConstraintSet<'db, 'c> {
+        let env = self.env;
+        // Disjointness distributes over unions. Comparing the overload arms directly
+        // avoids building and normalizing a union of recursive return types.
+        self.signatures
+            .iter()
+            .when_all(db, checker.constraints, |source| {
+                target
+                    .signatures
+                    .iter()
+                    .when_all(db, checker.constraints, |target| {
+                        let result =
+                            checker.check_type_pair(db, source.return_ty, target.return_ty);
+                        if let Some(context) = checker.report_context()
+                            && result.is_always_satisfied(db, env, checker.inferable)
+                        {
+                            context.push(ErrorContext::DisjointReturnTypes {
+                                left: source.return_ty,
+                                right: target.return_ty,
+                            });
+                        }
+                        result
+                    })
+            })
+    }
+
+    pub(super) fn display_callable(
+        self,
+        display: &super::display::DisplayCallableType<'_, 'db>,
+        writer: &mut super::display::TypeWriter<'_, '_, 'db>,
+    ) -> std::fmt::Result {
+        display.fmt_signatures(self.signatures, writer)
+    }
+
+    pub(super) fn display_bound_method(
+        self,
+        display: &super::display::DisplayRepresentation<'_, 'db>,
+        writer: &mut super::display::TypeWriter<'_, '_, 'db>,
+        function: FunctionType<'db>,
+        receiver: Type<'db>,
+        signature_receiver: Type<'db>,
+    ) -> std::fmt::Result {
+        display.fmt_bound_method_signatures(
+            self.signatures,
+            writer,
+            function,
+            receiver,
+            signature_receiver,
+        )
+    }
+
+    pub(super) fn bind_bound_method(
+        self,
+        db: &'db dyn Db,
+        bound_method: super::BoundMethodType<'db>,
+    ) -> super::Bindings<'db> {
+        let env = self.env;
+        let signature = self.signatures;
+
+        let self_instance = bound_method.self_instance(db);
+        let signature_receiver = bound_method.signature_receiver(db);
+        // Class-based protocol member lookup has already specialized the method for this
+        // receiver. Bake an implicit positional receiver into the signature instead of
+        // checking it structurally again during call inference.
+        let protocol_receiver_is_specialized = self_instance
+            .as_protocol_instance()
+            .is_some_and(|protocol| protocol.class_origin(db).is_some())
+            && signature
+                .overloads
+                .iter()
+                .all(Signature::has_implicit_positional_receiver_annotation);
+        // Synthesized signatures can contain `Self` without a function's generic
+        // context, so substitute it when capturing the receiver.
+        if bound_method.function(db).is_none()
+            || protocol_receiver_is_specialized
+            || signature_receiver != self_instance
+        {
+            let mut binding = CallableBinding::from_overloads(
+                Type::BoundMethod(bound_method),
+                signature.overloads.iter().cloned(),
+            )
+            .with_bound_type(signature_receiver);
+            binding.bake_bound_type_into_overloads(db, env);
+            binding.into()
+        } else {
+            // Solve exact receiver constraints before checking the other arguments, but
+            // retain the receiver itself for call inference and receiver diagnostics.
+            let overloads = signature.overloads.iter().flat_map(|overload| {
+                if overload.has_receiver_determined_method_typevar(db, env)
+                    && let Some(specialized) = overload.specialize_for_bound_receiver(
+                        db,
+                        env,
+                        self_instance,
+                        bound_method.typing_self_type(db, env),
+                    )
+                {
+                    specialized.overloads
+                } else {
+                    smallvec_inline![overload.clone()]
+                }
+            });
+
+            CallableBinding::from_overloads(Type::BoundMethod(bound_method), overloads)
+                .with_bound_type(self_instance)
+                .into()
+        }
+    }
+
+    pub(super) fn bindings(
+        self,
+        callable: Type<'db>,
+        receiver: Option<Type<'db>>,
+    ) -> super::Bindings<'db> {
+        let binding =
+            super::CallableBinding::from_overloads(callable, self.signatures.iter().cloned());
+        match receiver {
+            Some(receiver) => binding.with_bound_type(receiver).into(),
+            None => binding.into(),
+        }
+    }
+
+    pub(crate) fn return_behavior(self, db: &'db dyn Db) -> (bool, bool, bool) {
+        let mut none_return_never = true;
+        let mut all_return_never = true;
+        let mut any_generic = false;
+        for signature in self.signatures {
+            let returns_never = signature
+                .return_ty
+                .is_equivalent_to(db, self.env, Type::Never);
+            none_return_never &= !returns_never;
+            all_return_never &= returns_never;
+            any_generic |= signature.return_ty.has_typevar(db, self.env);
+        }
+        (none_return_never, all_return_never, any_generic)
+    }
+
+    pub(super) fn can_suppress_exceptions(self, db: &'db dyn Db, is_async: bool) -> bool {
+        let env = self.env;
+        let exception_type = KnownClass::BaseException.to_subclass_of(db, env);
+        let exception_instance = KnownClass::BaseException.to_instance(db, env);
+        for signature in self.signatures {
+            if signature
+                .parameters()
+                .get_positional(0)
+                .is_some_and(|parameter| {
+                    parameter
+                        .annotated_type()
+                        .is_disjoint_from(db, env, exception_type)
+                })
+                || signature
+                    .parameters()
+                    .get_positional(1)
+                    .is_some_and(|parameter| {
+                        parameter
+                            .annotated_type()
+                            .is_disjoint_from(db, env, exception_instance)
+                    })
+            {
+                continue;
+            }
+
+            let return_type = if is_async {
+                let Ok(awaited) = signature.return_ty.try_await(db, env) else {
+                    continue;
+                };
+                awaited
+            } else {
+                signature.return_ty
+            };
+
+            if return_type.is_equivalent_to(db, env, KnownClass::Bool.to_instance(db, env))
+                || return_type.is_equivalent_to(db, env, Type::bool_literal(true))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(super) fn compare<'c>(
+        self,
+        db: &'db dyn Db,
+        target: ExpandedSignatures<'_, 'db>,
+        checker: &super::relation::TypeRelationChecker<'_, 'c, 'db>,
+    ) -> super::constraints::ConstraintSet<'db, 'c> {
+        checker.check_callable_signature_pair(db, self.signatures, target.signatures)
+    }
+
+    pub(super) fn walk(self, db: &'db dyn Db, visitor: &(impl visitor::TypeVisitor<'db> + ?Sized)) {
+        for signature in self.signatures {
+            walk_signature(db, signature, visitor);
+        }
+    }
+
+    pub(super) fn collect_legacy_typevars(
+        self,
+        db: &'db dyn Db,
+        binding_context: Option<Definition<'db>>,
+        typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
+        visitor: &FindLegacyTypeVarsVisitor<'_, 'db>,
+    ) {
+        self.signatures
+            .find_legacy_typevars_impl(db, self.env, binding_context, typevars, visitor);
+    }
+
+    fn into_functools_partial_instance(self, db: &'db dyn Db) -> Type<'db> {
+        let return_ty = self
+            .signatures
+            .overload_return_type_or_unknown(db, self.env);
+        KnownClass::FunctoolsPartial.to_specialized_instance(db, self.env, &[return_ty])
+    }
+
+    pub(super) fn returns_non_subclass(self, db: &'db dyn Db, instance: Type<'db>) -> bool {
+        self.signatures
+            .iter()
+            .any(|signature| !signature.return_ty.is_assignable_to(db, self.env, instance))
+    }
+}
+
 impl<'db> CallableType<'db> {
     /// Construct a callable with explicit signatures and the given binding behavior.
     pub(crate) fn new<S>(db: &'db dyn Db, signatures: S, kind: CallableTypeKind) -> Self
@@ -995,14 +1499,19 @@ impl<'db> CallableType<'db> {
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
-        inspect: impl FnOnce(&CallableSignature<'db>) -> R,
+        inspect: impl FnOnce(ExpandedSignatures<'_, 'db>) -> R,
     ) -> Option<R> {
         let context = env.context();
         match self.signature_source(db) {
-            SignatureSource::Explicit(signatures) => Some(inspect(signatures)),
-            SignatureSource::Lambda(lambda) => {
-                context.expand_signature(db, env, self, || inspect(&lambda.signature(db, env)))
+            SignatureSource::Explicit(signatures) => {
+                Some(inspect(ExpandedSignatures { signatures, env }))
             }
+            SignatureSource::Lambda(lambda) => context.expand_signature(db, env, self, || {
+                inspect(ExpandedSignatures {
+                    signatures: &lambda.signature(db, env),
+                    env,
+                })
+            }),
         }
     }
 
@@ -1015,7 +1524,7 @@ impl<'db> CallableType<'db> {
         self,
         db: &'db dyn Db,
         expansion: &TypeExpansionContext<'_, '_, 'db, Mode>,
-        inspect: impl FnOnce(&CallableSignature<'db>) -> R,
+        inspect: impl FnOnce(ExpandedSignatures<'_, 'db>) -> R,
     ) -> Option<R> {
         let signatures = match self.signature_source(db) {
             SignatureSource::Explicit(signatures) => Cow::Borrowed(signatures),
@@ -1023,7 +1532,10 @@ impl<'db> CallableType<'db> {
                 expansion.expand_signature(db, self, |env| lambda.signature(db, env))?
             }
         };
-        Some(inspect(&signatures))
+        Some(inspect(ExpandedSignatures {
+            signatures: &signatures,
+            env: expansion.environment(),
+        }))
     }
 
     /// Start a complete signature inspection. Recursive consumers keep the supplied inspector.
@@ -1031,7 +1543,10 @@ impl<'db> CallableType<'db> {
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
-        inspect: impl FnOnce(&super::recursive::TypeInspector<'_, 'db>, &CallableSignature<'db>) -> R,
+        inspect: impl FnOnce(
+            &super::recursive::TypeInspector<'_, 'db>,
+            ExpandedSignatures<'_, 'db>,
+        ) -> R,
     ) -> Option<R> {
         super::recursive::TypeInspector::scope(env, |traversal| {
             traversal.inspect_signatures(db, self, |signatures| inspect(traversal, signatures))
@@ -1308,12 +1823,12 @@ impl<'db> CallableType<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
     ) -> Type<'db> {
-        let return_ty = self
-            .inspect_signatures(db, env, |signatures| {
-                signatures.overload_return_type_or_unknown(db, env)
-            })
-            .unwrap_or_else(Type::unknown);
-        KnownClass::FunctoolsPartial.to_specialized_instance(db, env, &[return_ty])
+        self.inspect_signatures(db, env, |signatures| {
+            signatures.into_functools_partial_instance(db)
+        })
+        .unwrap_or_else(|| {
+            KnownClass::FunctoolsPartial.to_specialized_instance(db, env, &[Type::unknown()])
+        })
     }
 
     /// Wraps this reduced callable as a synthetic `functools.partial(...)` instance type.
@@ -1440,14 +1955,13 @@ impl<'db> CallableType<'db> {
     pub(super) fn find_legacy_typevars_impl(
         self,
         db: &'db dyn Db,
-        env: &TypeOperations<'db>,
         binding_context: Option<Definition<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
         visitor: &FindLegacyTypeVarsVisitor<'_, 'db>,
     ) {
         visitor.visit_structure(db, Type::Callable(self), |expansion| {
             expansion.inspect_signatures(db, self, |signatures| {
-                signatures.find_legacy_typevars_impl(db, env, binding_context, typevars, visitor);
+                signatures.collect_legacy_typevars(db, binding_context, typevars, visitor);
             });
         });
     }
@@ -1533,7 +2047,7 @@ impl<'db> CallableTypes<'db> {
 
         for callable in self.0 {
             callable.inspect_signatures_root(db, env, |_, signatures| {
-                for signature in signatures {
+                for signature in signatures.signatures {
                     let signature = signature.clone();
                     let dedup_key = signature
                         .clone()

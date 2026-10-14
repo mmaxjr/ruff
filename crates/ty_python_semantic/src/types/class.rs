@@ -2519,9 +2519,7 @@ impl<'db> ClassType<'db> {
             let returns_non_subclass = bound_callables.iter().any(|callable| {
                 callable
                     .inspect_signatures_root(db, env, |_, signatures| {
-                        signatures.iter().any(|signature| {
-                            !signature.return_ty.is_assignable_to(db, env, instance_type)
-                        })
+                        signatures.returns_non_subclass(db, instance_type)
                     })
                     .unwrap_or(true)
             });

@@ -315,6 +315,10 @@ impl<'a, 'env, 'db, Mode> TypeExpansionContext<'a, 'env, 'db, Mode> {
 }
 
 impl<'db, Mode> TypeExpansionContext<'_, '_, 'db, Mode> {
+    pub(super) fn environment(&self) -> &TypeOperations<'db> {
+        self.mapping.env
+    }
+
     pub(super) fn alias_body(
         &self,
         db: &'db dyn Db,
@@ -345,7 +349,7 @@ impl<'db, Mode> TypeExpansionContext<'_, '_, 'db, Mode> {
         &self,
         db: &'db dyn Db,
         callable: CallableType<'db>,
-        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+        inspect: impl FnOnce(super::callable::ExpandedSignatures<'_, 'db>) -> R,
     ) -> Option<R> {
         callable.inspect_signatures_in_operation(db, self, inspect)
     }
@@ -793,7 +797,7 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         &self,
         db: &'db dyn Db,
         callable: CallableType<'db>,
-        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+        inspect: impl FnOnce(super::callable::ExpandedSignatures<'_, 'db>) -> R,
     ) -> Option<R> {
         callable.inspect_signatures(db, self.environment(), inspect)
     }
@@ -1012,7 +1016,7 @@ where
         &self,
         db: &'db dyn Db,
         callable: CallableType<'db>,
-        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+        inspect: impl FnOnce(super::callable::ExpandedSignatures<'_, 'db>) -> R,
     ) -> Option<R> {
         callable.inspect_signatures(db, self.environment(), inspect)
     }
@@ -1214,7 +1218,7 @@ impl<'env, 'db> TypeInspector<'env, 'db> {
         &self,
         db: &'db dyn Db,
         callable: CallableType<'db>,
-        inspect: impl FnOnce(&super::signatures::CallableSignature<'db>) -> R,
+        inspect: impl FnOnce(super::callable::ExpandedSignatures<'_, 'db>) -> R,
     ) -> Option<R> {
         self.traversal.inspect_signatures(db, callable, inspect)
     }

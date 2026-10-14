@@ -408,29 +408,27 @@ pub(super) struct TypeInferenceBuilder<'db, 'ast> {
     dataclass_field_specifiers: SmallVec<[Type<'db>; NUM_FIELD_SPECIFIERS_INLINE]>,
 }
 
+pub(in crate::types) enum TransparentCallableReturn<'db> {
+    TypeVar(BoundTypeVarInstance<'db>),
+    Awaitable(BoundTypeVarInstance<'db>),
+}
+
+impl<'db> TransparentCallableReturn<'db> {
+    fn matches(self, db: &'db dyn Db, other: Self) -> bool {
+        match (self, other) {
+            (Self::TypeVar(left), Self::TypeVar(right))
+            | (Self::Awaitable(left), Self::Awaitable(right)) => left.is_same_typevar_as(db, right),
+            _ => false,
+        }
+    }
+}
+
 fn transparent_callable_decorator_result<'db>(
     db: &'db dyn Db,
     env: &TypeOperations<'db>,
     bindings: &Bindings<'db>,
     decorated_ty: Type<'db>,
 ) -> Option<Type<'db>> {
-    enum TransparentCallableReturn<'db> {
-        TypeVar(BoundTypeVarInstance<'db>),
-        Awaitable(BoundTypeVarInstance<'db>),
-    }
-
-    impl<'db> TransparentCallableReturn<'db> {
-        fn matches(self, db: &'db dyn Db, other: Self) -> bool {
-            match (self, other) {
-                (Self::TypeVar(left), Self::TypeVar(right))
-                | (Self::Awaitable(left), Self::Awaitable(right)) => {
-                    left.is_same_typevar_as(db, right)
-                }
-                _ => false,
-            }
-        }
-    }
-
     fn callable_paramspec_and_return<'db>(
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
@@ -448,25 +446,7 @@ fn transparent_callable_decorator_result<'db>(
                 }
                 inspector
                     .inspect_signatures(db, callable, |signatures| {
-                        let [signature] = signatures.overloads.as_slice() else {
-                            return None;
-                        };
-                        let paramspec = signature.parameters().as_paramspec()?;
-                        let return_typevar = if let Some(typevar) = signature.return_ty.as_typevar()
-                        {
-                            TransparentCallableReturn::TypeVar(typevar)
-                        } else {
-                            let specialization = signature.return_ty.known_specialization(
-                                db,
-                                env,
-                                KnownClass::Awaitable,
-                            )?;
-                            let [inner] = specialization.types(db) else {
-                                return None;
-                            };
-                            TransparentCallableReturn::Awaitable(inner.as_typevar()?)
-                        };
-                        Some((paramspec, return_typevar))
+                        signatures.transparent_decorator_parameters(db)
                     })
                     .flatten()
             },
@@ -7031,18 +7011,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 // unspecialized variable from an enclosing generic call.
                 if inspector
                     .inspect_signatures(db, target_callable, |signatures| {
-                        signatures.iter().all(|signature| {
-                            let parameters = signature.parameters().as_slice();
-                            (signature.return_ty.is_dynamic()
-                                && parameters
-                                    .iter()
-                                    .all(|parameter| parameter.annotated_type().is_dynamic()))
-                                || (parameters.is_empty()
-                                    && matches!(
-                                        signature.return_ty,
-                                        Type::Dynamic(DynamicType::UnspecializedTypeVar)
-                                    ))
-                        })
+                        signatures.has_only_unknown_context()
                     })
                     .unwrap_or(false)
                 {
@@ -9123,25 +9092,21 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     let callable = ty.as_callable()?;
                     inspector
                         .inspect_signatures(db, callable, |signatures| {
-                            let [signature] = signatures.overloads.as_slice() else {
-                                // TODO: Infer against each overload when there is more than one.
-                                return None;
-                            };
-                            Some((callable, signature.clone()))
+                            signatures.lambda_context(callable, tcx)
                         })
                         .flatten()
                 },
             )
         });
 
-        let callable_tcx = contextual_callable.as_ref().map(|(_, signature)| signature);
+        let callable_tcx = contextual_callable.as_ref();
 
         // Extract the annotated parameter types.
         //
         // Note that `Callable` annotations are only valid for positional parameters.
         let mut parameter_types = match callable_tcx {
             None => [].iter(),
-            Some(signature) => signature.parameters().into_iter(),
+            Some(context) => context.parameters.iter(),
         }
         .map(|parameter| {
             let annotation = parameter.annotated_type();
@@ -9220,8 +9185,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         let scope = scope_id.to_scope_id(self.db(), self.program_file());
 
-        if let Some((source, lambda)) = contextual_callable.as_ref().and_then(|(callable, _)| {
-            callable.lambda_with_same_inputs(
+        if let Some((source, lambda)) = contextual_callable.as_ref().and_then(|context| {
+            context.callable.lambda_with_same_inputs(
                 db,
                 self.program_environment(),
                 scope,
@@ -9236,24 +9201,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
         // If we have a direct `Callable` type context, we can infer the body with the annotated
         // return type as type context.
-        let return_tcx = if let Some(signature) = callable_tcx {
-            match signature.return_ty {
-                // Unknown and provisional results supply no expected return type. Using them as
-                // inputs can alternate between different recursive inference queries.
-                Type::Dynamic(
-                    DynamicType::Unknown
-                    | DynamicType::UnspecializedTypeVar
-                    | DynamicType::UnknownLambdaParameter,
-                )
-                | Type::Divergent(_) => TypeContext::declared(None),
-                _ => tcx.with_annotation(Some(signature.return_ty)),
-            }
-        } else {
-            // TODO: Useful inference of a lambda's return type will require a different approach,
-            // which does the inference of the body expression based on arguments at each call site,
-            // rather than eagerly computing a return type without knowing the argument types.
-            TypeContext::declared(None)
-        };
+        let return_tcx = callable_tcx.map_or_else(
+            || TypeContext::declared(None),
+            |context| context.return_context,
+        );
 
         let input = LambdaSignature::new(
             db,
@@ -13825,3 +13776,34 @@ impl<'db, 'ast> TypeWalk<'db, &mut TypeInferenceBuilder<'db, 'ast>> for UnaryExp
         builder.infer_unary_expression_type_inner(self.op, ty, self.unary, traversal)
     }
 }
+
+pub(in crate::types) struct ContextualLambda<'db> {
+    callable: CallableType<'db>,
+    parameters: Parameters<'db>,
+    return_context: TypeContext<'db>,
+}
+
+impl<'db> ContextualLambda<'db> {
+    pub(in crate::types) fn from_signature(
+        callable: CallableType<'db>,
+        signature: &Signature<'db>,
+        tcx: TypeContext<'db>,
+    ) -> Self {
+        let return_context = match signature.return_ty {
+            Type::Dynamic(
+                DynamicType::Unknown
+                | DynamicType::UnspecializedTypeVar
+                | DynamicType::UnknownLambdaParameter,
+            )
+            | Type::Divergent(_) => TypeContext::declared(None),
+            _ => tcx.with_annotation(Some(signature.return_ty)),
+        };
+        Self {
+            callable,
+            parameters: signature.parameters().clone(),
+            return_context,
+        }
+    }
+}
+
+pub(in crate::types) use post_inference::OverloadInconsistency;
