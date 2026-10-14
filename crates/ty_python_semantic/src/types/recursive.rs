@@ -2522,8 +2522,14 @@ impl RecursiveSubstitution<'_> {
 }
 
 /// Identifies a recursive binder or a deferred value projection.
+///
+/// Salsa generates public constructors for interned structs. Keeping this identity opaque
+/// prevents callers from constructing recursive variables or bodies outside this module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RecursiveCycle {
+pub struct RecursiveCycle(RecursiveCycleKind);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum RecursiveCycleKind {
     Alias(salsa::Id),
     TypedDictValues(salsa::Id),
 }
@@ -2532,8 +2538,8 @@ impl get_size2::GetSize for RecursiveCycle {}
 
 impl RecursiveCycle {
     fn id(self) -> salsa::Id {
-        match self {
-            Self::Alias(id) | Self::TypedDictValues(id) => id,
+        match self.0 {
+            RecursiveCycleKind::Alias(id) | RecursiveCycleKind::TypedDictValues(id) => id,
         }
     }
 }
@@ -2615,7 +2621,7 @@ impl<'db> RecursiveType<'db> {
         cycle: salsa::Id,
         parameters: Option<GenericContext<'db>>,
     ) -> Self {
-        let cycle = RecursiveCycle::Alias(cycle);
+        let cycle = RecursiveCycle(RecursiveCycleKind::Alias(cycle));
         let arguments = parameters.map(|parameters| parameters.identity_specialization(db));
         Self::new_internal(
             db,
@@ -2636,7 +2642,7 @@ impl<'db> RecursiveType<'db> {
         Some(Self::new_internal(
             db,
             definition,
-            RecursiveCycle::TypedDictValues(definition.as_id()),
+            RecursiveCycle(RecursiveCycleKind::TypedDictValues(definition.as_id())),
             RecursiveBody::TypedDictValues(origin),
             arguments,
             None,
