@@ -4425,40 +4425,30 @@ def compare(integer_factory: TypeOf[integers], object_factory: TypeOf[objects], 
 
 ## Branching callbacks with equivalent signatures
 
-Each callback returns two specializations of the preceding callback. The type argument does not
-affect their eventual integer result, so both branches have the same signature. The repeated levels
-check that comparing these callbacks does not require expanding every combination of type arguments.
+Each callback returns four specializations of the preceding callback. The type argument does not
+affect their eventual integer result, so all four have the same signature. Ten levels have over a
+million paths to the integer result; comparing the callbacks reuses their equivalent signatures.
 
 ```py
 from typing import Callable, Generic, TypeAlias, TypeVar
 
-Callback: TypeAlias = Callable[[], "int | tuple[Callback, Callback]"]
+Callback: TypeAlias = Callable[[], "int | tuple[Callback, Callback, Callback, Callback]"]
 T = TypeVar("T")
 
-class Branch(Generic[T]):
+class Node(Generic[T]):
     f0 = lambda: 0
-    f1 = lambda: (Branch[tuple[T]].f0, Branch[list[T]].f0)
-    f2 = lambda: (Branch[tuple[T]].f1, Branch[list[T]].f1)
-    f3 = lambda: (Branch[tuple[T]].f2, Branch[list[T]].f2)
-    f4 = lambda: (Branch[tuple[T]].f3, Branch[list[T]].f3)
-    f5 = lambda: (Branch[tuple[T]].f4, Branch[list[T]].f4)
-    f6 = lambda: (Branch[tuple[T]].f5, Branch[list[T]].f5)
-    f7 = lambda: (Branch[tuple[T]].f6, Branch[list[T]].f6)
-    f8 = lambda: (Branch[tuple[T]].f7, Branch[list[T]].f7)
-    f9 = lambda: (Branch[tuple[T]].f8, Branch[list[T]].f8)
-    f10 = lambda: (Branch[tuple[T]].f9, Branch[list[T]].f9)
-    f11 = lambda: (Branch[tuple[T]].f10, Branch[list[T]].f10)
-    f12 = lambda: (Branch[tuple[T]].f11, Branch[list[T]].f11)
-    f13 = lambda: (Branch[tuple[T]].f12, Branch[list[T]].f12)
-    f14 = lambda: (Branch[tuple[T]].f13, Branch[list[T]].f13)
-    f15 = lambda: (Branch[tuple[T]].f14, Branch[list[T]].f14)
-    f16 = lambda: (Branch[tuple[T]].f15, Branch[list[T]].f15)
-    f17 = lambda: (Branch[tuple[T]].f16, Branch[list[T]].f16)
-    f18 = lambda: (Branch[tuple[T]].f17, Branch[list[T]].f17)
-    f19 = lambda: (Branch[tuple[T]].f18, Branch[list[T]].f18)
-    f20 = lambda: (Branch[tuple[T]].f19, Branch[list[T]].f19)
+    f1 = lambda: (Node[tuple[T]].f0, Node[list[T]].f0, Node[set[T]].f0, Node[frozenset[T]].f0)
+    f2 = lambda: (Node[tuple[T]].f1, Node[list[T]].f1, Node[set[T]].f1, Node[frozenset[T]].f1)
+    f3 = lambda: (Node[tuple[T]].f2, Node[list[T]].f2, Node[set[T]].f2, Node[frozenset[T]].f2)
+    f4 = lambda: (Node[tuple[T]].f3, Node[list[T]].f3, Node[set[T]].f3, Node[frozenset[T]].f3)
+    f5 = lambda: (Node[tuple[T]].f4, Node[list[T]].f4, Node[set[T]].f4, Node[frozenset[T]].f4)
+    f6 = lambda: (Node[tuple[T]].f5, Node[list[T]].f5, Node[set[T]].f5, Node[frozenset[T]].f5)
+    f7 = lambda: (Node[tuple[T]].f6, Node[list[T]].f6, Node[set[T]].f6, Node[frozenset[T]].f6)
+    f8 = lambda: (Node[tuple[T]].f7, Node[list[T]].f7, Node[set[T]].f7, Node[frozenset[T]].f7)
+    f9 = lambda: (Node[tuple[T]].f8, Node[list[T]].f8, Node[set[T]].f8, Node[frozenset[T]].f8)
+    f10 = lambda: (Node[tuple[T]].f9, Node[list[T]].f9, Node[set[T]].f9, Node[frozenset[T]].f9)
 
-callback: Callback = Branch[int].f20  # no diagnostic
+callback: Callback = Node[int].f10  # no diagnostic
 ```
 
 ## Specialized lambda parameter types
