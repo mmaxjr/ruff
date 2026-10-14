@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use super::context::InferContext;
 use super::{
     ClassType, CycleKind, Signature, Type, TypeContext, TypeQuery, TypeQueryContext, UnionType,
@@ -229,7 +231,7 @@ impl<'db> Type<'db> {
         left_ty: Type<'db>,
         op: ast::Operator,
         right_ty: Type<'db>,
-    ) -> Option<&'db BinaryOperationResult<'db>> {
+    ) -> Option<Cow<'db, BinaryOperationResult<'db>>> {
         #[salsa::tracked(returns(ref), cycle_initial=|_, _, _, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
         fn try_call_bin_op_result_impl<'db>(
             db: &'db dyn Db,
@@ -239,18 +241,38 @@ impl<'db> Type<'db> {
             right_ty: Type<'db>,
         ) -> Option<BinaryOperationResult<'db>> {
             let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            Type::try_call_bin_op(db, env, left_ty, op, right_ty)
-                .ok()
-                .map(|bindings| BinaryOperationResult {
-                    return_type: bindings.return_type(db, env),
-                    deprecated_functions: bindings
-                        .deprecated_functions(db)
-                        .map(|(_, function)| function)
-                        .collect(),
-                })
+            Type::compute_binary_operation_result(db, env, left_ty, op, right_ty)
         }
 
-        try_call_bin_op_result_impl(db, env.program(db), left_ty, op, right_ty).as_ref()
+        env.cached_query(
+            || {
+                try_call_bin_op_result_impl(db, env.program(db), left_ty, op, right_ty)
+                    .as_ref()
+                    .map(Cow::Borrowed)
+            },
+            || {
+                Self::compute_binary_operation_result(db, env, left_ty, op, right_ty)
+                    .map(Cow::Owned)
+            },
+        )
+    }
+
+    fn compute_binary_operation_result(
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        left_ty: Type<'db>,
+        op: ast::Operator,
+        right_ty: Type<'db>,
+    ) -> Option<BinaryOperationResult<'db>> {
+        Type::try_call_bin_op(db, env, left_ty, op, right_ty)
+            .ok()
+            .map(|bindings| BinaryOperationResult {
+                return_type: bindings.return_type(db, env),
+                deprecated_functions: bindings
+                    .deprecated_functions(db)
+                    .map(|(_, function)| function)
+                    .collect(),
+            })
     }
 
     pub(crate) fn try_call_bin_op(

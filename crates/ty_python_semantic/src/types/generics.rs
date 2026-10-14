@@ -2687,10 +2687,10 @@ impl<'db> TypeVarInference<'db> {
             inference.merged_specialization_with(db, &env, |_, _| None)
         }
 
-        if env.context().is_active() {
-            return self.merged_specialization_with(db, env, |_, _| None);
-        }
-        merged_specialization_inner(db, self)
+        env.cached_query(
+            || merged_specialization_inner(db, self),
+            || self.merged_specialization_with(db, env, |_, _| None),
+        )
     }
 
     /// Project the merged inference result into a specialization with explicit handling for each

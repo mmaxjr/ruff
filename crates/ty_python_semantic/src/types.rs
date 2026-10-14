@@ -482,10 +482,6 @@ impl<'db> TypeRecursionContext<'db> {
         &self.state().meta_type
     }
 
-    fn is_active(&self) -> bool {
-        self.state().operation.is_active()
-    }
-
     /// Compare two types for simplification. Nested builders retain their members until this
     /// comparison finishes, so signature substitution cannot restart it with new type arguments.
     fn compare_for_simplification(
@@ -4297,29 +4293,40 @@ impl<'db> Type<'db> {
         name: &str,
         policy: MemberLookupPolicy,
     ) -> PlaceAndQualifiers<'db> {
-        Self::class_member_with_policy_inner(
-            db,
-            MemberLookupKey::new(db, env.program(db), self, name, policy),
+        #[salsa::tracked(
+            returns(copy),
+            cycle_initial=|_, id, _| Place::bound(Type::divergent(id)).into(),
+            cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, member: PlaceAndQualifiers<'db>, key: MemberLookupKey<'db>| {
+                member.cycle_normalized(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(key.program(db))), *previous, cycle)
+            },
+            heap_size=ruff_memory_usage::heap_size
+        )]
+        fn class_member_with_policy_inner<'db>(
+            db: &'db dyn Db,
+            key: MemberLookupKey<'db>,
+        ) -> PlaceAndQualifiers<'db> {
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_program(key.program(db)),
+            );
+            Type::class_member_with_policy_impl(db, &env, key)
+        }
+        let key = MemberLookupKey::new(db, env.program(db), self, name, policy);
+        env.cached_query(
+            || class_member_with_policy_inner(db, key),
+            || Self::class_member_with_policy_impl(db, env, key),
         )
     }
 
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, id, _| Place::bound(Type::divergent(id)).into(),
-        cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, member: PlaceAndQualifiers<'db>, key: MemberLookupKey<'db>| {
-            member.cycle_normalized(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(key.program(db))), *previous, cycle)
-        },
-        heap_size=ruff_memory_usage::heap_size
-    )]
-    fn class_member_with_policy_inner(
+    fn class_member_with_policy_impl(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         key: MemberLookupKey<'db>,
     ) -> PlaceAndQualifiers<'db> {
         let ty = key.ty(db);
         let name = key.name(db);
         let policy = key.policy(db);
-        let program = key.program(db);
-        let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        let env = &env.in_environment(ProgramEnvironment::from_program(key.program(db)));
 
         tracing::trace!("class_member: {}.{}", ty.display(db, env), name);
         if let Some(fallback) = ty.materialized_divergent_fallback() {
@@ -4457,7 +4464,7 @@ impl<'db> Type<'db> {
             }
         }
 
-        Self::class_member_with_policy_inner(db, key)
+        ty.class_member_with_policy(db, env, key.name(db), key.policy(db))
     }
 
     /// Look up attributes stored in the namespace of a class object.
@@ -6781,13 +6788,13 @@ impl<'db> Type<'db> {
         }
 
         let key = MemberLookupKey::new(db, env.program(db), self, name, policy);
-        if env.context().is_active() {
-            return lookup_member(db, env, key, receiver);
-        }
-        match receiver {
-            Some(receiver) => member_lookup_with_policy_and_receiver_inner(db, key, receiver),
-            None => member_lookup_with_policy_inner(db, key),
-        }
+        env.cached_query(
+            || match receiver {
+                Some(receiver) => member_lookup_with_policy_and_receiver_inner(db, key, receiver),
+                None => member_lookup_with_policy_inner(db, key),
+            },
+            || lookup_member(db, env, key, receiver),
+        )
     }
 
     /// Return the type of `len()` on a type if it is known more precisely than `int`,

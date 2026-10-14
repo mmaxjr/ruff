@@ -1842,28 +1842,32 @@ fn simplify_intersection_pair<'db>(
         };
     }
 
-    if !context.is_active() {
-        return simplify_intersection_pair_query(
-            db,
-            TypePair::new(db, env.program(db), first, second),
-            polarity,
-        );
-    }
-    if !context.state().normalization.is_empty() {
-        return IntersectionSimplification::Unchanged;
-    }
-    // An unfinished comparison cannot justify removing either intersection element.
-    context
-        .state()
-        .intersections
-        .get_or_init(|| Box::new(CycleDetector::new(())))
-        .try_visit_active(
-            db,
-            env,
-            (first, (env.program(db), polarity), second),
-            || compute_intersection_simplification(db, env, first, second, polarity),
-        )
-        .unwrap_or(IntersectionSimplification::Unchanged)
+    env.cached_query(
+        || {
+            simplify_intersection_pair_query(
+                db,
+                TypePair::new(db, env.program(db), first, second),
+                polarity,
+            )
+        },
+        || {
+            if !context.state().normalization.is_empty() {
+                return IntersectionSimplification::Unchanged;
+            }
+            // An unfinished comparison cannot justify removing either intersection element.
+            context
+                .state()
+                .intersections
+                .get_or_init(|| Box::new(CycleDetector::new(())))
+                .try_visit_active(
+                    db,
+                    env,
+                    (first, (env.program(db), polarity), second),
+                    || compute_intersection_simplification(db, env, first, second, polarity),
+                )
+                .unwrap_or(IntersectionSimplification::Unchanged)
+        },
+    )
 }
 
 /// Simplify a pair of intersection elements using non-circular relation checks.

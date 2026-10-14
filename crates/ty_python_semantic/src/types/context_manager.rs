@@ -148,7 +148,18 @@ impl<'db> Type<'db> {
             })
         }
 
-        can_suppress_exceptions_impl(db, env.program(db), self, mode.is_async())
+        env.cached_query(
+            || can_suppress_exceptions_impl(db, env.program(db), self, mode.is_async()),
+            || {
+                TypeQueryContext::with_root(
+                    env,
+                    CanSuppressExceptions {
+                        is_async: mode.is_async(),
+                    },
+                    |traversal| traversal.visit(db, self),
+                )
+            },
+        )
     }
 
     /// Returns the type bound from a context manager with type `self`.

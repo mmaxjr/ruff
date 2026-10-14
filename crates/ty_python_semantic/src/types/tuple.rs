@@ -308,11 +308,10 @@ impl<'db> TupleType<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
     ) -> ClassType<'db> {
-        if env.context().is_active() {
-            self.to_class_type_impl(db, env)
-        } else {
-            self.cached_class_type(db)
-        }
+        env.cached_query(
+            || self.cached_class_type(db),
+            || self.to_class_type_impl(db, env),
+        )
     }
 
     // N.B. If this method is not Salsa-tracked, we take 10 minutes to check

@@ -105,6 +105,20 @@ impl<'db> TypeOperations<'db> {
         }
     }
 
+    /// Use a global query only when no enclosing recursive operation can affect its result.
+    /// Nested work computes with the caller's existing owner.
+    pub(super) fn cached_query<R>(
+        &self,
+        cached: impl FnOnce() -> R,
+        local: impl FnOnce() -> R,
+    ) -> R {
+        if self.context.state().operation.is_active() {
+            local()
+        } else {
+            cached()
+        }
+    }
+
     /// Read source metadata from another environment without replacing the active operation.
     pub(crate) fn in_environment(&self, env: ProgramEnvironment<'db>) -> Self {
         Self {
@@ -131,7 +145,7 @@ pub(super) struct OperationState {
 }
 
 impl OperationState {
-    pub(super) fn is_active(&self) -> bool {
+    fn is_active(&self) -> bool {
         self.depth.get() != 0
     }
 }
