@@ -18,7 +18,7 @@ use crate::place::PlaceAndQualifiers;
 use crate::types::constraints::{
     ConstraintSet, ConstraintSetBuilder, IteratorConstraintsExtension, OwnedConstraintSet,
 };
-use crate::types::cyclic::{ActiveRecursionDetector, TypeIdentity};
+use crate::types::cyclic::{ActiveRecursionDetector, CycleDetector, CycleKind, TypeIdentity};
 use crate::types::enums::is_single_member_enum;
 use crate::types::generics::{walk_specialization, walk_specialization_types};
 use crate::types::protocol_class::{
@@ -530,6 +530,31 @@ impl<'db> From<NominalInstanceType<'db>> for Type<'db> {
     }
 }
 
+/// Protocol queries have distinct cycle policies but share the consuming operation's guards.
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub(super) enum ProtocolQuery {
+    Materialization,
+    ObjectEquivalence,
+    FiniteConstraints,
+}
+
+fn with_protocol_query<'db, R>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    key: (Type<'db>, ProtocolQuery, Type<'db>),
+    on_cycle: impl FnOnce(CycleKind) -> R,
+    compute: impl FnOnce() -> R,
+) -> R {
+    env.context()
+        .state()
+        .protocol_queries
+        .get_or_init(|| Box::new(CycleDetector::new(())))
+        .visit_active(db, env, key, |cycle| match cycle {
+            Some(kind) => on_cycle(kind),
+            None => compute(),
+        })
+}
+
 /// Conservatively prove that materialization leaves a protocol's requirements unchanged.
 ///
 /// A `true` result permits ignoring materialization when comparing this protocol. A `false`
@@ -538,25 +563,50 @@ impl<'db> From<NominalInstanceType<'db>> for Type<'db> {
 /// First inspect the specialized interface directly. If that is inconclusive, inspect the
 /// interface using the protocol's own type parameters to handle growing specializations.
 ///
-/// The interface must be read inside this query. If a dependency is provisional during Salsa cycle
-/// recovery, `cycle_result` prevents an incomplete interface from being used as a proof; the
-/// structural comparison remains available as a fallback.
-#[salsa::tracked(
-    returns(copy),
-    cycle_result=|_, _, _, _| false,
-    heap_size=ruff_memory_usage::heap_size,
-)]
+/// A recursive proof cannot establish that requirements are unchanged. The operation guard
+/// rejects re-entry, and the global cache also rejects provisional Salsa cycle results. Structural
+/// comparison remains available when this proof is inconclusive.
 fn protocol_materialization_is_noop<'db>(
     db: &'db dyn Db,
-    program: crate::Program<'db>,
+    env: &TypeOperations<'db>,
     class: ProtocolClass<'db>,
 ) -> bool {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-    protocol_materialization_is_noop_by_inspection(
-        db,
-        &env,
-        ProtocolInstanceType::from_class(class),
-    ) || protocol_materialization_is_noop_with_type_parameters(db, &env, class)
+    #[salsa::tracked(
+        returns(copy),
+        cycle_result=|_, _, _, _| false,
+        heap_size=ruff_memory_usage::heap_size,
+    )]
+    fn cached<'db>(
+        db: &'db dyn Db,
+        program: crate::Program<'db>,
+        class: ProtocolClass<'db>,
+    ) -> bool {
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        compute(db, &env, class)
+    }
+
+    fn compute<'db>(db: &'db dyn Db, env: &TypeOperations<'db>, class: ProtocolClass<'db>) -> bool {
+        let protocol = ProtocolInstanceType::from_class(class);
+        with_protocol_query(
+            db,
+            env,
+            (
+                Type::ProtocolInstance(protocol),
+                ProtocolQuery::Materialization,
+                Type::object(),
+            ),
+            |_| false,
+            || {
+                protocol_materialization_is_noop_by_inspection(db, env, protocol)
+                    || protocol_materialization_is_noop_with_type_parameters(db, env, class)
+            },
+        )
+    }
+
+    env.cached_query(
+        || cached(db, env.program(db), class),
+        || compute(db, env, class),
+    )
 }
 
 /// Prove by inspecting its member types that materialization leaves `protocol` unchanged.
@@ -625,8 +675,7 @@ fn protocol_materialization_is_noop_by_inspection<'db>(
 /// annotations must be direct, unmaterialized specializations of the same protocol, and are only
 /// supported for method-only interfaces. Other cases fall back to structural comparison.
 ///
-/// This must be called from `protocol_materialization_is_noop` so that `cycle_result`
-/// rejects provisional interface results.
+/// This is part of `protocol_materialization_is_noop`, whose guards reject incomplete proofs.
 fn protocol_materialization_is_noop_with_type_parameters<'db>(
     db: &'db dyn Db,
     env: &TypeOperations<'db>,
@@ -920,7 +969,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             // For the same specialization, unchanged requirements settle the relationship.
             if source != protocol
                 && source_origin == target_origin
-                && protocol_materialization_is_noop(db, self.env.program(db), source_origin)
+                && protocol_materialization_is_noop(db, self.env, source_origin)
             {
                 return self.always();
             }
@@ -930,7 +979,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
             // it can make the cycle guard reject distinct specializations that stabilize.
             if source.materialization_kind(db).is_some()
                 && source.interface(db, self.env).has_only_methods(db)
-                && protocol_materialization_is_noop(db, self.env.program(db), source_origin)
+                && protocol_materialization_is_noop(db, self.env, source_origin)
             {
                 return self.check_type_pair(
                     db,
@@ -1095,7 +1144,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         // `Any` member. Only use the nominal proof when the pending wrappers are harmless.
         for protocol in [source, target] {
             if let Some(origin) = protocol.materialized_origin(db)
-                && !protocol_materialization_is_noop(db, self.env.program(db), origin)
+                && !protocol_materialization_is_noop(db, self.env, origin)
             {
                 return None;
             }
@@ -1300,6 +1349,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         let target_interface = protocol.interface(db, env);
         let target_non_recursive = non_recursive_protocol_interface(
             db,
+            env,
             target_interface.base(),
             identity_protocol,
             Type::ProtocolInstance(protocol),
@@ -1453,9 +1503,9 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
 ///     def value(self) -> T | int: ...
 ///     def child(self) -> P[list[T]]: ...
 /// ```
-#[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
 fn non_recursive_protocol_interface<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     interface: ProtocolInterface<'db>,
     protocol: ProtocolClass<'db>,
     receiver_ty: Type<'db>,
@@ -1520,10 +1570,9 @@ fn non_recursive_protocol_interface<'db>(
         }
     }
 
-    let env = TypeOperations::for_inference(
-        db,
-        ProgramEnvironment::from_file(protocol.class_literal(db).program_file(db)),
-    );
+    let env = env.in_environment(ProgramEnvironment::from_file(
+        protocol.class_literal(db).program_file(db),
+    ));
     interface.filter_members(db, |member| {
         let visitor = ProtocolReferenceFinder {
             env: &env,
@@ -1542,41 +1591,75 @@ fn non_recursive_protocol_interface<'db>(
 /// The target view retains its materialization, so readable and writable members are still
 /// materialized in their respective variance positions. The complete target protocol must be
 /// checked separately after generic inference.
-#[salsa::tracked(
-    returns(ref),
-    cycle_initial = |_, _, _, _| OwnedConstraintSet::always(),
-    heap_size = ruff_memory_usage::heap_size,
-)]
 fn non_recursive_protocol_constraints<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     source: ProtocolInstanceType<'db>,
+    target_protocol: ProtocolInstanceType<'db>,
     target: ProtocolInterfaceView<'db>,
-) -> OwnedConstraintSet<'db> {
-    let env = TypeOperations::for_inference(
-        db,
-        ProgramEnvironment::from_program(target.base().program(db)),
-    );
-    let constraints = ConstraintSetBuilder::new();
-    constraints.into_owned(|constraints| {
-        let relation_visitor = HasRelationToVisitor::default(constraints);
-        let disjointness_visitor = IsDisjointVisitor::default(constraints);
-        let signature_relation_visitor = SignatureRelationVisitor::default();
-        let materialization_visitor = ApplyTypeMappingVisitor::new(&env);
-        let checker = TypeRelationChecker::constraint_set_assignability(
-            &env,
-            constraints,
-            &relation_visitor,
-            &disjointness_visitor,
-            &signature_relation_visitor,
-            &materialization_visitor,
-        );
-        checker.check_protocol_interface_pair(
+) -> Cow<'db, OwnedConstraintSet<'db>> {
+    #[salsa::tracked(
+        returns(ref),
+        cycle_initial = |_, _, _, _| OwnedConstraintSet::always(),
+        heap_size = ruff_memory_usage::heap_size,
+    )]
+    fn cached<'db>(
+        db: &'db dyn Db,
+        source: ProtocolInstanceType<'db>,
+        target: ProtocolInterfaceView<'db>,
+    ) -> OwnedConstraintSet<'db> {
+        let env = TypeOperations::for_inference(
             db,
-            Type::ProtocolInstance(source),
-            source.interface(db, &env),
-            target,
-        )
-    })
+            ProgramEnvironment::from_program(target.base().program(db)),
+        );
+        compute(db, &env, source, target)
+    }
+
+    fn compute<'db>(
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        source: ProtocolInstanceType<'db>,
+        target: ProtocolInterfaceView<'db>,
+    ) -> OwnedConstraintSet<'db> {
+        let constraints = ConstraintSetBuilder::new();
+        constraints.into_owned(|constraints| {
+            let relation_visitor = HasRelationToVisitor::default(constraints);
+            let disjointness_visitor = IsDisjointVisitor::default(constraints);
+            let signature_relation_visitor = SignatureRelationVisitor::default();
+            let materialization_visitor = ApplyTypeMappingVisitor::new(env);
+            let checker = TypeRelationChecker::constraint_set_assignability(
+                env,
+                constraints,
+                &relation_visitor,
+                &disjointness_visitor,
+                &signature_relation_visitor,
+                &materialization_visitor,
+            );
+            checker.check_protocol_interface_pair(
+                db,
+                Type::ProtocolInstance(source),
+                source.interface(db, env),
+                target,
+            )
+        })
+    }
+
+    env.cached_query(
+        || Cow::Borrowed(cached(db, source, target)),
+        || {
+            Cow::Owned(with_protocol_query(
+                db,
+                env,
+                (
+                    Type::ProtocolInstance(source),
+                    ProtocolQuery::FiniteConstraints,
+                    Type::ProtocolInstance(target_protocol),
+                ),
+                |_| OwnedConstraintSet::always(),
+                || compute(db, env, source, target),
+            ))
+        },
+    )
 }
 
 impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
@@ -1988,14 +2071,22 @@ impl<'db> ProtocolInstanceType<'db> {
         env: &TypeOperations<'db>,
     ) -> bool {
         #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, _, ()| true, heap_size=ruff_memory_usage::heap_size)]
-        fn is_equivalent_to_object_inner<'db>(
+        fn cached<'db>(
             db: &'db dyn Db,
             program: crate::Program<'db>,
             protocol: ProtocolInstanceType<'db>,
             _: (),
         ) -> bool {
             let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            let interface = protocol.interface(db, &env);
+            compute(db, &env, protocol)
+        }
+
+        fn compute<'db>(
+            db: &'db dyn Db,
+            env: &TypeOperations<'db>,
+            protocol: ProtocolInstanceType<'db>,
+        ) -> bool {
+            let interface = protocol.interface(db, env);
 
             // Neither hashability nor instance-dictionary storage is guaranteed for every object.
             // Subclasses can replace `object.__hash__` with `None`, while slotted instances can
@@ -2010,9 +2101,9 @@ impl<'db> ProtocolInstanceType<'db> {
             let relation_visitor = HasRelationToVisitor::default(&constraints);
             let disjointness_visitor = IsDisjointVisitor::default(&constraints);
             let signature_relation_visitor = SignatureRelationVisitor::default();
-            let materialization_visitor = ApplyTypeMappingVisitor::new(&env);
+            let materialization_visitor = ApplyTypeMappingVisitor::new(env);
             let checker = TypeRelationChecker::subtyping(
-                &env,
+                env,
                 &constraints,
                 TypeVarSet::None,
                 &relation_visitor,
@@ -2022,10 +2113,25 @@ impl<'db> ProtocolInstanceType<'db> {
             );
             checker
                 .check_type_satisfies_protocol(db, Type::object(), protocol)
-                .is_always_satisfied(db, &env, TypeVarSet::None)
+                .is_always_satisfied(db, env, TypeVarSet::None)
         }
 
-        is_equivalent_to_object_inner(db, env.program(db), self, ())
+        env.cached_query(
+            || cached(db, env.program(db), self, ()),
+            || {
+                with_protocol_query(
+                    db,
+                    env,
+                    (
+                        Type::object(),
+                        ProtocolQuery::ObjectEquivalence,
+                        Type::ProtocolInstance(self),
+                    ),
+                    |kind| kind == CycleKind::Exact,
+                    || compute(db, env, self),
+                )
+            },
+        )
     }
 
     pub(super) fn recursive_type_normalized_impl(
@@ -2156,21 +2262,29 @@ impl<'db> ProtocolInstanceType<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
         target: Self,
-    ) -> Option<&'db OwnedConstraintSet<'db>> {
+    ) -> Option<Cow<'db, OwnedConstraintSet<'db>>> {
         let origin = target.class_origin(db)?;
         let interface = target.interface(db, env);
         let non_recursive = non_recursive_protocol_interface(
             db,
+            env,
             interface.base(),
             origin,
             Type::ProtocolInstance(target),
         );
-        let target = ProtocolInterfaceView::new(non_recursive, interface.materialization_kind());
-        if target.member_count(db) == 0 {
+        let target_view =
+            ProtocolInterfaceView::new(non_recursive, interface.materialization_kind());
+        if target_view.member_count(db) == 0 {
             return None;
         }
 
-        Some(non_recursive_protocol_constraints(db, self, target))
+        Some(non_recursive_protocol_constraints(
+            db,
+            env,
+            self,
+            target,
+            target_view,
+        ))
     }
 }
 

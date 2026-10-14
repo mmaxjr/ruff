@@ -4712,11 +4712,9 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                                         Type::ProtocolInstance(target),
                                     )
                             } else {
-                                Cow::Borrowed(
-                                    source.when_non_recursive_members_assignable_to_owned(
-                                        db, self.env, target,
-                                    )?,
-                                )
+                                source.when_non_recursive_members_assignable_to_owned(
+                                    db, self.env, target,
+                                )?
                             };
                             let next = self.constraints.load(db, self.env, &when);
                             Some(combined.intersect(db, self.constraints, next))

@@ -552,7 +552,7 @@ impl<'db> TypeRecursionContext<'db> {
     }
 }
 
-type TypeRecursionRevision = [u64; 13];
+type TypeRecursionRevision = [u64; 14];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
@@ -563,6 +563,7 @@ impl TypeRecursionContext<'_> {
             function_normalization,
             lambda_captures,
             lambda_return_dependencies,
+            protocol_queries,
             meta_type:
                 MetaTypeRecursion {
                     aliases,
@@ -583,6 +584,7 @@ impl TypeRecursionContext<'_> {
             lambda_return_dependencies
                 .get()
                 .map_or(0, |guard| guard.revision()),
+            protocol_queries.get().map_or(0, |guard| guard.revision()),
             aliases.revision(),
             growing_aliases.revision(),
             typevars.revision(),
@@ -604,6 +606,7 @@ struct TypeRecursionState<'db> {
     function_normalization: ActiveRecursionDetector<(salsa::Id, bool)>,
     lambda_captures: OnceCell<Box<CycleDetector<'db, (), Type<'db>, (), 1>>>,
     lambda_return_dependencies: OnceCell<Box<CycleDetector<'db, (), Type<'db>, (), 1>>>,
+    protocol_queries: OnceCell<Box<ProtocolQueryRecursion<'db>>>,
     operation: operations::OperationState,
     meta_type: MetaTypeRecursion<'db>,
     normalization: ActiveRecursionDetector<()>,
@@ -617,6 +620,9 @@ struct TypeRecursionState<'db> {
 
 struct SignatureExpansionTag;
 type SignatureExpansionRecursion<'db> = CycleDetector<'db, SignatureExpansionTag, Type<'db>, (), 2>;
+
+type ProtocolQueryRecursion<'db> =
+    CycleDetector<'db, (), (Type<'db>, instance::ProtocolQuery, Type<'db>), (), 1>;
 
 struct RedundancyRecursionTag;
 type RedundancyRecursion<'db> =

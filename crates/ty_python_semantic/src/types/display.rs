@@ -1524,7 +1524,7 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'_, 'db> {
                 .display_with(db, self.env, self.settings.clone())
                 .fmt_detailed(f),
             Type::BoundMethod(bound_method) => {
-                let Some(callable) = bound_method.into_callable_type(db) else {
+                let Some(callable) = bound_method.into_callable_type(db, self.env) else {
                     f.set_invalid_type_annotation();
                     f.write_str("MethodType[")?;
                     bound_method

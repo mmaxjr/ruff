@@ -269,7 +269,7 @@ impl<'db> Type<'db> {
             {
                 Some(CallableTypes::one(CallableType::bottom(db)))
             }
-            Type::BoundMethod(bound_method) => bound_method.callables(db).cloned(),
+            Type::BoundMethod(bound_method) => bound_method.callables(db, env),
 
             Type::TypeVar(typevar) => match typevar.require_bound_or_constraints(db, env) {
                 TypeVarBoundOrConstraints::UpperBound(bound) => bound

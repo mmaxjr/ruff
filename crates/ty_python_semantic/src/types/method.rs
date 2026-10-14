@@ -151,7 +151,7 @@ impl<'db> BoundMethodType<'db> {
     ) -> VarianceTerm<'db> {
         let env = env.in_environment(ProgramEnvironment::from_program(self.program(db)));
         if matches!(self.func(db), Type::FunctionLiteral(_) | Type::Callable(_))
-            && let Some(callable) = self.into_callable_type(db)
+            && let Some(callable) = self.into_callable_type(db, &env)
         {
             callable.variance_of(db, &env, typevar)
         } else {
@@ -295,19 +295,43 @@ impl<'db> BoundMethodType<'db> {
     ///
     /// Unions retain separate callable alternatives, each of which may contain multiple overloads.
     /// Returns `None` if the wrapped value cannot be converted to callables.
-    #[salsa::tracked(
-        returns(as_ref),
-        cycle_initial=|db, _, _| Some(CallableTypes::one(CallableType::bottom(db))),
-        heap_size=ruff_memory_usage::heap_size
-    )]
-    pub(crate) fn callables(self, db: &'db dyn Db) -> Option<CallableTypes<'db>> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_program(self.program(db)));
-        self.callables_with_receiver(
-            db,
-            &env,
-            self.signature_receiver(db),
-            self.typing_self_type(db, &env),
+    pub(crate) fn callables(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<CallableTypes<'db>> {
+        #[salsa::tracked(
+            returns(as_ref),
+            cycle_initial=|db, _, _| Some(CallableTypes::one(CallableType::bottom(db))),
+            heap_size=ruff_memory_usage::heap_size
+        )]
+        fn cached<'db>(
+            db: &'db dyn Db,
+            method: BoundMethodType<'db>,
+        ) -> Option<CallableTypes<'db>> {
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_program(method.program(db)),
+            );
+            method.callables_with_receiver(
+                db,
+                &env,
+                method.signature_receiver(db),
+                method.typing_self_type(db, &env),
+            )
+        }
+
+        let env = env.in_environment(ProgramEnvironment::from_program(self.program(db)));
+        env.cached_query(
+            || cached(db, self).cloned(),
+            || {
+                self.callables_with_receiver(
+                    db,
+                    &env,
+                    self.signature_receiver(db),
+                    self.typing_self_type(db, &env),
+                )
+            },
         )
     }
 
@@ -331,8 +355,13 @@ impl<'db> BoundMethodType<'db> {
     ///
     /// Returns `None` if the wrapped value cannot be converted to a callable or has multiple
     /// callable alternatives. Use [`Self::callables`] to handle multiple alternatives.
-    pub(crate) fn into_callable_type(self, db: &'db dyn Db) -> Option<CallableType<'db>> {
-        self.callables(db).and_then(CallableTypes::exactly_one)
+    pub(crate) fn into_callable_type(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<CallableType<'db>> {
+        self.callables(db, env)
+            .and_then(|callables| callables.exactly_one())
     }
 
     pub(super) fn recursive_type_normalized_impl(
@@ -389,8 +418,10 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 })
             })
             .and(db, self.constraints, || {
-                let (Some(source), Some(target)) = (source.callables(db), target.callables(db))
-                else {
+                let (Some(source), Some(target)) = (
+                    source.callables(db, self.env),
+                    target.callables(db, self.env),
+                ) else {
                     return self.never();
                 };
                 self.check_type_pair(

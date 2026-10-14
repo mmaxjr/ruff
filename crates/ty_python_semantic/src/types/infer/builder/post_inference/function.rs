@@ -158,7 +158,7 @@ fn check_method_typevar_variance<'db>(
     let signatures = match member.read_ty {
         Type::FunctionLiteral(function) => Some(function.signature(db)),
         Type::BoundMethod(method) => method
-            .into_callable_type(db)
+            .into_callable_type(db, env)
             .and_then(|callable| callable.explicit_signatures(db)),
         Type::Callable(callable) => callable.explicit_signatures(db),
         _ => None,

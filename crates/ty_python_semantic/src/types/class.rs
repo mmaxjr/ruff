@@ -2663,7 +2663,7 @@ impl<'db> ClassType<'db> {
                     }
                     if let Some(callable) = new_function
                         .into_bound_method_type(db, instance_type)
-                        .into_callable_type(db)
+                        .into_callable_type(db, env)
                     {
                         return CallableTypes::one(callable);
                     }

@@ -1636,7 +1636,9 @@ impl<'db> Bindings<'db> {
             // Inherited initializers can have identical signatures despite different receivers.
             // Deduplicate by bound signature to retain distinct generic specializations.
             let callable = match downstream_bindings.callable_type() {
-                Type::BoundMethod(method) if let Some(callable) = method.into_callable_type(db) => {
+                Type::BoundMethod(method)
+                    if let Some(callable) = method.into_callable_type(db, env) =>
+                {
                     Type::Callable(callable)
                 }
                 ty => ty,

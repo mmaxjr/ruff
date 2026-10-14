@@ -453,7 +453,9 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     function.into_callable_type(db),
                     function.name(db),
                 )),
-                Type::BoundMethod(method) if let Some(callable) = method.into_callable_type(db) => {
+                Type::BoundMethod(method)
+                    if let Some(callable) = method.into_callable_type(db, env) =>
+                {
                     Some(FunctionInfo::Method(
                         callable,
                         method.function(db).map(|function| {
