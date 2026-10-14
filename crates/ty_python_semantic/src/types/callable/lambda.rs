@@ -276,6 +276,7 @@ impl<'db> LambdaMapping<'db> {
     /// Own the mapping's inputs, retaining only substitutions available to this lambda.
     pub(super) fn from_type_mapping(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         lambda: LambdaSignature<'db>,
         mapping: &TypeMapping<'_, 'db>,
     ) -> Option<Self> {
@@ -288,7 +289,7 @@ impl<'db> LambdaMapping<'db> {
                 Self::Specialize {
                     specialization: {
                         let (variables, types): (Vec<_>, Vec<_>) = lambda
-                            .captured_typevars(db)
+                            .captured_typevars(db, env)
                             .variables(db)
                             .filter_map(|variable| {
                                 specialization.get(db, variable).map(|ty| (variable, ty))
@@ -545,10 +546,10 @@ impl<'db> LambdaSignature<'db> {
         if source.infer_body(db).is_provisional() {
             return None;
         }
-        let dependencies = source.return_type_dependencies(db);
+        let dependencies = source.return_type_dependencies(db, env);
         if !dependencies.iter(db).all(|variable| {
             source
-                .captured_typevars(db)
+                .captured_typevars(db, env)
                 .variables(db)
                 .any(|captured| captured == variable)
         }) {
@@ -633,13 +634,13 @@ impl<'db> LambdaSignature<'db> {
             return false;
         }
 
-        let dependencies = source.return_type_dependencies(db);
+        let dependencies = source.return_type_dependencies(db, env);
         if dependencies == TypeVarSet::None {
             return true;
         }
         if !dependencies.iter(db).all(|variable| {
             source
-                .captured_typevars(db)
+                .captured_typevars(db, env)
                 .variables(db)
                 .any(|captured| captured == variable)
         }) {
@@ -820,7 +821,7 @@ impl<'db> LambdaSignature<'db> {
             .map_or(&[][..], |plan| plan.steps.as_ref());
         let env = env.in_environment(ProgramEnvironment::from_scope(source.scope(db)));
         source
-            .captured_typevars(db)
+            .captured_typevars(db, &env)
             .variables(db)
             .map(move |parameter| {
                 let mut arguments = [Type::TypeVar(parameter); 2];
@@ -844,172 +845,105 @@ impl<'db> LambdaSignature<'db> {
             })
     }
 
-    /// Summarize dependencies without expanding each specialization of a recursive return.
-    /// Recursive references query the source's variable set; deferred mappings transform that
-    /// set instead of the return graph. Joining cycle approximations preserves dependencies
-    /// that are first encountered through another lambda.
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, _, _| TypeVarSet::None,
-        cycle_fn=|db, _, previous: &TypeVarSet<'db>, current, _| previous.merge(db, current),
-        heap_size=ruff_memory_usage::heap_size,
-    )]
-    pub(in crate::types) fn return_type_dependencies(self, db: &'db dyn Db) -> TypeVarSet<'db> {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.scope(db)));
-        if let Some(plan) = self.mapping(db) {
-            let mut dependencies = plan.source.return_type_dependencies(db);
-            for step in &plan.steps {
-                let Some(transformation) = step.mapping.as_type_mapping() else {
-                    continue;
-                };
-                let visitor = ApplyTypeMappingVisitor {
-                    materialize_typevar_bounds_and_defaults: step
-                        .materialize_typevar_bounds_and_defaults,
-                    ..ApplyTypeMappingVisitor::new(&env)
-                };
-                let flipped = transformation.flip();
-                dependencies = type_dependencies(
-                    db,
-                    &env,
-                    dependencies.iter(db).flat_map(|variable| {
-                        [&transformation, &flipped].map(|mapping| {
-                            Type::TypeVar(variable).apply_type_mapping_impl(
-                                db,
-                                mapping,
-                                step.context,
-                                &visitor,
-                            )
-                        })
-                    }),
-                );
-            }
+    /// Transform the source return's dependency summary in the consuming operation.
+    pub(in crate::types) fn return_type_dependencies(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> TypeVarSet<'db> {
+        let dependencies = source_return_type_dependencies(db, LambdaSource::of(db, self));
+        let Some(plan) = self.mapping(db) else {
             return dependencies;
-        }
-
-        type_dependencies(
-            db,
-            &env,
-            [infer_lambda_signature(db, LambdaSource::of(db, self))
-                .overload_return_type_or_unknown(db, &env)],
-        )
+        };
+        let env = env.in_environment(ProgramEnvironment::from_scope(self.scope(db)));
+        env.context()
+            .state()
+            .lambda_return_dependencies
+            .get_or_init(|| Box::new(crate::types::CycleDetector::new(())))
+            .try_visit_active(
+                db,
+                &env,
+                Type::Callable(CallableType::from_lambda(db, self)),
+                || {
+                    let mut dependencies = dependencies;
+                    for step in &plan.steps {
+                        let Some(transformation) = step.mapping.as_type_mapping() else {
+                            continue;
+                        };
+                        let visitor = ApplyTypeMappingVisitor {
+                            materialize_typevar_bounds_and_defaults: step
+                                .materialize_typevar_bounds_and_defaults,
+                            ..ApplyTypeMappingVisitor::new(&env)
+                        };
+                        let flipped = transformation.flip();
+                        dependencies = type_dependencies(
+                            db,
+                            &env,
+                            dependencies.iter(db).flat_map(|variable| {
+                                [&transformation, &flipped].map(|mapping| {
+                                    Type::TypeVar(variable).apply_type_mapping_impl(
+                                        db,
+                                        mapping,
+                                        step.context,
+                                        &visitor,
+                                    )
+                                })
+                            }),
+                        );
+                    }
+                    dependencies
+                },
+            )
+            .unwrap_or(TypeVarSet::None)
     }
 
-    /// Variables in the lambda's lexical and contextual inputs after transformation.
-    /// Inferring the body here would re-enter the transformation of its recursive references.
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|db, _, lambda: LambdaSignature<'db>| GenericContext::from_typevar_instances(
-            db, &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(lambda.scope(db))), []
-        ),
-        heap_size=ruff_memory_usage::heap_size,
-    )]
-    pub(in crate::types) fn captured_typevars(self, db: &'db dyn Db) -> GenericContext<'db> {
-        let scope = self.scope(db);
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
-        let index = semantic_index(db, scope.program_file(db));
-        let source = self.source(db);
-        let mappings = self
-            .mapping(db)
-            .as_ref()
-            .map_or(&[][..], |plan| plan.steps.as_ref());
-        let mut scopes = vec![scope.file_scope_id(db)];
-        let mut position = 0;
-        while let Some(current) = scopes.get(position).copied() {
-            scopes.extend(index.child_scopes(current).map(|(id, _)| id));
-            position += 1;
-        }
-        let local_scopes: FxHashSet<_> = scopes.iter().copied().collect();
-        let mut captured_scopes = FxHashSet::default();
-        let mut free_names = FxHashSet::default();
-        for current in scopes {
-            for symbol in index.place_table(current).symbols() {
-                if !symbol.is_used() || symbol.is_local() {
-                    continue;
-                }
-                let owner = index
-                    .visible_ancestor_scopes(current)
-                    .skip(1)
-                    .find_map(|(id, _)| {
-                        let places = index.place_table(id);
-                        places
-                            .symbol_id(symbol.name())
-                            .filter(|symbol| places.symbol(*symbol).is_local())
-                            .map(|_| id)
-                    });
-                if owner.is_some_and(|owner| local_scopes.contains(&owner)) {
-                    continue;
-                }
-                free_names.insert(symbol.name());
-                if let Some(owner) = owner.filter(|owner| !owner.is_global()) {
-                    captured_scopes.extend(index.ancestor_scopes(owner).map(|(id, _)| id));
-                }
-            }
-        }
-        // A generic environment is an input only when the body reads a value from it, or
-        // names one of its type parameters. Closed lambdas must not acquire substitutions
-        // for unrelated enclosing parameters, such as T in `class C[T]: f = lambda: 0`.
-        let mut lexical_variables = FxOrderSet::default();
-        if !free_names.is_empty() {
-            for (ancestor_id, ancestor) in index.ancestor_scopes(scope.file_scope_id(db)) {
-                if let Some(context) = GenericContext::lexical_of_node(db, ancestor.node(), index) {
-                    lexical_variables.extend(context.variables(db).filter(|variable| {
-                        captured_scopes.contains(&ancestor_id)
-                            || free_names.contains(variable.name(db))
-                    }));
-                }
-            }
-        }
-        let variables = RefCell::new(lexical_variables);
-        let collect = |ty| {
-            any_over_type_including_alias_arguments(db, &env, ty, |ty| {
-                match ty {
-                    Type::TypeVar(variable) => {
-                        variables.borrow_mut().insert(variable);
-                    }
-                    Type::Callable(callable)
-                        if let SignatureSource::Lambda(lambda) = callable.signature_source(db) =>
-                    {
-                        // A lambda argument can capture a variable that does not appear in its
-                        // parameters. Keep those inputs without evaluating its return type.
-                        let captured = lambda.captured_typevars(db);
-                        variables.borrow_mut().extend(captured.variables(db));
-                    }
-                    _ => {}
-                }
-                false
-            });
+    /// Transform captured inputs without inferring the lambda's body.
+    pub(in crate::types) fn captured_typevars(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> GenericContext<'db> {
+        let source = LambdaSource::of(db, self).captured_typevars(db);
+        let Some(plan) = self.mapping(db) else {
+            return source;
         };
-        for parameter in source.parameters(db) {
-            collect(parameter.annotated_type());
-            if let Some(default) = parameter.eager_default_type() {
-                collect(default);
-            }
-        }
-        if let Some(annotation) = source.return_context(db).annotation {
-            collect(annotation);
-        }
-        for mapping in mappings {
-            let Some(transformation) = mapping.mapping.as_type_mapping() else {
-                continue;
-            };
-            let current = variables.take();
-            let visitor = ApplyTypeMappingVisitor {
-                materialize_typevar_bounds_and_defaults: mapping
-                    .materialize_typevar_bounds_and_defaults,
-                ..ApplyTypeMappingVisitor::new(&env)
-            };
-            let context = mapping.context;
-            for variable in current {
-                // Captured variables can occur in either variance position in the body.
-                for mapping in [&transformation, &transformation.flip()] {
-                    collect(
-                        Type::TypeVar(variable)
-                            .apply_type_mapping_impl(db, mapping, context, &visitor),
-                    );
-                }
-            }
-        }
-        GenericContext::from_typevar_instances(db, &env, variables.into_inner())
+        let env = env.in_environment(ProgramEnvironment::from_scope(self.scope(db)));
+        env.context()
+            .state()
+            .lambda_captures
+            .get_or_init(|| Box::new(crate::types::CycleDetector::new(())))
+            .try_visit_active(
+                db,
+                &env,
+                Type::Callable(CallableType::from_lambda(db, self)),
+                || {
+                    let variables = RefCell::new(source.variables(db).collect::<FxOrderSet<_>>());
+                    for step in &plan.steps {
+                        let Some(transformation) = step.mapping.as_type_mapping() else {
+                            continue;
+                        };
+                        let current = variables.take();
+                        let visitor = ApplyTypeMappingVisitor {
+                            materialize_typevar_bounds_and_defaults: step
+                                .materialize_typevar_bounds_and_defaults,
+                            ..ApplyTypeMappingVisitor::new(&env)
+                        };
+                        for variable in current {
+                            for mapping in [&transformation, &transformation.flip()] {
+                                let mapped = Type::TypeVar(variable).apply_type_mapping_impl(
+                                    db,
+                                    mapping,
+                                    step.context,
+                                    &visitor,
+                                );
+                                collect_captured_typevars(db, &env, mapped, &variables);
+                            }
+                        }
+                    }
+                    GenericContext::from_typevar_instances(db, &env, variables.into_inner())
+                },
+            )
+            .unwrap_or_else(|| GenericContext::from_typevar_instances(db, &env, []))
     }
 
     /// Rewrite stored inputs without evaluating the lambda's body. Recursive binding
@@ -1186,7 +1120,7 @@ impl<'db> LambdaSignature<'db> {
             let previous_source =
                 source.with_transformations(db, visitor.env, &steps[..steps.len() - 1]);
             let (variables, types): (Vec<_>, Vec<_>) = previous_source
-                .captured_typevars(db)
+                .captured_typevars(db, visitor.env)
                 .variables(db)
                 .filter_map(|variable| {
                     previous_specialization
@@ -1360,4 +1294,125 @@ function = lambda value: (value, 1, C)
         assert_eq!(bound.single_parameters(&db).map(Parameters::len), Some(1));
         Ok(())
     }
+}
+
+/// Source dependency summaries are independent of a caller's saved transformations.
+#[salsa::tracked(
+    returns(copy),
+    cycle_initial=|_, _, _| TypeVarSet::None,
+    cycle_fn=|db, _, previous: &TypeVarSet<'db>, current, _| previous.merge(db, current),
+    heap_size=ruff_memory_usage::heap_size,
+)]
+fn source_return_type_dependencies<'db>(
+    db: &'db dyn Db,
+    source: LambdaSource<'db>,
+) -> TypeVarSet<'db> {
+    let lambda = source.input(db);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(lambda.scope(db)));
+    type_dependencies(
+        db,
+        &env,
+        [infer_lambda_signature(db, source).overload_return_type_or_unknown(db, &env)],
+    )
+}
+
+#[salsa::tracked(
+    returns(copy),
+    cycle_initial=|db, _, source: LambdaSource<'db>| GenericContext::from_typevar_instances(
+        db, &ProgramEnvironment::from_scope(source.input(db).scope(db)), []
+    ),
+    heap_size=ruff_memory_usage::heap_size,
+)]
+fn source_captured_typevars<'db>(db: &'db dyn Db, input: LambdaSource<'db>) -> GenericContext<'db> {
+    let source = input.input(db);
+    let scope = source.scope(db);
+    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(scope));
+    let index = semantic_index(db, scope.program_file(db));
+    let mut scopes = vec![scope.file_scope_id(db)];
+    let mut position = 0;
+    while let Some(current) = scopes.get(position).copied() {
+        scopes.extend(index.child_scopes(current).map(|(id, _)| id));
+        position += 1;
+    }
+    let local_scopes: FxHashSet<_> = scopes.iter().copied().collect();
+    let mut captured_scopes = FxHashSet::default();
+    let mut free_names = FxHashSet::default();
+    for current in scopes {
+        for symbol in index.place_table(current).symbols() {
+            if !symbol.is_used() || symbol.is_local() {
+                continue;
+            }
+            let owner = index
+                .visible_ancestor_scopes(current)
+                .skip(1)
+                .find_map(|(id, _)| {
+                    let places = index.place_table(id);
+                    places
+                        .symbol_id(symbol.name())
+                        .filter(|symbol| places.symbol(*symbol).is_local())
+                        .map(|_| id)
+                });
+            if owner.is_some_and(|owner| local_scopes.contains(&owner)) {
+                continue;
+            }
+            free_names.insert(symbol.name());
+            if let Some(owner) = owner.filter(|owner| !owner.is_global()) {
+                captured_scopes.extend(index.ancestor_scopes(owner).map(|(id, _)| id));
+            }
+        }
+    }
+    // A generic environment is an input only when the body reads a value from it, or
+    // names one of its type parameters. Closed lambdas must not acquire substitutions
+    // for unrelated enclosing parameters, such as T in `class C[T]: f = lambda: 0`.
+    let mut lexical_variables = FxOrderSet::default();
+    if !free_names.is_empty() {
+        for (ancestor_id, ancestor) in index.ancestor_scopes(scope.file_scope_id(db)) {
+            if let Some(context) = GenericContext::lexical_of_node(db, ancestor.node(), index) {
+                lexical_variables.extend(context.variables(db).filter(|variable| {
+                    captured_scopes.contains(&ancestor_id) || free_names.contains(variable.name(db))
+                }));
+            }
+        }
+    }
+    let variables = RefCell::new(lexical_variables);
+    for parameter in source.parameters(db) {
+        collect_captured_typevars(db, &env, parameter.annotated_type(), &variables);
+        if let Some(default) = parameter.eager_default_type() {
+            collect_captured_typevars(db, &env, default, &variables);
+        }
+    }
+    if let Some(annotation) = source.return_context(db).annotation {
+        collect_captured_typevars(db, &env, annotation, &variables);
+    }
+
+    GenericContext::from_typevar_instances(db, &env, variables.into_inner())
+}
+
+impl<'db> LambdaSource<'db> {
+    pub(in crate::types) fn captured_typevars(self, db: &'db dyn Db) -> GenericContext<'db> {
+        source_captured_typevars(db, self)
+    }
+}
+
+fn collect_captured_typevars<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    ty: Type<'db>,
+    variables: &RefCell<FxOrderSet<BoundTypeVarInstance<'db>>>,
+) {
+    any_over_type_including_alias_arguments(db, env, ty, |ty| {
+        match ty {
+            Type::TypeVar(variable) => {
+                variables.borrow_mut().insert(variable);
+            }
+            Type::Callable(callable)
+                if let SignatureSource::Lambda(lambda) = callable.signature_source(db) =>
+            {
+                let captured = lambda.captured_typevars(db, env);
+                variables.borrow_mut().extend(captured.variables(db));
+            }
+            _ => {}
+        }
+        false
+    });
 }

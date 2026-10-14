@@ -376,7 +376,7 @@ impl<'db> RecursiveDefinition<'db> {
             Self::TypeAlias(alias) => alias.generic_context(db),
             Self::Structural(recursive) => recursive.parameters(db),
             Self::Protocol(origin) | Self::TypedDict(origin) => origin.generic_context(db),
-            Self::Lambda(lambda) => Some(lambda.captured_typevars(db)),
+            Self::Lambda(lambda) => Some(LambdaSource::of(db, lambda).captured_typevars(db)),
         }
     }
 

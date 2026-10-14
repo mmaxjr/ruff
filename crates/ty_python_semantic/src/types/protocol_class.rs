@@ -1661,7 +1661,7 @@ impl<'db> ProtocolMemberReadAccess<'_, 'db> {
                         || (kind == ProtocolMethodKind::Instance
                             && self.access.mode == ProtocolMemberAccessMode::Instance))
                 {
-                    Type::Callable(protocol_bind_self(db, env.program(db), callable, None))
+                    Type::Callable(protocol_bind_self(db, env, callable, None))
                 } else {
                     ty
                 };
@@ -2713,7 +2713,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                         &callables.map(|callable| {
                             protocol_apply_self_with_receiver(
                                 db,
-                                env.program(db),
+                                env,
                                 callable,
                                 implementation_receiver_binding_ty,
                                 implementation_self_binding_ty,
@@ -2721,7 +2721,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                         }),
                         protocol_apply_self_with_receiver(
                             db,
-                            env.program(db),
+                            env,
                             required_callable,
                             protocol_receiver_binding_ty,
                             protocol_self_binding_ty,
@@ -2759,7 +2759,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 attribute_type,
                 Type::Callable(protocol_apply_self_with_receiver(
                     db,
-                    env.program(db),
+                    env,
                     required_callable,
                     protocol_receiver_binding_ty,
                     protocol_self_binding_ty,
@@ -3030,7 +3030,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
                 {
                     Some(Type::Callable(protocol_apply_self_with_receiver(
                         db,
-                        env.program(db),
+                        env,
                         callable,
                         source_type,
                         source_type,
@@ -3554,52 +3554,96 @@ fn proto_interface_cycle_recover<'db>(
 /// Protocol interfaces can be prepared before their receiver is known, so we do not use
 /// [`CallableType::bind_self`] here. Preserve all overloads and record receiver constraints for
 /// later compatibility checks instead of specializing or filtering signatures here.
-#[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
 fn protocol_bind_self<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    env: &TypeOperations<'db>,
     callable: CallableType<'db>,
     self_type: Option<Type<'db>>,
 ) -> CallableType<'db> {
-    if callable.is_dunder_paramspec(db) {
-        return callable.into_regular(db);
+    #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
+    fn cached<'db>(
+        db: &'db dyn Db,
+        program: Program<'db>,
+        callable: CallableType<'db>,
+        self_type: Option<Type<'db>>,
+    ) -> CallableType<'db> {
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        compute(db, &env, callable, self_type)
     }
 
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-    match callable.signature_source(db) {
-        crate::types::callable::SignatureSource::Explicit(signatures) => callable.with_signatures(
-            db,
-            signatures.bind_self_with_receiver(db, &env, self_type, self_type),
-        ),
-        crate::types::callable::SignatureSource::Lambda(lambda) => {
-            let lambda = match self_type {
-                Some(receiver) => lambda.bind_receiver(db, &env, receiver, receiver),
-                None => {
-                    lambda.with_bound_parameters(db, &env, lambda.parameters(db).bind_receiver(db))
-                }
-            };
-            callable.with_lambda_signature(db, lambda)
+    fn compute<'db>(
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        callable: CallableType<'db>,
+        self_type: Option<Type<'db>>,
+    ) -> CallableType<'db> {
+        if callable.is_dunder_paramspec(db) {
+            return callable.into_regular(db);
         }
+
+        match callable.signature_source(db) {
+            crate::types::callable::SignatureSource::Explicit(signatures) => callable
+                .with_signatures(
+                    db,
+                    signatures.bind_self_with_receiver(db, env, self_type, self_type),
+                ),
+            crate::types::callable::SignatureSource::Lambda(lambda) => {
+                let lambda = match self_type {
+                    Some(receiver) => lambda.bind_receiver(db, env, receiver, receiver),
+                    None => lambda.with_bound_parameters(
+                        db,
+                        env,
+                        lambda.parameters(db).bind_receiver(db),
+                    ),
+                };
+                callable.with_lambda_signature(db, lambda)
+            }
+        }
+        .into_regular(db)
     }
-    .into_regular(db)
+    env.cached_query(
+        || cached(db, env.program(db), callable, self_type),
+        || compute(db, env, callable, self_type),
+    )
 }
 
 /// Cache receiver and `Self` binding only for protocol-member compatibility checks.
-#[salsa::tracked(
-    returns(copy),
-    cycle_initial=|db, _, _, _, _, _| CallableType::bottom(db),
-    heap_size=ruff_memory_usage::heap_size
-)]
 fn protocol_apply_self_with_receiver<'db>(
     db: &'db dyn Db,
-    program: Program<'db>,
+    env: &TypeOperations<'db>,
     callable: CallableType<'db>,
     receiver_type: Type<'db>,
     self_type: Type<'db>,
 ) -> CallableType<'db> {
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+    #[salsa::tracked(
+        returns(copy),
+        cycle_initial=|db, _, _, _, _, _| CallableType::bottom(db),
+        heap_size=ruff_memory_usage::heap_size
+    )]
+    fn cached<'db>(
+        db: &'db dyn Db,
+        program: Program<'db>,
+        callable: CallableType<'db>,
+        receiver_type: Type<'db>,
+        self_type: Type<'db>,
+    ) -> CallableType<'db> {
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        compute(db, &env, callable, receiver_type, self_type)
+    }
 
-    callable.apply_self_with_receiver(db, &env, receiver_type, self_type)
+    fn compute<'db>(
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        callable: CallableType<'db>,
+        receiver_type: Type<'db>,
+        self_type: Type<'db>,
+    ) -> CallableType<'db> {
+        callable.apply_self_with_receiver(db, env, receiver_type, self_type)
+    }
+    env.cached_query(
+        || cached(db, env.program(db), callable, receiver_type, self_type),
+        || compute(db, env, callable, receiver_type, self_type),
+    )
 }
 
 /// Protocol compatibility can only succeed if every required member is present.
@@ -3684,12 +3728,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         self.check_callable_pair(
             db,
             callable.with_signatures(db, signatures),
-            protocol_bind_self(
-                db,
-                env.program(db),
-                required_callable,
-                Some(protocol_self_binding_ty),
-            ),
+            protocol_bind_self(db, env, required_callable, Some(protocol_self_binding_ty)),
         )
     }
 }

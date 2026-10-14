@@ -306,7 +306,7 @@ impl<'db> TypeVisitorHooks<'db> for Dependencies<'_, 'db> {
                 if !self.satisfied.get() {
                     return;
                 }
-                for variable in lambda.return_type_dependencies(db).iter(db) {
+                for variable in lambda.return_type_dependencies(db, self.env).iter(db) {
                     visit.visit_type(db, Type::TypeVar(variable));
                 }
             }

@@ -552,7 +552,7 @@ impl<'db> TypeRecursionContext<'db> {
     }
 }
 
-type TypeRecursionRevision = [u64; 11];
+type TypeRecursionRevision = [u64; 13];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
@@ -561,6 +561,8 @@ impl TypeRecursionContext<'_> {
         let TypeRecursionState {
             operation: _,
             function_normalization,
+            lambda_captures,
+            lambda_return_dependencies,
             meta_type:
                 MetaTypeRecursion {
                     aliases,
@@ -577,6 +579,10 @@ impl TypeRecursionContext<'_> {
         } = self.state();
         [
             function_normalization.revision(),
+            lambda_captures.get().map_or(0, |guard| guard.revision()),
+            lambda_return_dependencies
+                .get()
+                .map_or(0, |guard| guard.revision()),
             aliases.revision(),
             growing_aliases.revision(),
             typevars.revision(),
@@ -596,6 +602,8 @@ impl TypeRecursionContext<'_> {
 #[derive(Default)]
 struct TypeRecursionState<'db> {
     function_normalization: ActiveRecursionDetector<(salsa::Id, bool)>,
+    lambda_captures: OnceCell<Box<CycleDetector<'db, (), Type<'db>, (), 1>>>,
+    lambda_return_dependencies: OnceCell<Box<CycleDetector<'db, (), Type<'db>, (), 1>>>,
     operation: operations::OperationState,
     meta_type: MetaTypeRecursion<'db>,
     normalization: ActiveRecursionDetector<()>,

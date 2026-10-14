@@ -1955,7 +1955,12 @@ impl<'db> CallableType<'db> {
                 SignatureSource::Explicit(mapped)
             }
             SignatureSource::Lambda(lambda) => {
-                let mapped = match LambdaMapping::from_type_mapping(db, *lambda, type_mapping) {
+                let mapped = match LambdaMapping::from_type_mapping(
+                    db,
+                    visitor.env,
+                    *lambda,
+                    type_mapping,
+                ) {
                     Some(mapping) => lambda.apply_mapping(db, mapping, tcx, visitor),
                     None => {
                         // A lambda's body is a separate query, just like a named function's
