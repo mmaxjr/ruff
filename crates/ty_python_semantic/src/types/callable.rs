@@ -6,6 +6,7 @@ use super::protocol_class::StructuralMemberPriority;
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeQueryVisit;
 use itertools::Either;
 use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec_inline};
@@ -47,7 +48,7 @@ impl<'db> TypeQuery<'db> for FunctionDescriptorGet<'db> {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -58,7 +59,7 @@ impl<'db> TypeQuery<'db> for FunctionDescriptorGet<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Self::Output {

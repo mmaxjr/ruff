@@ -1,6 +1,7 @@
 //! Bounded projections of correlated constraint solutions.
 
 use crate::types::TypeOperations;
+use crate::types::recursive::StructuralTypeVisit;
 use rustc_hash::FxHashSet;
 
 use super::{
@@ -111,7 +112,7 @@ impl<'db, 'budget, 'state>
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         state: &'state mut ProjectionTerms<'budget, 'db>,
@@ -125,7 +126,7 @@ impl<'db, 'budget, 'state>
     fn visit_alias_like(
         &self,
         _db: &'db dyn Db,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         state: &'state mut ProjectionTerms<'budget, 'db>,
         visit_body: impl FnOnce(&'state mut ProjectionTerms<'budget, 'db>) -> Self::Output,
@@ -141,7 +142,7 @@ impl<'db, 'budget, 'state>
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         state: &'state mut ProjectionTerms<'budget, 'db>,
     ) -> Self::Output {

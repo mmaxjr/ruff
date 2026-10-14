@@ -1,6 +1,7 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::TypeQueryVisit;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, btree_map::Entry};
@@ -2105,7 +2106,7 @@ impl<'db> TypeQuery<'db> for UnpackTypedDict {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -2121,7 +2122,7 @@ impl<'db> TypeQuery<'db> for UnpackTypedDict {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {

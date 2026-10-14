@@ -1,6 +1,7 @@
 use crate::Db;
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryVisit;
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use crate::{
     FxOrderSet, Program,
@@ -21,7 +22,7 @@ impl<'db> TypeQuery<'db> for CanSuppressExceptions {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -32,7 +33,7 @@ impl<'db> TypeQuery<'db> for CanSuppressExceptions {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         manager: Type<'db>,
         (): (),
     ) -> bool {

@@ -142,20 +142,20 @@ pub fn definitions_for_attribute<'db>(
 ///
 /// Preparing the finder resolves the class roots and the implementations selected for those roots.
 /// Candidate subclasses can then be scanned one file at a time.
-pub struct ImplementationsFinder<'a> {
+pub struct ImplementationsFinder<'db, 'name> {
     /// Definitions selected directly for the goto target's roots:
     /// - Root class definitions for a class-family search
     /// - Definitions found through each root's MRO for a member-family search.
-    initial_definitions: Vec<ResolvedDefinition<'a>>,
+    initial_definitions: Vec<ResolvedDefinition<'db>>,
 
     /// Classes whose known subclasses should be scanned for additional implementations.
-    roots: FxHashSet<ClassLiteral<'a>>,
+    roots: FxHashSet<ClassLiteral<'db>>,
 
     /// Text prefilter for the class keyword or member name, reused across files.
-    name_matcher: Cow<'a, NameMatcher<'a>>,
+    name_matcher: Cow<'name, NameMatcher<'name>>,
 
     /// Whether scanning should return subclass definitions or same-named members on subclasses.
-    kind: ImplementationsFinderKind<'a>,
+    kind: ImplementationsFinderKind<'name>,
 }
 
 enum ImplementationsFinderKind<'a> {
@@ -166,9 +166,9 @@ enum ImplementationsFinderKind<'a> {
     },
 }
 
-impl<'a> ImplementationsFinder<'a> {
+impl<'db, 'name> ImplementationsFinder<'db, 'name> {
     /// Creates a class-family finder from resolved class roots.
-    fn for_class_roots(db: &'a dyn Db, roots: Vec<ClassLiteral<'a>>) -> Self {
+    fn for_class_roots(db: &'db dyn Db, roots: Vec<ClassLiteral<'db>>) -> Self {
         let mut initial_definitions = Vec::new();
         for root in &roots {
             if let Some(definition) = root.definition(db) {
@@ -189,9 +189,9 @@ impl<'a> ImplementationsFinder<'a> {
 
     /// Creates a member-family finder for roots that resolve the member through their MRO.
     fn for_member_roots(
-        db: &'a dyn Db,
-        roots: Vec<ClassLiteral<'a>>,
-        member_name: &'a str,
+        db: &'db dyn Db,
+        roots: Vec<ClassLiteral<'db>>,
+        member_name: &'name str,
         accessor_role: Option<PropertyAccessorRole>,
     ) -> Option<Self> {
         let mut initial_definitions = Vec::new();
@@ -252,7 +252,7 @@ impl<'a> ImplementationsFinder<'a> {
     }
 
     /// Returns the definitions selected directly for the finder's roots.
-    pub fn into_initial_definitions(self) -> Vec<ResolvedDefinition<'a>> {
+    pub fn into_initial_definitions(self) -> Vec<ResolvedDefinition<'db>> {
         self.initial_definitions
     }
 
@@ -273,8 +273,8 @@ impl<'a> ImplementationsFinder<'a> {
     /// declared in the class body (`sound: str = ...`, `sound = ...`, or a bare `sound: str`) or
     /// assigned to `self` in a method body (`self.sound = ...`).
     pub fn for_attribute(
-        model: &SemanticModel<'a>,
-        attribute: &'a ast::ExprAttribute,
+        model: &SemanticModel<'db>,
+        attribute: &'name ast::ExprAttribute,
     ) -> Option<Self> {
         let db = model.db();
         let lhs_ty = attribute.value.inferred_type(model)?;
@@ -308,8 +308,8 @@ impl<'a> ImplementationsFinder<'a> {
     /// along with same-named methods defined on known transitive subclasses. This does not walk to
     /// parent classes: on `Dog.speak`, the root is `Dog`, so `Animal.speak` is not included.
     pub fn for_method(
-        model: &SemanticModel<'a>,
-        function: &'a ast::StmtFunctionDef,
+        model: &SemanticModel<'db>,
+        function: &'name ast::StmtFunctionDef,
     ) -> Option<Self> {
         let db = model.db();
         let env = model.program_environment();
@@ -351,7 +351,7 @@ impl<'a> ImplementationsFinder<'a> {
     /// The clicked class is the root and is returned first, followed by its known transitive
     /// subclasses such as `Dog` and `Cat`. This walks down the hierarchy only: clicking a subclass
     /// returns that class and its own subclasses, not its parents.
-    pub fn for_class(model: &SemanticModel<'a>, class: &ast::StmtClassDef) -> Option<Self> {
+    pub fn for_class(model: &SemanticModel<'db>, class: &ast::StmtClassDef) -> Option<Self> {
         let db = model.db();
         let env = model.program_environment();
         let class_definition = class.definition(model);
@@ -385,9 +385,9 @@ impl<'a> ImplementationsFinder<'a> {
     /// object (for example an instance variable or method), so callers can fall back to member
     /// handling.
     pub fn for_class_reference(
-        db: &'a dyn Db,
-        env: &TypeOperations<'a>,
-        resolved_definitions: &[ResolvedDefinition<'a>],
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        resolved_definitions: &[ResolvedDefinition<'db>],
     ) -> Option<Self> {
         let mut roots = Vec::new();
         let mut seen = FxHashSet::default();
@@ -2252,6 +2252,7 @@ mod tests {
             ImportAliasResolution::ResolveAliases,
         );
         assert_eq!(definitions.len(), 1);
+        drop(model);
 
         let events = db.take_salsa_events();
         assert_function_query_was_not_run_by_name(&db, "infer_scope_types_impl", None, &events);

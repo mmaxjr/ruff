@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryVisit;
 use crate::types::{
     AwaitError, Bindings, CallArguments, CallDunderError, CycleKind, KnownClass,
     LintDiagnosticGuard, LintDiagnosticGuardBuilder, LiteralValueTypeKind, Type, TypeContext,
@@ -633,7 +634,7 @@ impl<'db> TypeQuery<'db, bool> for TryIterate {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self, bool>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self, bool>,
         _ty: Type<'db>,
         kind: CycleKind,
         _allow_dunders: bool,
@@ -649,7 +650,7 @@ impl<'db> TypeQuery<'db, bool> for TryIterate {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self, bool>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self, bool>,
         ty: Type<'db>,
         allow_dunders: bool,
     ) -> Self::Output {

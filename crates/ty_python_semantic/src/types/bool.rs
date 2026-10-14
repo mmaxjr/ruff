@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryVisit;
 use crate::types::typevar::TypeVarSet;
 use ruff_db::diagnostic::{Annotation, SubDiagnostic, SubDiagnosticSeverity};
 use ruff_text_size::{Ranged, TextRange};
@@ -64,7 +65,7 @@ impl<'db> TypeQuery<'db> for TryBool {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -91,7 +92,7 @@ impl<'db> TypeQuery<'db> for TryBool {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {

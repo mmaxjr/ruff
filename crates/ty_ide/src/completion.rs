@@ -1,7 +1,7 @@
 use std::cell::OnceCell;
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, binary_heap};
-use ty_python_semantic::{Db as SemanticDb, TypeOperations};
+use ty_python_semantic::TypeOperations;
 
 use compact_str::{CompactString, CompactStringExt};
 use ruff_db::parsed::{ParsedModuleRef, parsed_module};
@@ -21,9 +21,7 @@ use ty_module_resolver::{
 use ty_python_core::{ProgramFile, semantic_index};
 use ty_python_semantic::HasType;
 use ty_python_semantic::importer::{ImportRequest, Importer};
-use ty_python_semantic::types::{
-    CycleKind, SpecialFormType, TypeQuery, TypeQueryContext, UnionType,
-};
+use ty_python_semantic::types::{SpecialFormType, TypeCategory, UnionType};
 use ty_python_semantic::{
     Completion as SemanticCompletion, NameKind, SemanticModel,
     types::{KnownClass, Type},
@@ -3307,78 +3305,19 @@ fn completion_kind_from_type<'db>(
     env: &TypeOperations<'db>,
     ty: Type<'db>,
 ) -> Option<CompletionKind> {
-    TypeQueryContext::with_root(env, FindCompletionKind, |root| root.visit(db, ty))
-}
-
-struct FindCompletionKind;
-
-impl<'db> TypeQuery<'db> for FindCompletionKind {
-    type Output = Option<CompletionKind>;
-
-    fn on_cycle(
-        &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
-        _ty: Type<'db>,
-        _kind: CycleKind,
-        _state: (),
-    ) -> Self::Output {
-        None
-    }
-
-    fn visit(
-        &self,
-        db: &'db dyn SemanticDb,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
-        ty: Type<'db>,
-        _state: (),
-    ) -> Self::Output {
-        Some(match ty {
-            Type::FunctionLiteral(_)
-            | Type::DataclassDecorator(_)
-            | Type::WrapperDescriptor(_)
-            | Type::DataclassTransformer(_)
-            | Type::Callable(_) => CompletionKind::Function,
-            Type::BoundMethod(_) | Type::KnownBoundMethod(_) => CompletionKind::Method,
-            Type::ModuleLiteral(_) => CompletionKind::Module,
-            Type::ClassLiteral(_) | Type::GenericAlias(_) | Type::SubclassOf(_) => {
-                CompletionKind::Class
-            }
-            // This is a little weird for "struct." I'm mostly interpreting
-            // "struct" here as a more general "object." ---AG
-            Type::NominalInstance(_)
-            | Type::PropertyInstance(_)
-            | Type::SlotDescriptor(_)
-            | Type::BoundSuper(_)
-            | Type::TypedDict(_)
-            | Type::NewTypeInstance(_)
-            | Type::EnumComplement(_) => CompletionKind::Struct,
-            Type::LiteralValue(literal) if literal.is_enum() => CompletionKind::Enum,
-            Type::LiteralValue(_) | Type::TypeIs(_) | Type::TypeGuard(_) | Type::TypeForm(_) => {
-                CompletionKind::Value
-            }
-            Type::ProtocolInstance(_) => CompletionKind::Interface,
-            Type::TypeVar(_) => CompletionKind::TypeParameter,
-            Type::Union(union) => union
-                .elements(db)
-                .iter()
-                .find_map(|&ty| traversal.visit(db, ty))?,
-            Type::Intersection(intersection) => intersection
-                .iter_positive(db)
-                .find_map(|ty| traversal.visit(db, ty))?,
-            Type::Dynamic(_)
-            | Type::Divergent(_)
-            | Type::Never
-            | Type::SpecialForm(_)
-            | Type::KnownInstance(_)
-            | Type::AlwaysTruthy
-            | Type::AlwaysFalsy
-            | Type::TypeAlias(_)
-            | Type::Recursive(_) => return None,
-            Type::RecursiveVar(_) => {
-                unreachable!("semantic operation on an unbound recursive variable")
-            }
-        })
-    }
+    Some(match ty.category(db, env)? {
+        TypeCategory::Function => CompletionKind::Function,
+        TypeCategory::Method => CompletionKind::Method,
+        TypeCategory::Module => CompletionKind::Module,
+        TypeCategory::Class => CompletionKind::Class,
+        // This is a little weird for "struct." I'm mostly interpreting
+        // "struct" here as a more general "object." ---AG
+        TypeCategory::Instance => CompletionKind::Struct,
+        TypeCategory::EnumLiteral => CompletionKind::Enum,
+        TypeCategory::Value => CompletionKind::Value,
+        TypeCategory::Protocol => CompletionKind::Interface,
+        TypeCategory::TypeVariable => CompletionKind::TypeParameter,
+    })
 }
 
 /// Defines an ordering relating the two completions for ranking purposes.

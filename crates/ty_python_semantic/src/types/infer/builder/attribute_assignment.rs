@@ -1,3 +1,4 @@
+use crate::types::recursive::TypeWalkVisit;
 use ruff_python_ast as ast;
 use ruff_text_size::Ranged;
 
@@ -1185,7 +1186,7 @@ impl<'db> TypeWalk<'db, &mut AssignmentAttributeWriteEvaluator<'_, 'db, '_, '_>>
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         evaluator: &mut AssignmentAttributeWriteEvaluator<'_, 'db, '_, '_>,
@@ -1204,7 +1205,7 @@ impl<'db> TypeWalk<'db, &mut AssignmentAttributeWriteEvaluator<'_, 'db, '_, '_>>
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         descriptor_ty: Type<'db>,
         evaluator: &mut AssignmentAttributeWriteEvaluator<'_, 'db, '_, '_>,
     ) -> bool {

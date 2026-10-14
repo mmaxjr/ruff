@@ -1,4 +1,5 @@
 use crate::types::TypeOperations;
+use crate::types::recursive::StructuralTypeVisit;
 use itertools::Either;
 use rustc_hash::FxHashSet;
 
@@ -42,7 +43,7 @@ impl<'db> TypeWalk<'db, UnionExpansionState, StructuralTraversal> for ExpandUnio
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: UnionExpansionState,
@@ -56,7 +57,7 @@ impl<'db> TypeWalk<'db, UnionExpansionState, StructuralTraversal> for ExpandUnio
     fn visit_alias_like(
         &self,
         db: &'db dyn Db,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         state: UnionExpansionState,
         visit_body: impl FnOnce(UnionExpansionState) -> Self::Output,
@@ -94,7 +95,7 @@ impl<'db> TypeWalk<'db, UnionExpansionState, StructuralTraversal> for ExpandUnio
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         state: UnionExpansionState,
     ) -> Self::Output {

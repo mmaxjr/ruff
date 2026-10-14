@@ -71,6 +71,7 @@ use crate::types::{TypeOperations, TypeVarVariance};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::Hash;
 use std::marker::PhantomData;
+use std::ops::Deref;
 
 use rustc_hash::FxHashSet;
 use salsa::plumbing::AsId;
@@ -1771,7 +1772,7 @@ where
 /// method. They never unfold recursive bodies or manage the active recursion stack themselves.
 /// `State` passes per-visit inputs, including mutable builders, without storing them in the traversal.
 /// Walk results are not cached; use [`TypeQuery`] when completed results can be reused.
-pub(crate) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTraversal>:
+pub(super) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTraversal>:
     Sized
 {
     type Output;
@@ -1779,7 +1780,7 @@ pub(crate) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTra
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self, Mode>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self, Mode>,
         ty: Type<'db>,
         state: State,
     ) -> Self::Output;
@@ -1787,7 +1788,7 @@ pub(crate) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTra
     /// Return the result of revisiting an active type, including a growing specialization.
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self, Mode>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self, Mode>,
         ty: Type<'db>,
         kind: CycleKind,
         state: State,
@@ -1800,7 +1801,7 @@ pub(crate) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTra
     fn visit_recursive_body(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self, Mode>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self, Mode>,
         body: Type<'db>,
         state: State,
     ) -> Self::Output {
@@ -1815,7 +1816,7 @@ pub(crate) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTra
     fn visit_alias_like(
         &self,
         _db: &'db dyn Db,
-        _traversal: &TypeTraversal<'_, 'db, Self, Mode>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self, Mode>,
         _ty: Type<'db>,
         state: State,
         visit_body: impl FnOnce(State) -> Self::Output,
@@ -1823,6 +1824,22 @@ pub(crate) trait TypeWalk<'db, State = (), Mode: TypeTraversalMode = SemanticTra
         visit_body(state)
     }
 }
+
+/// A walk callback can only be entered by the traversal currently inspecting its type.
+pub(super) struct TypeWalkVisit<'visit, 'env, 'db, O, Mode = SemanticTraversal> {
+    traversal: &'visit TypeTraversal<'env, 'db, O, Mode>,
+}
+
+impl<'env, 'db, O, Mode> Deref for TypeWalkVisit<'_, 'env, 'db, O, Mode> {
+    type Target = TypeTraversal<'env, 'db, O, Mode>;
+
+    fn deref(&self) -> &Self::Target {
+        self.traversal
+    }
+}
+
+pub(super) type StructuralTypeVisit<'visit, 'env, 'db, O> =
+    TypeWalkVisit<'visit, 'env, 'db, O, StructuralTraversal>;
 
 struct TypeTraversalTag;
 
@@ -1833,7 +1850,7 @@ impl<'db> TypeQuery<'db> for LiteralArgument {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -1844,7 +1861,7 @@ impl<'db> TypeQuery<'db> for LiteralArgument {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Self::Output {
@@ -1873,7 +1890,7 @@ impl<'db, V: super::visitor::TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, Struct
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         visitor: &V,
@@ -1884,7 +1901,7 @@ impl<'db, V: super::visitor::TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, Struct
     fn visit(
         &self,
         db: &'db dyn Db,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         visitor: &V,
     ) {
@@ -1898,7 +1915,7 @@ impl<'db, V: super::visitor::TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, Struct
     fn visit_recursive_body(
         &self,
         db: &'db dyn Db,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         body: Type<'db>,
         visitor: &V,
     ) {
@@ -1929,7 +1946,7 @@ impl<'db> super::TypeAliasType<'db> {
 /// therefore covers both unfolding and the operation's subsequent traversal of that body.
 /// This is a walk: callbacks can mutate builders or collect occurrences. Use [`TypeQueryContext`]
 /// for operations that compute a reusable result from a type and immutable input.
-pub(crate) struct TypeTraversal<'env, 'db, O, Mode = SemanticTraversal> {
+pub(super) struct TypeTraversal<'env, 'db, O, Mode = SemanticTraversal> {
     operation: O,
     env: &'env TypeOperations<'db>,
     mapping: TraversalMapping<'env, 'db>,
@@ -2020,26 +2037,27 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
         O: TypeWalk<'db, State, Mode>,
     {
         self.with_active_type(db, ty, |cycle| {
+            let visit = TypeWalkVisit { traversal: self };
             if let Some(kind) = cycle {
-                return self.operation.on_cycle(self, ty, kind, state);
+                return self.operation.on_cycle(&visit, ty, kind, state);
             }
             match ty {
                 Type::Recursive(recursive) => {
                     self.operation
-                        .visit_alias_like(db, self, ty, state, |state| {
+                        .visit_alias_like(db, &visit, ty, state, |state| {
                             match recursive.unfold(db, self.mapping()) {
                                 UnfoldResult::Unfolded(body) => {
-                                    self.operation.visit_recursive_body(db, self, body, state)
+                                    self.operation.visit_recursive_body(db, &visit, body, state)
                                 }
                                 UnfoldResult::Unchanged(_) => {
-                                    self.operation.visit(db, self, ty, state)
+                                    self.operation.visit(db, &visit, ty, state)
                                 }
                             }
                         })
                 }
                 Type::TypeAlias(alias) => {
                     self.operation
-                        .visit_alias_like(db, self, ty, state, |state| {
+                        .visit_alias_like(db, &visit, ty, state, |state| {
                             let access = BodyAccess { env: self.env };
                             self.visit_with(db, alias.resolve_body(db, &access), state)
                         })
@@ -2047,12 +2065,12 @@ impl<'env, 'db, O, Mode: TypeTraversalMode> TypeTraversal<'env, 'db, O, Mode> {
                 Type::Union(_) if Mode::NORMALIZE_UNIONS => {
                     let normalized = normalize_outer_union(db, ty, self.mapping());
                     if normalized == ty {
-                        self.operation.visit(db, self, ty, state)
+                        self.operation.visit(db, &visit, ty, state)
                     } else {
                         self.visit_with(db, normalized, state)
                     }
                 }
-                _ => self.operation.visit(db, self, ty, state),
+                _ => self.operation.visit(db, &visit, ty, state),
             }
         })
     }
@@ -2093,7 +2111,7 @@ fn needs_traversal_guard(ty: Type<'_>) -> bool {
 /// Parameters shared by all recursive calls, such as an attribute name, belong on `Self`.
 /// Parameters that change between calls, such as a descriptor's receiver, belong in `Input`.
 /// Keep mutable collectors and builders in a separate walk.
-pub trait TypeQuery<'db, Input = ()>: Sized
+pub(super) trait TypeQuery<'db, Input = ()>: Sized
 where
     Input: Clone + Eq + Hash,
 {
@@ -2102,14 +2120,14 @@ where
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self, Input>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self, Input>,
         ty: Type<'db>,
         input: Input,
     ) -> Self::Output;
 
     fn on_cycle(
         &self,
-        context: &TypeQueryContext<'_, 'db, Self, Input>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self, Input>,
         ty: Type<'db>,
         kind: CycleKind,
         input: Input,
@@ -2119,12 +2137,33 @@ where
     fn visit_alias_like(
         &self,
         _db: &'db dyn Db,
-        _context: &TypeQueryContext<'_, 'db, Self, Input>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self, Input>,
         _ty: Type<'db>,
         input: Input,
         visit_body: impl FnOnce(Input) -> Self::Output,
     ) -> Self::Output {
         visit_body(input)
+    }
+}
+
+/// A query callback can only be entered by the context currently inspecting its type.
+pub(super) struct TypeQueryVisit<'visit, 'env, 'db, Q, Input = ()>
+where
+    Q: TypeQuery<'db, Input>,
+    Input: Clone + Eq + Hash,
+{
+    context: &'visit TypeQueryContext<'env, 'db, Q, Input>,
+}
+
+impl<'env, 'db, Q, Input> Deref for TypeQueryVisit<'_, 'env, 'db, Q, Input>
+where
+    Q: TypeQuery<'db, Input>,
+    Input: Clone + Eq + Hash,
+{
+    type Target = TypeQueryContext<'env, 'db, Q, Input>;
+
+    fn deref(&self) -> &Self::Target {
+        self.context
     }
 }
 
@@ -2137,7 +2176,7 @@ type TypeQueryCache<'db, Input, R> =
 /// guards consulted by its computation. Reuse requires those guards to give the same answers
 /// in the current context, including guards reached through another cached query.
 /// Changes to guards shared with other operations invalidate the cache as well.
-pub struct TypeQueryContext<'env, 'db, Q, Input = ()>
+pub(super) struct TypeQueryContext<'env, 'db, Q, Input = ()>
 where
     Q: TypeQuery<'db, Input>,
     Input: Clone + Eq + Hash,
@@ -2165,7 +2204,7 @@ where
     }
 
     /// Run a query with one cache and one set of guards for all recursive calls.
-    pub fn with_root<R>(
+    pub(super) fn with_root<R>(
         env: &'env TypeOperations<'db>,
         query: Q,
         visit: impl FnOnce(&Self) -> R,
@@ -2217,34 +2256,35 @@ where
             self.dependencies.borrow_mut().push(ty);
         }
         let output = self.traversal.with_active_type(db, ty, |cycle| {
+            let visit = TypeQueryVisit { context: self };
             let query = &self.traversal.operation;
             if let Some(kind) = cycle {
-                return query.on_cycle(self, ty, kind, input);
+                return query.on_cycle(&visit, ty, kind, input);
             }
             match ty {
-                Type::TypeAlias(alias) => query.visit_alias_like(db, self, ty, input, |input| {
+                Type::TypeAlias(alias) => query.visit_alias_like(db, &visit, ty, input, |input| {
                     let access = BodyAccess {
                         env: self.environment(),
                     };
                     self.visit_with(db, alias.resolve_body(db, &access), input)
                 }),
                 Type::Recursive(recursive) => {
-                    query.visit_alias_like(db, self, ty, input, |input| {
+                    query.visit_alias_like(db, &visit, ty, input, |input| {
                         match recursive.unfold(db, self.mapping_visitor()) {
                             UnfoldResult::Unfolded(body) => self.visit_with(db, body, input),
-                            UnfoldResult::Unchanged(_) => query.visit(db, self, ty, input),
+                            UnfoldResult::Unchanged(_) => query.visit(db, &visit, ty, input),
                         }
                     })
                 }
                 Type::Union(_) => {
                     let expanded = normalize_outer_union(db, ty, self.mapping_visitor());
                     if expanded == ty {
-                        query.visit(db, self, ty, input)
+                        query.visit(db, &visit, ty, input)
                     } else {
                         self.visit_with(db, expanded, input)
                     }
                 }
-                _ => query.visit(db, self, ty, input),
+                _ => query.visit(db, &visit, ty, input),
             }
         });
 
@@ -2285,7 +2325,7 @@ where
 }
 
 impl<'db, Q: TypeQuery<'db>> TypeQueryContext<'_, 'db, Q> {
-    pub fn visit(&self, db: &'db dyn Db, ty: Type<'db>) -> Q::Output {
+    pub(super) fn visit(&self, db: &'db dyn Db, ty: Type<'db>) -> Q::Output {
         self.visit_with(db, ty, ())
     }
 }
@@ -2347,7 +2387,7 @@ where
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         kind: CycleKind,
         state: Inspection<'a, 'env, 'db, C, F>,
@@ -2358,7 +2398,7 @@ where
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         mut state: Inspection<'a, 'env, 'db, C, F>,
     ) -> R {
@@ -3159,7 +3199,10 @@ mod query_tests {
     use rustc_hash::FxHashMap;
     use ty_python_core::ProgramFile;
 
-    use super::{CycleKind, TypeInspector, TypeQuery, TypeQueryContext, TypeTraversal, TypeWalk};
+    use super::{
+        CycleKind, TypeInspector, TypeQuery, TypeQueryContext, TypeQueryVisit, TypeTraversal,
+        TypeWalk, TypeWalkVisit,
+    };
     use crate::Db;
     use crate::db::tests::{TestDb, setup_db};
     use crate::place::global_symbol;
@@ -3204,7 +3247,7 @@ mod query_tests {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeTraversal<'_, 'db, Self>,
+                traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
                 ty: Type<'db>,
                 visits: &Cell<usize>,
             ) -> Self::Output {
@@ -3221,7 +3264,7 @@ mod query_tests {
 
             fn on_cycle(
                 &self,
-                _traversal: &TypeTraversal<'_, 'db, Self>,
+                _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 _kind: CycleKind,
                 _visits: &Cell<usize>,
@@ -3328,7 +3371,7 @@ mod query_tests {
         fn visit(
             &self,
             db: &'db dyn Db,
-            context: &TypeQueryContext<'_, 'db, Self, u64>,
+            context: &TypeQueryVisit<'_, '_, 'db, Self, u64>,
             ty: Type<'db>,
             value: u64,
         ) -> u64 {
@@ -3345,7 +3388,7 @@ mod query_tests {
 
         fn on_cycle(
             &self,
-            _context: &TypeQueryContext<'_, 'db, Self, u64>,
+            _context: &TypeQueryVisit<'_, '_, 'db, Self, u64>,
             _ty: Type<'db>,
             _kind: CycleKind,
             _value: u64,
@@ -3467,7 +3510,7 @@ mod query_tests {
             fn visit(
                 &self,
                 _db: &'db dyn Db,
-                _context: &TypeQueryContext<'_, 'db, Self>,
+                _context: &TypeQueryVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 (): (),
             ) -> bool {
@@ -3476,7 +3519,7 @@ mod query_tests {
 
             fn on_cycle(
                 &self,
-                _context: &TypeQueryContext<'_, 'db, Self>,
+                _context: &TypeQueryVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 _kind: CycleKind,
                 (): (),
@@ -3516,7 +3559,7 @@ mod query_tests {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                context: &TypeQueryContext<'_, 'db, Self>,
+                context: &TypeQueryVisit<'_, '_, 'db, Self>,
                 ty: Type<'db>,
                 (): (),
             ) -> bool {
@@ -3527,7 +3570,7 @@ mod query_tests {
 
             fn on_cycle(
                 &self,
-                _context: &TypeQueryContext<'_, 'db, Self>,
+                _context: &TypeQueryVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 _kind: CycleKind,
                 (): (),

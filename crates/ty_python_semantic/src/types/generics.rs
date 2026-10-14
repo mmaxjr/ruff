@@ -1,6 +1,7 @@
 use super::signatures::CallableSignature;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeWalkVisit;
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use crate::{Program, ProgramEnvironment};
 use std::borrow::Cow;
@@ -3815,7 +3816,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
 
             fn on_cycle(
                 &self,
-                _traversal: &TypeTraversal<'_, 'db, Self>,
+                _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 _kind: CycleKind,
                 _types: &'a mut MappingUnionTypes<'db>,
@@ -3826,7 +3827,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeTraversal<'_, 'db, Self>,
+                traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
                 ty: Type<'db>,
                 types: &'a mut MappingUnionTypes<'db>,
             ) -> bool {

@@ -1,6 +1,7 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
+use crate::types::recursive::{StructuralTypeVisit, TypeQueryVisit, TypeWalkVisit};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, btree_map::Entry as BTreeEntry, hash_map::Entry};
@@ -5249,7 +5250,7 @@ impl<'db> TypeQuery<'db> for NarrowWithPresentKey<'_> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -5263,7 +5264,7 @@ impl<'db> TypeQuery<'db> for NarrowWithPresentKey<'_> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {
@@ -5326,7 +5327,7 @@ impl<'db> TypeQuery<'db> for ContainsTypedDict<'_> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (),
@@ -5337,7 +5338,7 @@ impl<'db> TypeQuery<'db> for ContainsTypedDict<'_> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> bool {
@@ -5446,7 +5447,7 @@ impl<'a, 'db, F: FnMut(Type<'db>)> TypeWalk<'db, &'a mut F> for VisitTypedDictFi
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _visit: &'a mut F,
@@ -5456,7 +5457,7 @@ impl<'a, 'db, F: FnMut(Type<'db>)> TypeWalk<'db, &'a mut F> for VisitTypedDictFi
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         visit: &'a mut F,
     ) {
@@ -5527,7 +5528,7 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for ClassPatternSubject<'_, 'db
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -5538,7 +5539,7 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for ClassPatternSubject<'_, 'db
     fn visit(
         &self,
         _db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Type<'db> {
@@ -5558,7 +5559,7 @@ impl<'db> TypeQuery<'db> for RuntimeClass {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -5569,7 +5570,7 @@ impl<'db> TypeQuery<'db> for RuntimeClass {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Self::Output {

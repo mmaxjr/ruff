@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::TypeQueryVisit;
 use crate::types::{
     CallArguments, DataclassParams, KnownClass, KnownInstanceType, SpecialFormType,
     StaticClassLiteral, SubclassOfType, Type, TypeContext, TypingModule, UnionType,
@@ -564,7 +565,7 @@ impl<'db> TypeQuery<'db> for ClassBinding<'db> {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -575,7 +576,7 @@ impl<'db> TypeQuery<'db> for ClassBinding<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> bool {

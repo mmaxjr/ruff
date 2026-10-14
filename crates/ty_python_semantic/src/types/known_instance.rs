@@ -1,6 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
-use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::{RecursiveReferenceMapper, TypeQueryVisit};
 use itertools::Either;
 use ruff_python_ast::name::Name;
 
@@ -106,7 +106,7 @@ impl<'db> super::TypeQuery<'db> for MethodDescriptor<'db> {
 
     fn on_cycle(
         &self,
-        _context: &super::TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _kind: super::CycleKind,
         (): (),
@@ -119,7 +119,7 @@ impl<'db> super::TypeQuery<'db> for MethodDescriptor<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &super::TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Self::Output {

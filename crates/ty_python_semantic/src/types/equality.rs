@@ -5,6 +5,7 @@
 //! methods.
 
 use crate::types::TypeOperations;
+use crate::types::recursive::StructuralTypeVisit;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal, TypeInspector};
 use crate::types::{CycleKind, TypeWalk};
 use ty_python_core::definition::Definition;
@@ -1001,7 +1002,7 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for EnumDomain<'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         (): (),
@@ -1012,7 +1013,7 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for EnumDomain<'db> {
     fn visit_alias_like(
         &self,
         db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
         visit_body: impl FnOnce(()) -> bool,
@@ -1032,7 +1033,7 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for EnumDomain<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> bool {

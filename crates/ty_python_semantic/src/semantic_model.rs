@@ -30,9 +30,9 @@ use crate::place_load::{
 use crate::types::ide_support::{ImportAliasResolution, definition_for_name};
 use crate::types::list_members::{all_members, all_reachable_members};
 use crate::types::{
-    CycleKind, ProgramEnvironment, SpecialFormType, Type, TypeQualifiers, TypeQuery,
-    TypeQueryContext, binding_type, infer_complete_scope_types, infer_definition_types,
-    inferred_declaration, is_discarded_dict_key_assignment,
+    ProgramEnvironment, SpecialFormType, Type, TypeQualifiers, binding_type,
+    infer_complete_scope_types, infer_definition_types, inferred_declaration,
+    is_discarded_dict_key_assignment,
 };
 use ty_python_core::definition::{Definition, DefinitionKind};
 use ty_python_core::place::PlaceExpr;
@@ -56,6 +56,7 @@ use ty_python_core::{BindingWithConstraintsIterator, Program, ProgramFile};
 pub struct SemanticModel<'db> {
     db: &'db dyn Db,
     file: ProgramFile<'db>,
+    operations: TypeOperations<'db>,
     /// If `Some` then this `SemanticModel` is for analyzing the sub-AST of a string annotation.
     /// This expression will be used as a witness to the scope/location we're analyzing.
     in_string_annotation_expr: Option<Box<Expr>>,
@@ -66,6 +67,7 @@ impl<'db> SemanticModel<'db> {
         Self {
             db,
             file,
+            operations: TypeOperations::for_file(db, file),
             in_string_annotation_expr: None,
         }
     }
@@ -91,7 +93,7 @@ impl<'db> SemanticModel<'db> {
     }
 
     pub fn program_environment(&self) -> TypeOperations<'db> {
-        TypeOperations::for_file(self.db, self.file)
+        self.operations.clone()
     }
 
     pub fn file_path(&self) -> &FilePath {
@@ -569,6 +571,7 @@ impl<'db> SemanticModel<'db> {
         let model = Self {
             db: self.db,
             file: self.file,
+            operations: self.operations.clone(),
             // Use expr_in_ast here because we might be entering a sub-sub-AST
             in_string_annotation_expr: Some(Box::new(
                 self.expr_in_ast(&Expr::StringLiteral(string_expr.clone()))
@@ -651,63 +654,19 @@ impl<'db> SemanticModel<'db> {
         string_expr: &ast::ExprStringLiteral,
         subscript: Option<&ast::ExprSubscript>,
     ) -> Vec<ExpectedStringLiteralCompletion<'db>> {
-        struct StringLiteralCandidates;
-
-        impl<'db> TypeQuery<'db> for StringLiteralCandidates {
-            type Output = Vec<ExpectedStringLiteralCompletion<'db>>;
-
-            fn on_cycle(
-                &self,
-                _traversal: &TypeQueryContext<'_, 'db, Self>,
-                _ty: Type<'db>,
-                _kind: CycleKind,
-                _state: (),
-            ) -> Self::Output {
-                Vec::new()
-            }
-
-            fn visit(
-                &self,
-                db: &'db dyn Db,
-                traversal: &TypeQueryContext<'_, 'db, Self>,
-                ty: Type<'db>,
-                _state: (),
-            ) -> Self::Output {
-                match ty {
-                    Type::LiteralValue(literal) => literal
-                        .as_string()
-                        .map(|string_literal| {
-                            let value = string_literal.value(db).to_string();
-                            vec![ExpectedStringLiteralCompletion {
-                                ty: Type::string_literal(db, &*value),
-                                value,
-                            }]
-                        })
-                        .unwrap_or_default(),
-                    Type::Union(union) => union
-                        .elements(db)
-                        .iter()
-                        .flat_map(|element| traversal.visit(db, *element))
-                        .collect(),
-                    Type::Intersection(intersection) => intersection
-                        .positive(db)
-                        .iter()
-                        .flat_map(|element| traversal.visit(db, *element))
-                        .collect(),
-                    _ => Vec::new(),
-                }
-            }
-        }
         let db = self.db;
 
         let expected_ty = self.string_literal_completion_expected_type(string_expr);
         let mut candidates = expected_ty
             .map(|expected_ty| {
-                TypeQueryContext::with_root(
-                    &self.program_environment(),
-                    StringLiteralCandidates,
-                    |root| root.visit(db, expected_ty),
-                )
+                expected_ty
+                    .string_literal_candidates(db, &self.program_environment())
+                    .into_iter()
+                    .map(|value| ExpectedStringLiteralCompletion {
+                        ty: Type::string_literal(db, value.as_str()),
+                        value,
+                    })
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         // Finite choices from the expected type take precedence. A string used as the complete

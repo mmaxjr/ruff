@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::TypeQueryVisit;
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use itertools::{Either, EitherOrBoth, Itertools};
 use ruff_db::diagnostic::{Annotation, Diagnostic, Span};
@@ -2224,7 +2225,7 @@ impl<'db> TypeQuery<'db> for TypedDictKeyExpectedType {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -2235,7 +2236,7 @@ impl<'db> TypeQuery<'db> for TypedDictKeyExpectedType {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Self::Output {

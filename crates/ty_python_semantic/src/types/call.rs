@@ -1,3 +1,4 @@
+use crate::types::recursive::TypeQueryVisit;
 use std::borrow::Cow;
 
 use super::context::InferContext;
@@ -55,7 +56,7 @@ impl<'db> TypeQuery<'db> for HasExactRuntimeClass {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -66,7 +67,7 @@ impl<'db> TypeQuery<'db> for HasExactRuntimeClass {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> bool {

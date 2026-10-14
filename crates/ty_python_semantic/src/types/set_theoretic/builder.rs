@@ -40,6 +40,7 @@
 //! (unless exactly the same literal type), we can avoid many unnecessary redundancy checks.
 
 use crate::types::TypeOperations;
+use crate::types::recursive::{StructuralTypeVisit, TypeWalkVisit};
 use std::convert::Infallible;
 use std::hint::cold_path;
 use std::marker::PhantomData;
@@ -589,7 +590,7 @@ impl<'a, 'db> TypeWalk<'db, (&'a mut UnionBuilder<'db>, bool), StructuralTravers
 
     fn on_cycle(
         &self,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         kind: CycleKind,
         (builder, _unfold_named): (&'a mut UnionBuilder<'db>, bool),
@@ -602,7 +603,7 @@ impl<'a, 'db> TypeWalk<'db, (&'a mut UnionBuilder<'db>, bool), StructuralTravers
     fn visit_alias_like(
         &self,
         db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (builder, unfold_named): (&'a mut UnionBuilder<'db>, bool),
         _visit_body: impl FnOnce((&'a mut UnionBuilder<'db>, bool)),
@@ -624,7 +625,7 @@ impl<'a, 'db> TypeWalk<'db, (&'a mut UnionBuilder<'db>, bool), StructuralTravers
     fn visit(
         &self,
         _db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (builder, _unfold_named): (&'a mut UnionBuilder<'db>, bool),
     ) {
@@ -1389,7 +1390,7 @@ impl<'db> TypeWalk<'db, bool> for IsDisjunctive {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _negated: bool,
@@ -1400,7 +1401,7 @@ impl<'db> TypeWalk<'db, bool> for IsDisjunctive {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         negated: bool,
     ) -> bool {
@@ -1444,7 +1445,7 @@ impl<'a, 'db, L: IntersectionLimits>
     fn visit_alias_like(
         &self,
         db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         state: (&'a mut IntersectionBuilder<'db>, bool),
         _visit_body: impl FnOnce((&'a mut IntersectionBuilder<'db>, bool)) -> Self::Output,
@@ -1459,7 +1460,7 @@ impl<'a, 'db, L: IntersectionLimits>
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _kind: CycleKind,
         (builder, negative): (&'a mut IntersectionBuilder<'db>, bool),
@@ -1477,7 +1478,7 @@ impl<'a, 'db, L: IntersectionLimits>
     fn visit(
         &self,
         _db: &'db dyn Db,
-        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (builder, negative): (&'a mut IntersectionBuilder<'db>, bool),
     ) -> Self::Output {

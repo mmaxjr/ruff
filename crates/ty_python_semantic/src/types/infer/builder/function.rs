@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::TypeQueryVisit;
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use crate::{
     Db, DisplaySettings, FxIndexMap, ProgramEnvironment,
@@ -2308,7 +2309,7 @@ impl<'db> TypeQuery<'db> for InstanceTupleCovers<'_, 'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -2319,7 +2320,7 @@ impl<'db> TypeQuery<'db> for InstanceTupleCovers<'_, 'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> bool {
@@ -2370,7 +2371,7 @@ impl<'db> TypeQuery<'db> for InstanceTruthiness<'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (),
@@ -2381,7 +2382,7 @@ impl<'db> TypeQuery<'db> for InstanceTruthiness<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Truthiness {

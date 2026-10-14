@@ -1,5 +1,6 @@
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::{TypeQueryVisit, TypeWalkVisit};
 use crate::types::{TypeTraversal, TypeWalk};
 use std::cell::{OnceCell, RefCell};
 use std::collections::hash_map;
@@ -509,7 +510,7 @@ impl<'db> TypeQuery<'db> for AttributeDeletion<'_> {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -520,7 +521,7 @@ impl<'db> TypeQuery<'db> for AttributeDeletion<'_> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Self::Output {
@@ -5699,7 +5700,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             fn on_cycle(
                 &self,
-                _traversal: &TypeQueryContext<'_, 'db, Self>,
+                _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 _kind: CycleKind,
                 _state: (),
@@ -5711,7 +5712,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeQueryContext<'_, 'db, Self>,
+                traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 ty: Type<'db>,
                 _state: (),
             ) -> Self::Output {
@@ -11108,7 +11109,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
 
             fn on_cycle(
                 &self,
-                _traversal: &TypeQueryContext<'_, 'db, Self, bool>,
+                _traversal: &TypeQueryVisit<'_, '_, 'db, Self, bool>,
                 _ty: Type<'db>,
                 _kind: CycleKind,
                 _state: bool,
@@ -11119,7 +11120,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeQueryContext<'_, 'db, Self, bool>,
+                traversal: &TypeQueryVisit<'_, '_, 'db, Self, bool>,
                 ty: Type<'db>,
                 in_union: bool,
             ) -> Self::Output {
@@ -13579,7 +13580,7 @@ impl<'db, 'ast> TypeWalk<'db, &mut TypeInferenceBuilder<'db, 'ast>> for UnaryExp
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _builder: &mut TypeInferenceBuilder<'db, 'ast>,
@@ -13590,7 +13591,7 @@ impl<'db, 'ast> TypeWalk<'db, &mut TypeInferenceBuilder<'db, 'ast>> for UnaryExp
     fn visit(
         &self,
         _db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         builder: &mut TypeInferenceBuilder<'db, 'ast>,
     ) -> Type<'db> {

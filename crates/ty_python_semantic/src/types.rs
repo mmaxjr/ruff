@@ -1,4 +1,5 @@
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::recursive::TypeQueryVisit;
 use compact_str::{CompactString, ToCompactString};
 use itertools::Itertools;
 use ruff_diagnostics::{Edit, Fix};
@@ -153,6 +154,7 @@ mod function;
 mod generics;
 pub mod ide_support;
 mod infer;
+mod inspection;
 mod instance;
 mod iteration;
 mod known_instance;
@@ -168,10 +170,12 @@ mod operations;
 mod overrides;
 mod protocol_class;
 mod recursive;
+pub use inspection::TypeCategory;
 pub use operations::TypeOperations;
-pub use recursive::{RecursiveType, RecursiveVar, TypeQuery, TypeQueryContext};
-use recursive::{TypeInspector, TypeVisitorState};
-pub(crate) use recursive::{TypeTraversal, TypeWalk};
+pub use recursive::{RecursiveType, RecursiveVar};
+use recursive::{
+    TypeInspector, TypeQuery, TypeQueryContext, TypeTraversal, TypeVisitorState, TypeWalk,
+};
 pub(crate) mod relation;
 mod relation_error;
 mod set_theoretic;
@@ -984,7 +988,7 @@ impl<'db> TypeQuery<'db> for IsDefinitelyNonDataDescriptor {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -995,7 +999,7 @@ impl<'db> TypeQuery<'db> for IsDefinitelyNonDataDescriptor {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> bool {
@@ -1025,7 +1029,7 @@ impl<'db> TypeQuery<'db> for IsDataDescriptor {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -1039,7 +1043,7 @@ impl<'db> TypeQuery<'db> for IsDataDescriptor {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> bool {
@@ -4104,7 +4108,7 @@ impl<'db> Type<'db> {
 
             fn on_cycle(
                 &self,
-                _traversal: &TypeQueryContext<'_, 'db, Self>,
+                _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 kind: CycleKind,
                 _state: (),
@@ -4121,7 +4125,7 @@ impl<'db> Type<'db> {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeQueryContext<'_, 'db, Self>,
+                traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 ty: Type<'db>,
                 _state: (),
             ) -> Self::Output {
@@ -4755,7 +4759,7 @@ impl<'db> Type<'db> {
 
             fn on_cycle(
                 &self,
-                _traversal: &TypeQueryContext<'_, 'db, Self>,
+                _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 kind: CycleKind,
                 _state: (),
@@ -4769,7 +4773,7 @@ impl<'db> Type<'db> {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeQueryContext<'_, 'db, Self>,
+                traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 ty: Type<'db>,
                 _state: (),
             ) -> Self::Output {
@@ -5051,7 +5055,7 @@ impl<'db> Type<'db> {
 
                 fn on_cycle(
                     &self,
-                    _traversal: &TypeQueryContext<'_, 'db, Self>,
+                    _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                     _ty: Type<'db>,
                     _kind: CycleKind,
                     _state: (),
@@ -5062,7 +5066,7 @@ impl<'db> Type<'db> {
                 fn visit(
                     &self,
                     db: &'db dyn Db,
-                    traversal: &TypeQueryContext<'_, 'db, Self>,
+                    traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                     ty: Type<'db>,
                     _state: (),
                 ) -> Self::Output {
@@ -5828,7 +5832,7 @@ impl<'db> Type<'db> {
 
             fn on_cycle(
                 &self,
-                traversal: &TypeQueryContext<'_, 'db, Self, Option<Type<'db>>>,
+                traversal: &TypeQueryVisit<'_, '_, 'db, Self, Option<Type<'db>>>,
                 _ty: Type<'db>,
                 kind: CycleKind,
                 _receiver: Option<Type<'db>>,
@@ -5863,7 +5867,7 @@ impl<'db> Type<'db> {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeQueryContext<'_, 'db, Self, Option<Type<'db>>>,
+                traversal: &TypeQueryVisit<'_, '_, 'db, Self, Option<Type<'db>>>,
                 ty: Type<'db>,
                 receiver: Option<Type<'db>>,
             ) -> Self::Output {
@@ -9800,7 +9804,7 @@ impl<'db> Type<'db> {
 
             fn on_cycle(
                 &self,
-                _traversal: &TypeQueryContext<'_, 'db, Self>,
+                _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 _ty: Type<'db>,
                 _kind: CycleKind,
                 _state: (),
@@ -9811,7 +9815,7 @@ impl<'db> Type<'db> {
             fn visit(
                 &self,
                 db: &'db dyn Db,
-                traversal: &TypeQueryContext<'_, 'db, Self>,
+                traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
                 ty: Type<'db>,
                 _state: (),
             ) -> Self::Output {
@@ -10096,7 +10100,7 @@ impl<'db> TypeQuery<'db> for ProjectInstance {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -10110,7 +10114,7 @@ impl<'db> TypeQuery<'db> for ProjectInstance {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {
@@ -10199,7 +10203,7 @@ impl<'db> TypeQuery<'db> for TypeExpression<'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -10215,7 +10219,7 @@ impl<'db> TypeQuery<'db> for TypeExpression<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {
@@ -10509,7 +10513,7 @@ impl<'db> TypeQuery<'db, Option<Type<'db>>> for CollectBindings<'_, 'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self, Option<Type<'db>>>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self, Option<Type<'db>>>,
         ty: Type<'db>,
         kind: CycleKind,
         _receiver: Option<Type<'db>>,
@@ -10523,7 +10527,7 @@ impl<'db> TypeQuery<'db, Option<Type<'db>>> for CollectBindings<'_, 'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self, Option<Type<'db>>>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self, Option<Type<'db>>>,
         ty: Type<'db>,
         receiver: Option<Type<'db>>,
     ) -> Self::Output {
@@ -10557,7 +10561,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -10571,7 +10575,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
     fn visit_alias_like(
         &self,
         db: &'db dyn Db,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         state: (),
         project: impl FnOnce(()) -> Type<'db>,
@@ -10610,7 +10614,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Type<'db> {
@@ -10749,7 +10753,7 @@ impl<'db> TypeQuery<'db> for IsSingleton {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (),
@@ -10760,7 +10764,7 @@ impl<'db> TypeQuery<'db> for IsSingleton {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> bool {
@@ -10888,7 +10892,7 @@ impl<'db> TypeQuery<'db> for InspectGenerator {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -10902,7 +10906,7 @@ impl<'db> TypeQuery<'db> for InspectGenerator {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {
@@ -11064,7 +11068,7 @@ impl<'db> TypeQuery<'db> for GeneratorAnnotationSendType {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (),
@@ -11075,7 +11079,7 @@ impl<'db> TypeQuery<'db> for GeneratorAnnotationSendType {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {
@@ -11105,7 +11109,7 @@ impl<'db> TypeQuery<'db> for IncompatibleYieldFromSendType<'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (),
@@ -11116,7 +11120,7 @@ impl<'db> TypeQuery<'db> for IncompatibleYieldFromSendType<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {

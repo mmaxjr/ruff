@@ -10,6 +10,7 @@
 use crate::Db;
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::{TypeQueryVisit, TypeWalkVisit};
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext, TypeTraversal, TypeWalk};
 use ty_module_resolver::KnownModule;
 use ty_python_core::{definition::Definition, use_def_map};
@@ -326,7 +327,7 @@ where
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         evaluate: F,
@@ -340,7 +341,7 @@ where
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         object_ty: Type<'db>,
         evaluate: F,
     ) -> Self::Output {
@@ -759,7 +760,7 @@ impl<'db> TypeQuery<'db> for ShadowedDescriptorWriteType {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -770,7 +771,7 @@ impl<'db> TypeQuery<'db> for ShadowedDescriptorWriteType {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> Self::Output {
@@ -1694,7 +1695,7 @@ impl<'c, 'db> TypeWalk<'db, &TypeRelationChecker<'_, 'c, 'db>> for CheckDescript
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         checker: &TypeRelationChecker<'_, 'c, 'db>,
@@ -1708,7 +1709,7 @@ impl<'c, 'db> TypeWalk<'db, &TypeRelationChecker<'_, 'c, 'db>> for CheckDescript
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         descriptor_ty: Type<'db>,
         checker: &TypeRelationChecker<'_, 'c, 'db>,
     ) -> Self::Output {

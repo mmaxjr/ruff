@@ -581,17 +581,17 @@ fn collect_fixture_reference_roots<'db>(
 }
 
 /// AST visitor to find all references to a specific symbol by comparing semantic definitions
-struct LocalReferencesFinder<'a> {
-    model: &'a SemanticModel<'a>,
+struct LocalReferencesFinder<'a, 'db> {
+    model: &'a SemanticModel<'db>,
     tokens: &'a Tokens,
-    search: &'a LocalReferenceSearch<'a>,
+    search: &'a LocalReferenceSearch<'db>,
     references: &'a mut Vec<ReferenceTarget>,
     mode: ReferencesMode,
-    fixture_match_cache: FxHashMap<Definition<'a>, bool>,
+    fixture_match_cache: FxHashMap<Definition<'db>, bool>,
     ancestors: Vec<AnyNodeRef<'a>>,
 }
 
-impl<'a> SourceOrderVisitor<'a> for LocalReferencesFinder<'a> {
+impl<'a, 'db> SourceOrderVisitor<'a> for LocalReferencesFinder<'a, 'db> {
     fn enter_node(&mut self, node: AnyNodeRef<'a>) -> TraversalSignal {
         self.ancestors.push(node);
 
@@ -708,9 +708,9 @@ impl<'a> SourceOrderVisitor<'a> for LocalReferencesFinder<'a> {
 }
 
 /// AST visitor that searches only keyword-argument labels for semantic matches against a target.
-struct KeywordArgumentReferencesFinder<'a>(LocalReferencesFinder<'a>);
+struct KeywordArgumentReferencesFinder<'a, 'db>(LocalReferencesFinder<'a, 'db>);
 
-impl<'a> SourceOrderVisitor<'a> for KeywordArgumentReferencesFinder<'a> {
+impl<'a, 'db> SourceOrderVisitor<'a> for KeywordArgumentReferencesFinder<'a, 'db> {
     fn enter_node(&mut self, node: AnyNodeRef<'a>) -> TraversalSignal {
         self.0.ancestors.push(node);
 
@@ -729,7 +729,7 @@ impl<'a> SourceOrderVisitor<'a> for KeywordArgumentReferencesFinder<'a> {
     }
 }
 
-impl<'a> LocalReferencesFinder<'a> {
+impl<'a, 'db> LocalReferencesFinder<'a, 'db> {
     /// Checks an identifier of a binding (e.g. `x = 10`)
     fn check_binding_identifier(&mut self, identifier: &ast::Identifier) {
         self.check_identifier(identifier, OccurrenceKind::Binding);
@@ -833,8 +833,8 @@ impl<'a> LocalReferencesFinder<'a> {
 
     fn definition_matches_fixture_target(
         &mut self,
-        definition: Definition<'a>,
-        fixture_resolution: &FixtureReferenceResolution<'a>,
+        definition: Definition<'db>,
+        fixture_resolution: &FixtureReferenceResolution<'db>,
     ) -> bool {
         // A parameter and its uses share one definition:
         //
@@ -1038,7 +1038,7 @@ impl<'a> LocalReferencesFinder<'a> {
         self.binding_is_first_assignment_on_some_path(local_definition)
     }
 
-    fn binding_has_reachable_explicit_declaration(&self, binding: Definition<'a>) -> bool {
+    fn binding_has_reachable_explicit_declaration(&self, binding: Definition<'db>) -> bool {
         let db = self.model.db();
         let use_def = ty_python_core::use_def_map(db, binding.scope(db));
         use_def
@@ -1046,7 +1046,7 @@ impl<'a> LocalReferencesFinder<'a> {
             .any(|declaration| declaration.declaration.definition().is_some())
     }
 
-    fn binding_is_first_assignment_on_some_path(&self, binding: Definition<'a>) -> bool {
+    fn binding_is_first_assignment_on_some_path(&self, binding: Definition<'db>) -> bool {
         let db = self.model.db();
         let use_def = ty_python_core::use_def_map(db, binding.scope(db));
         use_def

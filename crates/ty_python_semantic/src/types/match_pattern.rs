@@ -1,4 +1,5 @@
 use crate::types::TypeOperations;
+use crate::types::recursive::{TypeQueryVisit, TypeWalkVisit};
 use std::hash::{Hash, Hasher};
 
 use crate::Db;
@@ -128,7 +129,7 @@ where
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _predicate: &'a mut F,
@@ -139,7 +140,7 @@ where
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         predicate: &'a mut F,
     ) -> bool {
@@ -789,7 +790,7 @@ impl<'a, 'pattern, 'db> TypeWalk<'db, (&'a mut PatternTypeCache<'pattern, 'db>, 
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (&'a mut PatternTypeCache<'pattern, 'db>, Type<'db>),
@@ -800,7 +801,7 @@ impl<'a, 'pattern, 'db> TypeWalk<'db, (&'a mut PatternTypeCache<'pattern, 'db>, 
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         resolved_subject_ty: Type<'db>,
         (cache, subject_ty): (&'a mut PatternTypeCache<'pattern, 'db>, Type<'db>),
     ) -> Type<'db> {
@@ -1109,7 +1110,7 @@ impl<'a, 'db> TypeWalk<'db, (&'a mut ExactTuplePatternExpansionBudget, Type<'db>
 
     fn on_cycle(
         &self,
-        _traversal: &TypeTraversal<'_, 'db, Self>,
+        _traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (&'a mut ExactTuplePatternExpansionBudget, Type<'db>),
@@ -1120,7 +1121,7 @@ impl<'a, 'db> TypeWalk<'db, (&'a mut ExactTuplePatternExpansionBudget, Type<'db>
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         resolved: Type<'db>,
         (budget, subject_ty): (&'a mut ExactTuplePatternExpansionBudget, Type<'db>),
     ) -> Self::Output {
@@ -1290,7 +1291,7 @@ impl<'db> TypeQuery<'db> for EnumPatternDomain<'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -1301,7 +1302,7 @@ impl<'db> TypeQuery<'db> for EnumPatternDomain<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> bool {

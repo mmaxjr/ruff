@@ -1,4 +1,5 @@
 use crate::types::TypeOperations;
+use crate::types::recursive::TypeQueryVisit;
 use std::fmt::Display;
 
 use ty_module_resolver::{SearchPath, file_to_module};
@@ -340,7 +341,7 @@ impl<'db> TypeQuery<'db> for ResolveClassBase<'db> {
 
     fn on_cycle(
         &self,
-        _traversal: &TypeQueryContext<'_, 'db, Self>,
+        _traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _state: (),
@@ -351,7 +352,7 @@ impl<'db> TypeQuery<'db> for ResolveClassBase<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeQueryContext<'_, 'db, Self>,
+        traversal: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {

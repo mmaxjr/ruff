@@ -1,6 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
-use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
+use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal, StructuralTypeVisit};
 use char_str::CharStr;
 use ruff_db::parsed::parsed_module;
 use ruff_python_ast::{
@@ -1021,7 +1021,7 @@ impl<'db> TypeWalk<'db, &mut FxHashSet<Type<'db>>, StructuralTraversal> for LaxI
 
     fn on_cycle(
         &self,
-        _traversal: &LaxInputTraversal<'_, 'db>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         _expanding_types: &mut FxHashSet<Type<'db>>,
@@ -1032,7 +1032,7 @@ impl<'db> TypeWalk<'db, &mut FxHashSet<Type<'db>>, StructuralTraversal> for LaxI
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &LaxInputTraversal<'_, 'db>,
+        traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         field_type: Type<'db>,
         expanding_types: &mut FxHashSet<Type<'db>>,
     ) -> Type<'db> {

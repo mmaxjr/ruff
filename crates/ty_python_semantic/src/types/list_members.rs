@@ -7,6 +7,7 @@
 
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::recursive::TypeWalkVisit;
 use crate::types::{CycleKind, TypeTraversal, TypeWalk};
 use std::cmp::Ordering;
 
@@ -172,7 +173,7 @@ impl<'db> TypeWalk<'db> for CollectMembers<'db> {
 
     fn on_cycle(
         &self,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         kind: CycleKind,
         _state: (),
@@ -190,7 +191,7 @@ impl<'db> TypeWalk<'db> for CollectMembers<'db> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        traversal: &TypeTraversal<'_, 'db, Self>,
+        traversal: &TypeWalkVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         _state: (),
     ) -> Self::Output {

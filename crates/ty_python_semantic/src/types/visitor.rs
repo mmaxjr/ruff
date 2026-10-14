@@ -1,5 +1,6 @@
 use crate::Db;
 use crate::types::TypeOperations;
+use crate::types::recursive::StructuralTypeVisit;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use std::cell::{Cell, RefCell};
 use std::hash::Hash;
@@ -422,7 +423,7 @@ impl<'db, V: TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, StructuralTraversal>
 
     fn on_cycle(
         &self,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         visitor: &V,
@@ -433,7 +434,7 @@ impl<'db, V: TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, StructuralTraversal>
     fn visit(
         &self,
         _db: &'db dyn Db,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         visitor: &V,
     ) {
@@ -443,7 +444,7 @@ impl<'db, V: TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, StructuralTraversal>
     fn visit_recursive_body(
         &self,
         db: &'db dyn Db,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        _traversal: &StructuralTypeVisit<'_, '_, 'db, Self>,
         body: Type<'db>,
         visitor: &V,
     ) {

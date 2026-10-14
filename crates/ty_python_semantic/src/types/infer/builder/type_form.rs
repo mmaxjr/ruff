@@ -1,4 +1,5 @@
 use crate::Db;
+use crate::types::recursive::TypeQueryVisit;
 use crate::types::{CycleKind, TypeQuery, TypeQueryContext};
 use ruff_python_ast::{self as ast};
 
@@ -123,7 +124,7 @@ impl<'db> TypeQuery<'db> for ContainsTypeFormValue<'_, 'db, '_> {
 
     fn on_cycle(
         &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
+        _context: &TypeQueryVisit<'_, '_, 'db, Self>,
         _ty: Type<'db>,
         _kind: CycleKind,
         (): (),
@@ -134,7 +135,7 @@ impl<'db> TypeQuery<'db> for ContainsTypeFormValue<'_, 'db, '_> {
     fn visit(
         &self,
         db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
+        context: &TypeQueryVisit<'_, '_, 'db, Self>,
         ty: Type<'db>,
         (): (),
     ) -> bool {

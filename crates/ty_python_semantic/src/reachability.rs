@@ -194,7 +194,7 @@
 //! [bdd]: https://en.wikipedia.org/wiki/Binary_decision_diagram
 
 use crate::ProgramEnvironment;
-use crate::types::{CycleKind, TypeOperations, TypeQuery, TypeQueryContext};
+use crate::types::TypeOperations;
 use std::cell::RefCell;
 
 use crate::{
@@ -352,50 +352,7 @@ fn enum_literal_subject_names<'db>(
     env: &TypeOperations<'db>,
     subject_ty: Type<'db>,
 ) -> Option<(EnumClassLiteral<'db>, FxHashSet<Name>)> {
-    TypeQueryContext::with_root(env, EnumLiteralSubjectNames, |context| {
-        context.visit(db, subject_ty)
-    })
-}
-
-struct EnumLiteralSubjectNames;
-
-impl<'db> TypeQuery<'db> for EnumLiteralSubjectNames {
-    type Output = Option<(EnumClassLiteral<'db>, FxHashSet<Name>)>;
-
-    fn on_cycle(
-        &self,
-        _context: &TypeQueryContext<'_, 'db, Self>,
-        _ty: Type<'db>,
-        _kind: CycleKind,
-        (): (),
-    ) -> Self::Output {
-        None
-    }
-
-    fn visit(
-        &self,
-        db: &'db dyn Db,
-        context: &TypeQueryContext<'_, 'db, Self>,
-        ty: Type<'db>,
-        (): (),
-    ) -> Self::Output {
-        if let Type::Union(union) = ty {
-            let mut elements = union.elements(db).iter();
-            let (class, mut names) = context.visit(db, *elements.next()?)?;
-            for element in elements {
-                let (other_class, other_names) = context.visit(db, *element)?;
-                if class != other_class {
-                    return None;
-                }
-                names.extend(other_names);
-            }
-            return Some((class, names));
-        }
-        let literal = ty.as_enum_literal()?;
-        let class = literal.enum_class_literal(db);
-        let name = class.resolve_member(db, literal.name(db))?;
-        Some((class, [name.clone()].into_iter().collect()))
-    }
+    subject_ty.enum_literal_members(db, env)
 }
 
 /// Return the canonical enum-member name matched by a single value pattern.
