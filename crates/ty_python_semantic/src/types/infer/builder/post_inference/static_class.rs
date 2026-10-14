@@ -616,7 +616,7 @@ pub(crate) fn check_static_class_definitions<'db>(
             }
         },
         Ok(_) => {
-            disjoint_bases.remove_redundant_entries(db);
+            disjoint_bases.remove_redundant_entries(db, env);
 
             if disjoint_bases.len() > 1 {
                 report_instance_layout_conflict(
@@ -840,7 +840,7 @@ pub(crate) fn check_static_class_definitions<'db>(
                     "__init_subclass__",
                     MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK,
                     // skip(1) to skip the current class and only consider base classes.
-                    class.iter_mro(db).skip(1),
+                    class.iter_mro(db, env).skip(1),
                 )
                 .ignore_possibly_undefined();
 
@@ -987,7 +987,7 @@ pub(crate) fn check_static_class_definitions<'db>(
             if let Some(generic_context) = class.generic_context(db) {
                 for self_typevar in generic_context.variables(db) {
                     let name = self_typevar.typevar(db).name(db);
-                    for enclosing in enclosing_generic_contexts(db, index, parent) {
+                    for enclosing in enclosing_generic_contexts(db, env, index, parent) {
                         if let Some(other_typevar) = enclosing.binds_named_typevar(db, name) {
                             report_shadowed_type_variable(
                                 context,
@@ -1007,7 +1007,7 @@ pub(crate) fn check_static_class_definitions<'db>(
             // variables from enclosing scopes (by identity).
             for base_typevar in class.typevars_referenced_in_bases(db) {
                 let typevar = base_typevar.typevar(db);
-                for enclosing in enclosing_generic_contexts(db, index, parent) {
+                for enclosing in enclosing_generic_contexts(db, env, index, parent) {
                     if let Some(other_typevar) = enclosing.binds_typevar(db, typevar) {
                         report_shadowed_type_variable(
                             context,
@@ -1189,7 +1189,7 @@ fn has_inherited_dataclass_field_order_violation<'db>(
     required_field: &Field<'db>,
 ) -> bool {
     class
-        .iter_mro(db)
+        .iter_mro(db, env)
         .skip(1)
         .filter_map(ClassBase::into_class)
         .filter_map(|ancestor| ancestor.static_class_literal(db))

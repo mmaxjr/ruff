@@ -1090,7 +1090,10 @@ impl<'db> Type<'db> {
                     return Ok(value_ty);
                 }
 
-                if class.iter_mro(db).any(|base| base == ClassBase::Generic) {
+                if class
+                    .iter_mro(db, env)
+                    .any(|base| base == ClassBase::Generic)
+                {
                     return Err(SubscriptError::new(
                         Type::unknown(),
                         SubscriptErrorKind::NonGenericClass { class },

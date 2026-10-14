@@ -107,7 +107,7 @@ pub(crate) fn check_overloaded_function<'db>(
         && binding_decorator_inconsistencies.is_empty()
         && context.is_lint_enabled(&INVALID_OVERLOAD)
     {
-        let implementation_callables = function.implementation_callables(db);
+        let implementation_callables = function.implementation_callables(db, env);
         check_non_generic_overload_implementation_consistency(
             context,
             overloads,

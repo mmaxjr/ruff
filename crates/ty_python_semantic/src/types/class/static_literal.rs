@@ -917,8 +917,8 @@ impl<'db> StaticClassLiteral<'db> {
     /// cases rather than simply iterating over the inferred resolution order for the class.
     ///
     /// [method resolution order]: https://docs.python.org/3/glossary.html#term-method-resolution-order
-    pub(crate) fn iter_mro(self, db: &'db dyn Db) -> MroIterator<'db> {
-        ClassLiteral::Static(self).iter_mro(db)
+    pub(crate) fn iter_mro(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> MroIterator<'db> {
+        ClassLiteral::Static(self).iter_mro(db, env)
     }
 
     /// Apply type arguments to the declared ancestry within the caller's operation.
@@ -958,7 +958,10 @@ impl<'db> StaticClassLiteral<'db> {
     ///
     /// class Example(metaclass=Meta): ...
     /// ```
+    #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| true, heap_size=ruff_memory_usage::heap_size)]
     fn has_own_custom_getattribute(self, db: &'db dyn Db) -> bool {
+        let env =
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
         if matches!(self.known(db), Some(KnownClass::Object | KnownClass::Type)) {
             return false;
         }
@@ -978,7 +981,7 @@ impl<'db> StaticClassLiteral<'db> {
             return true;
         };
 
-        metaclass.iter_mro(db).any(|base| match base {
+        metaclass.iter_mro(db, env).any(|base| match base {
             ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
             ClassBase::Class(base) => base.static_class_literal(db).is_none_or(|(base, _)| {
                 implicit_attribute_names(db, base.body_scope(db))
@@ -1000,8 +1003,12 @@ impl<'db> StaticClassLiteral<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> ClassInstanceFlags {
+            let env = &TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_scope(class.body_scope(db)),
+            );
             let mut flags = ClassInstanceFlags::empty();
-            for base in class.iter_mro(db) {
+            for base in class.iter_mro(db, env) {
                 match base {
                     ClassBase::Any => flags.insert(
                         ClassInstanceFlags::INHERITS_FROM_EXPLICIT_ANY
@@ -1046,7 +1053,10 @@ impl<'db> StaticClassLiteral<'db> {
     /// Return the module defining the `TypedDict` base of this class.
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn typed_dict_module(self, db: &'db dyn Db) -> Option<TypingModule> {
-        self.iter_mro(db).find_map(ClassBase::typed_dict_module)
+        let env =
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        self.iter_mro(db, env)
+            .find_map(ClassBase::typed_dict_module)
     }
 
     /// Return `true` if this class constitutes a typed dict specification (inherits from
@@ -1065,8 +1075,11 @@ impl<'db> StaticClassLiteral<'db> {
     /// Return `true` if this class is, or inherits from, a `NamedTuple` (inherits from
     /// `typing.NamedTuple`, either directly or indirectly, including functional forms like
     /// `NamedTuple("X", ...)`).
+    #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| false, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn has_named_tuple_class_in_mro(self, db: &'db dyn Db) -> bool {
-        self.iter_mro(db)
+        let env =
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        self.iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .any(|base| match base.class_literal(db) {
                 ClassLiteral::DynamicNamedTuple(_) => true,
@@ -1486,7 +1499,7 @@ impl<'db> StaticClassLiteral<'db> {
                 }
                 _ => {
                     let member =
-                        self.class_member_from_mro(db, env, name, policy, self.iter_mro(db));
+                        self.class_member_from_mro(db, env, name, policy, self.iter_mro(db, env));
                     let specialization =
                         generic_context.default_specialization(db, env, self.known(db));
                     // An inherited method's `Self` bound can still contain this class's type
@@ -1816,7 +1829,7 @@ impl<'db> StaticClassLiteral<'db> {
             field_policy.is_pydantic() && pydantic::constructor_fields_are_keyword_only(db, self);
         let pydantic_constructor_fields_are_optional = name == "__init__"
             && field_policy.is_pydantic()
-            && pydantic::constructor_fields_are_optional(db, self);
+            && pydantic::constructor_fields_are_optional(db, env, self);
 
         let instance_ty = Type::instance(
             db,
@@ -1826,7 +1839,7 @@ impl<'db> StaticClassLiteral<'db> {
 
         let signature_from_fields = |mut parameters: Vec<_>, return_ty: Type<'db>| {
             if name == "__init__" && field_policy.is_pydantic() {
-                pydantic::extend_settings_constructor_parameters(db, self, &mut parameters);
+                pydantic::extend_settings_constructor_parameters(db, env, self, &mut parameters);
             }
 
             for (field_name, field) in self.fields(db, env, specialization, field_policy).iter() {
@@ -2020,9 +2033,9 @@ impl<'db> StaticClassLiteral<'db> {
             parameters.sort_by_key(Parameter::is_keyword_only);
 
             if name == "__init__"
-                && field_policy
-                    .pydantic_metadata()
-                    .is_some_and(|metadata| pydantic::model_init_accepts_extra(db, self, metadata))
+                && field_policy.pydantic_metadata().is_some_and(|metadata| {
+                    pydantic::model_init_accepts_extra(db, env, self, metadata)
+                })
             {
                 let extra = pydantic::extra_parameter(&parameters);
                 parameters.push(extra);
@@ -2041,7 +2054,7 @@ impl<'db> StaticClassLiteral<'db> {
 
         match (field_policy, name) {
             (field_policy, "__init__")
-                if field_policy.synthesizes_constructor_signature_from_fields(db, self) =>
+                if field_policy.synthesizes_constructor_signature_from_fields(db, env, self) =>
             {
                 if field_policy.is_dataclass_like()
                     && !self.has_dataclass_param(db, field_policy, DataclassFlags::INIT)

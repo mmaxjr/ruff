@@ -2139,8 +2139,15 @@ fn legacy_generic_class_context<'db>(
     for ty in typevars {
         let argument_ty = *ty;
         if let Type::KnownInstance(KnownInstanceType::TypeVar(typevar)) = argument_ty {
-            let bound = bind_typevar(db, index, file_scope_id, typevar_binding_context, typevar)
-                .ok_or(LegacyGenericContextError::InvalidArgument(argument_ty))?;
+            let bound = bind_typevar(
+                db,
+                env,
+                index,
+                file_scope_id,
+                typevar_binding_context,
+                typevar,
+            )
+            .ok_or(LegacyGenericContextError::InvalidArgument(argument_ty))?;
             if bound.is_typevartuple(db) {
                 validated_typevars.insert(bound);
                 return Err(LegacyGenericContextError::TypeVarTupleMustBeUnpacked(Some(

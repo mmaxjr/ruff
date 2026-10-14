@@ -133,7 +133,8 @@ pub fn fixture_bindings_for_parameter<'db>(
     db: &'db dyn Db,
     parameter: Definition<'db>,
 ) -> Box<[FixtureBinding<'db>]> {
-    let Some(request) = fixture_request_for_parameter(db, parameter) else {
+    let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_definition(parameter));
+    let Some(request) = fixture_request_for_parameter(db, env, parameter) else {
         return Box::default();
     };
 
@@ -162,7 +163,8 @@ pub fn fixture_bindings_for_parameter<'db>(
             let Some(class) = original_class_type(db, class_definition) else {
                 return Box::default();
             };
-            let bindings = bindings_in_search_scope(db, &request, FixtureSearchScope::Class(class));
+            let bindings =
+                bindings_in_search_scope(db, env, &request, FixtureSearchScope::Class(class));
             if !bindings.is_empty() {
                 return bindings;
             }
@@ -173,6 +175,7 @@ pub fn fixture_bindings_for_parameter<'db>(
     let request_file = parameter.program_file(db);
     let bindings = bindings_in_search_scope(
         db,
+        env,
         &request,
         FixtureSearchScope::Scope(global_scope(db, request_file)),
     );
@@ -184,6 +187,7 @@ pub fn fixture_bindings_for_parameter<'db>(
     for conftest in conftest_files(db, request_file) {
         let bindings = bindings_in_search_scope(
             db,
+            env,
             &request,
             FixtureSearchScope::Scope(global_scope(db, conftest)),
         );
@@ -195,7 +199,8 @@ pub fn fixture_bindings_for_parameter<'db>(
     // Finally, search installed core plugins in reverse registration order. The legacy
     // temporary-directory plugin is registered after the static core plugins, so it comes first.
     if let Some(plugin) = pytest_legacy_tmpdir_plugin(db, request_file.program(db)) {
-        let bindings = bindings_in_search_scope(db, &request, FixtureSearchScope::Class(plugin));
+        let bindings =
+            bindings_in_search_scope(db, env, &request, FixtureSearchScope::Class(plugin));
         if !bindings.is_empty() {
             return bindings;
         }
@@ -206,6 +211,7 @@ pub fn fixture_bindings_for_parameter<'db>(
     {
         let bindings = bindings_in_search_scope(
             db,
+            env,
             &request,
             FixtureSearchScope::Scope(global_scope(db, *plugin)),
         );
@@ -490,12 +496,11 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
     fn fixture_request_for_parameter(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         definition: Definition<'db>,
     ) -> Option<FixtureRequest<'db>> {
-        let signature_parameters = self
-            .function_type
-            .last_definition_signature(db)
-            .parameters();
+        let signature = self.function_type.last_definition_signature(db, env);
+        let signature_parameters = signature.parameters();
         let parameter = signature_parameters
             .iter()
             .find(|parameter| parameter.definition() == Some(definition))?;
@@ -517,7 +522,7 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
             return None;
         }
 
-        if self.is_mock_patch_parameter(db, definition) {
+        if self.is_mock_patch_parameter(db, env, definition) {
             return None;
         }
 
@@ -536,13 +541,14 @@ impl<'db, 'ast> FixtureRequestContext<'db, 'ast> {
     fn is_mock_patch_parameter(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         parameter_definition: Definition<'db>,
     ) -> bool {
         if self.mock_patch_count == 0 {
             return false;
         }
 
-        let signature = self.function_type.last_definition_signature(db);
+        let signature = self.function_type.last_definition_signature(db, env);
         let parameters = signature.parameters();
         let is_source_keyword_parameter = |parameter: &SignatureParameter<'db>| {
             parameter.keyword_name().is_some()
@@ -623,6 +629,7 @@ impl FixtureRequestParentScope {
 /// Returns the fixture request represented by `definition`, if it is eligible for injection.
 fn fixture_request_for_parameter<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     definition: Definition<'db>,
 ) -> Option<FixtureRequest<'db>> {
     let DefinitionKind::Parameter(ParameterDefinitionNodeKind::Parameter(_)) = definition.kind(db)
@@ -638,7 +645,7 @@ fn fixture_request_for_parameter<'db>(
     let module = parsed_module(db, file.python_file(db)).load(db);
     let context = FixtureRequestContext::new(db, function_ref, class_scope, &module, index)?;
 
-    context.fixture_request_for_parameter(db, definition)
+    context.fixture_request_for_parameter(db, env, definition)
 }
 
 /// Returns the number of parameters supplied by `unittest.mock.patch`.
@@ -931,13 +938,14 @@ fn class_attribute_exists_at_runtime<'db>(
 /// Resolves a request against the fixture exposures in `search_scope`.
 fn bindings_in_search_scope<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     request: &FixtureRequest<'db>,
     search_scope: FixtureSearchScope<'db>,
 ) -> Box<[FixtureBinding<'db>]> {
     let search_scopes = match search_scope {
         FixtureSearchScope::Class(class) => Either::Left(
             class
-                .iter_mro(db)
+                .iter_mro(db, env)
                 .filter_map(ClassBase::into_class)
                 .filter(|ancestor| !ancestor.is_object(db))
                 .filter_map(|ancestor| ancestor.static_class_literal(db))

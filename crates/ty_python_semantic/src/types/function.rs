@@ -946,16 +946,17 @@ impl<'db> FunctionLiteral<'db> {
         ))
     }
 
-    /// Typed externally-visible signature of the last overload or implementation of this function.
-    ///
-    /// ## Warning
-    ///
-    /// This uses the semantic index to find the definition of the function. This means that if the
-    /// calling query is not in the same file as this function is defined in, then this will create
-    /// a cross-module dependency directly on the full AST which will lead to cache
-    /// over-invalidation.
+    /// Cache the source declaration before applying changes to the function's implementation.
     fn last_definition_signature(self, db: &'db dyn Db) -> Signature<'db> {
-        self.last_definition.signature(db)
+        #[salsa::tracked(
+            returns(clone),
+            cycle_initial=|_, _, _| Signature::bottom(),
+            heap_size=ruff_memory_usage::heap_size,
+        )]
+        fn cached<'db>(db: &'db dyn Db, definition: OverloadLiteral<'db>) -> Signature<'db> {
+            definition.signature(db)
+        }
+        cached(db, self.last_definition)
     }
 
     /// Typed externally-visible "raw" signature of the last overload or implementation of this function.
@@ -1268,12 +1269,16 @@ impl<'db> FunctionType<'db> {
     }
 
     /// Return all effective implementation callables, falling back to the raw implementation.
-    pub(super) fn implementation_callables(self, db: &'db dyn Db) -> Cow<'db, [CallableType<'db>]> {
+    pub(super) fn implementation_callables(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Cow<'db, [CallableType<'db>]> {
         self.updated_implementation_callables(db).map_or_else(
             || {
                 Cow::Owned(vec![CallableType::single(
                     db,
-                    self.last_definition_signature(db).clone(),
+                    self.last_definition_signature(db, env).into_owned(),
                 )])
             },
             Cow::Borrowed,
@@ -1308,7 +1313,7 @@ impl<'db> FunctionType<'db> {
             .with_inherited_generic_context(db, inherited_generic_context);
         let literal = self.literal(db);
         let updated_implementation_callables = literal.has_separate_implementation(db).then(|| {
-            self.implementation_callables(db)
+            self.implementation_callables(db, env)
                 .iter()
                 .map(|callable| {
                     callable
@@ -1376,7 +1381,7 @@ impl<'db> FunctionType<'db> {
                         .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
                 ),
                 literal.has_separate_implementation(db).then(|| {
-                    self.implementation_callables(db)
+                    self.implementation_callables(db, visitor.env)
                         .iter()
                         .map(|callable| {
                             callable.apply_type_mapping_impl(db, type_mapping, tcx, visitor)
@@ -1713,28 +1718,39 @@ impl<'db> FunctionType<'db> {
         self.signature(db).variance_of(db, &env, typevar)
     }
 
-    /// Typed externally-visible signature of the last overload or implementation of this function.
-    ///
-    /// ## Why is this a salsa query?
-    ///
-    /// This is a salsa query to short-circuit the invalidation
-    /// when the function's AST node changes.
-    ///
-    /// Were this not a salsa query, then the calling query
-    /// would depend on the function's AST and rerun for every change in that file.
+    /// Read the effective implementation signature within its consuming operation.
+    pub(crate) fn last_definition_signature(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Cow<'db, Signature<'db>> {
+        env.cached_query(
+            || Cow::Borrowed(self.cached_last_definition_signature(db)),
+            || Cow::Owned(self.compute_last_definition_signature(db, env)),
+        )
+    }
+
     #[salsa::tracked(
         returns(ref),
-        cycle_initial=|_, _, _|Signature::bottom(),
+        cycle_initial=|_, _, _| Signature::bottom(),
         heap_size=ruff_memory_usage::heap_size,
     )]
-    pub(crate) fn last_definition_signature(self, db: &'db dyn Db) -> Signature<'db> {
+    fn cached_last_definition_signature(self, db: &'db dyn Db) -> Signature<'db> {
         let env = TypeOperations::for_inference(
             db,
             ProgramEnvironment::from_definition(self.definition(db)),
         );
+        self.compute_last_definition_signature(db, &env)
+    }
+
+    fn compute_last_definition_signature(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Signature<'db> {
         let literal = self.literal(db);
         if literal.has_separate_implementation(db) {
-            self.updated_implementation_signature(db, &env)
+            self.updated_implementation_signature(db, env)
                 .unwrap_or_else(|| literal.last_definition_signature(db))
         } else {
             self.updated_signature(db)

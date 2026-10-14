@@ -919,9 +919,11 @@ pub(in crate::types) fn constructor_returns_instance_resolved<'db>(
         Type::Dynamic(_) => true,
         // A `Never` constructor return is terminal and does not run downstream construction.
         Type::Never => false,
-        Type::NominalInstance(instance) => instance
-            .class(db, env)
-            .is_subtype_of_class_literal(db, class_literal),
+        Type::NominalInstance(instance) => {
+            instance
+                .class(db, env)
+                .is_subtype_of_class_literal(db, env, class_literal)
+        }
         // We don't need to handle `ProtocolInstance` here, since the only way a protocol can be
         // instantiated is if a nominal class inherits it. If the nominal class inherits a
         // `__new__` from the protocol, either that `__new__` will return `Self` or equivalent,

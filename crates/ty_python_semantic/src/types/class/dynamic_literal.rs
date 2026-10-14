@@ -383,8 +383,8 @@ impl<'db> DynamicClassLiteral<'db> {
     ///
     /// If the MRO cannot be computed (e.g., due to inconsistent ordering), falls back
     /// to iterating over base MROs sequentially with deduplication.
-    pub(crate) fn iter_mro(self, db: &'db dyn Db) -> MroIterator<'db> {
-        ClassLiteral::Dynamic(self).iter_mro(db)
+    pub(crate) fn iter_mro(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> MroIterator<'db> {
+        ClassLiteral::Dynamic(self).iter_mro(db, env)
     }
 
     /// Look up an instance member by iterating through the MRO.
@@ -394,7 +394,7 @@ impl<'db> DynamicClassLiteral<'db> {
         env: &TypeOperations<'db>,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
-        match MroLookup::new(db, env, self.iter_mro(db)).instance_member(name) {
+        match MroLookup::new(db, env, self.iter_mro(db, env)).instance_member(name) {
             InstanceMemberResult::Done(result) => result,
             InstanceMemberResult::TypedDict => {
                 // Simplified `TypedDict` handling without type mapping.
@@ -438,7 +438,7 @@ impl<'db> DynamicClassLiteral<'db> {
             }
         }
 
-        let result = MroLookup::new(db, env, self.iter_mro(db)).class_member(
+        let result = MroLookup::new(db, env, self.iter_mro(db, env)).class_member(
             name, policy, None,  // No inherited generic context.
             false, // Dynamic classes are never `object`.
         );

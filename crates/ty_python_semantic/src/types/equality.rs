@@ -1595,9 +1595,15 @@ fn compare_different_semantics<'db>(
         (left, right)
             if let (Some(left_class), Some(right_class)) =
                 (left.nominal_class(db, env), right.nominal_class(db, env))
-                && (left_class.is_subtype_of_class_literal(db, right_class.class_literal(db))
-                    || right_class
-                        .is_subtype_of_class_literal(db, left_class.class_literal(db))) =>
+                && (left_class.is_subtype_of_class_literal(
+                    db,
+                    env,
+                    right_class.class_literal(db),
+                ) || right_class.is_subtype_of_class_literal(
+                    db,
+                    env,
+                    left_class.class_literal(db),
+                )) =>
         {
             ComparisonResult::Ambiguous
         }

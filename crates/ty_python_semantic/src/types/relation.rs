@@ -1858,10 +1858,13 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             KnownClass::Type
                 .try_to_class_literal(db, env)
                 .is_some_and(|type_class| {
-                    instance.class_literal(db, env).iter_mro(db).any(|base| {
-                        matches!(base, ClassBase::Class(class)
+                    instance
+                        .class_literal(db, env)
+                        .iter_mro(db, env)
+                        .any(|base| {
+                            matches!(base, ClassBase::Class(class)
                             if class.class_literal(db) == ClassLiteral::Static(type_class))
-                    })
+                        })
                 })
         })
     }
@@ -2683,7 +2686,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                         (source, target_callable.runtime_class(db))
                         && !instance
                             .class_literal(db, env)
-                            .iter_mro(db)
+                            .iter_mro(db, env)
                             .any(|base| match base {
                                 ClassBase::Class(class) => class.known(db) == Some(runtime_class),
                                 // An unknown base can supply the runtime class.
@@ -2846,7 +2849,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 
                 if let Some(sequence_class) = KnownClass::Sequence.try_to_class_literal(db, env)
                     && !sequence_class
-                        .iter_mro(db)
+                        .iter_mro(db, env)
                         .filter_map(ClassBase::into_class)
                         .map(|class| class.class_literal(db))
                         .contains(&target_class)
@@ -2897,7 +2900,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
 
                 if let Some(sequence_class) = KnownClass::Sequence.try_to_class_literal(db, env)
                     && !sequence_class
-                        .iter_mro(db)
+                        .iter_mro(db, env)
                         .filter_map(ClassBase::into_class)
                         .map(|class| class.class_literal(db))
                         .contains(&target_class)

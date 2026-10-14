@@ -319,7 +319,7 @@ impl<'db> StaticClassLiteral<'db> {
                 return SlotDefinition::DynamicOrNone;
             };
             let inherited_slots: FxIndexSet<_> = self
-                .iter_mro(db)
+                .iter_mro(db, &env)
                 .skip(1)
                 .filter_map(ClassBase::into_class)
                 .filter_map(|class| class.static_class_literal(db).map(|(class, _)| class))
@@ -447,6 +447,8 @@ impl<'db> StaticClassLiteral<'db> {
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn instance_layout(self, db: &'db dyn Db) -> InstanceLayout {
+        let env =
+            &TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
         if self.is_protocol(db) {
             return InstanceLayout::unknown();
         }
@@ -454,7 +456,7 @@ impl<'db> StaticClassLiteral<'db> {
         let mut slots = FxIndexSet::default();
         let mut dictionary = InstanceDictionary::Absent;
 
-        for base in self.iter_mro(db) {
+        for base in self.iter_mro(db, env) {
             let base = match base {
                 ClassBase::Class(base) => base,
                 ClassBase::Any | ClassBase::Divergent(_) | ClassBase::Dynamic(_) => {

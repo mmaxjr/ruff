@@ -544,7 +544,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
         class_literal: ClassLiteral<'db>,
     ) {
         for parent in class_literal
-            .iter_mro(db)
+            .iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .filter_map(|class| class.static_class_literal(db).map(|(lit, _)| lit))
         {
@@ -675,7 +675,10 @@ impl<'db> AllMembers<'_, '_, 'db> {
         ty: Type<'db>,
         class_literal: StaticClassLiteral<'db>,
     ) {
-        for class in class_literal.iter_mro(db).filter_map(ClassBase::into_class) {
+        for class in class_literal
+            .iter_mro(db, env)
+            .filter_map(ClassBase::into_class)
+        {
             if let Some((class_literal, _)) = class.static_class_literal(db) {
                 self.extend_with_instance_members_for_class(db, env, ty, class_literal);
             }

@@ -591,7 +591,7 @@ struct LocalReferencesFinder<'a, 'db> {
     ancestors: Vec<AnyNodeRef<'a>>,
 }
 
-impl<'a, 'db> SourceOrderVisitor<'a> for LocalReferencesFinder<'a, 'db> {
+impl<'a> SourceOrderVisitor<'a> for LocalReferencesFinder<'a, '_> {
     fn enter_node(&mut self, node: AnyNodeRef<'a>) -> TraversalSignal {
         self.ancestors.push(node);
 
@@ -710,7 +710,7 @@ impl<'a, 'db> SourceOrderVisitor<'a> for LocalReferencesFinder<'a, 'db> {
 /// AST visitor that searches only keyword-argument labels for semantic matches against a target.
 struct KeywordArgumentReferencesFinder<'a, 'db>(LocalReferencesFinder<'a, 'db>);
 
-impl<'a, 'db> SourceOrderVisitor<'a> for KeywordArgumentReferencesFinder<'a, 'db> {
+impl<'a> SourceOrderVisitor<'a> for KeywordArgumentReferencesFinder<'a, '_> {
     fn enter_node(&mut self, node: AnyNodeRef<'a>) -> TraversalSignal {
         self.0.ancestors.push(node);
 

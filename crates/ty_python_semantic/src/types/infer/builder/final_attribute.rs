@@ -251,7 +251,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             && object_ty
                 .nominal_class(db, env)
                 .is_some_and(|object_class| {
-                    object_class.is_subtype_of_class_literal(db, class_ty.class_literal(db))
+                    object_class.is_subtype_of_class_literal(db, env, class_ty.class_literal(db))
                 });
         if !is_current_class_instance {
             report_not_in_init();

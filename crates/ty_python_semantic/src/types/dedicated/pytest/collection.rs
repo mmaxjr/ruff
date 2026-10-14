@@ -399,7 +399,7 @@ fn pytest_test_class_kind<'db>(
         return None;
     }
 
-    if is_unittest_test_case(db, class) {
+    if is_unittest_test_case(db, &env, class) {
         return Some(PytestTestKind::StdlibUnittest);
     }
 
@@ -438,9 +438,13 @@ fn has_default_pytest_constructors(db: &dyn Db, class: ClassLiteral<'_>) -> bool
 }
 
 /// Returns whether the class inherits from the canonical `unittest.TestCase`.
-fn is_unittest_test_case(db: &dyn Db, class: ClassLiteral<'_>) -> bool {
+fn is_unittest_test_case<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    class: ClassLiteral<'db>,
+) -> bool {
     class
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .any(|ancestor| ancestor.is_known(db, KnownClass::UnittestTestCase))
 }
@@ -450,7 +454,7 @@ fn has_unittest_test_methods<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> 
     let env =
         TypeOperations::for_inference(db, ProgramEnvironment::from_file(class.program_file(db)));
     class
-        .iter_mro(db)
+        .iter_mro(db, &env)
         .filter_map(ClassBase::into_class)
         .filter_map(|ancestor| ancestor.static_class_literal(db))
         .any(|(ancestor, _)| {

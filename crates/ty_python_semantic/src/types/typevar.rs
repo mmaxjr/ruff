@@ -696,7 +696,11 @@ impl<'db> TypeVarInstance<'db> {
         Some(default)
     }
 
-    pub fn bind_pep695(self, db: &'db dyn Db) -> Option<BoundTypeVarInstance<'db>> {
+    pub fn bind_pep695(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<BoundTypeVarInstance<'db>> {
         if !matches!(
             self.identity(db).kind(db),
             TypeVarKind::Pep695TypeVar | TypeVarKind::Pep695ParamSpec
@@ -708,7 +712,7 @@ impl<'db> TypeVarInstance<'db> {
         let (_, child) = index
             .child_scopes(typevar_definition.file_scope(db))
             .next()?;
-        GenericContext::of_node(db, child.node(), index)?.binds_typevar(db, self)
+        GenericContext::of_node(db, env, child.node(), index)?.binds_typevar(db, self)
     }
 }
 

@@ -1367,7 +1367,8 @@ fn source_captured_typevars<'db>(db: &'db dyn Db, input: LambdaSource<'db>) -> G
     let mut lexical_variables = FxOrderSet::default();
     if !free_names.is_empty() {
         for (ancestor_id, ancestor) in index.ancestor_scopes(scope.file_scope_id(db)) {
-            if let Some(context) = GenericContext::lexical_of_node(db, ancestor.node(), index) {
+            if let Some(context) = GenericContext::lexical_of_node(db, &env, ancestor.node(), index)
+            {
                 lexical_variables.extend(context.variables(db).filter(|variable| {
                     captured_scopes.contains(&ancestor_id) || free_names.contains(variable.name(db))
                 }));

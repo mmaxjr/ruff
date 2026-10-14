@@ -10307,6 +10307,7 @@ impl<'db> TypeQuery<'db> for TypeExpression<'db> {
                     let index = semantic_index(db, scope_id.program_file(db));
                     Ok(bind_typevar(
                         db,
+                        env,
                         index,
                         scope_id.file_scope_id(db),
                         typevar_binding_context,
@@ -11501,8 +11502,12 @@ fn class_mro_literals<'db>(
     db: &'db dyn Db,
     class_literal: ClassLiteral<'db>,
 ) -> Box<[ClassLiteral<'db>]> {
+    let env = &TypeOperations::for_inference(
+        db,
+        ProgramEnvironment::from_file(class_literal.program_file(db)),
+    );
     class_literal
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .map(|class| class.class_literal(db))
         .collect()

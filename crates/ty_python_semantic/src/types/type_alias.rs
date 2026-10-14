@@ -383,6 +383,7 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
             let typevar = match definition_expression_type(db, definition, element) {
                 Type::KnownInstance(KnownInstanceType::TypeVar(typevar)) => bind_typevar(
                     db,
+                    &env,
                     index,
                     definition.file_scope(db),
                     Some(definition),

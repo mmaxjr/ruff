@@ -1029,7 +1029,7 @@ fn specialize_narrowing_target<'db>(
     subject_class.static_class_literal(db)?.1?;
 
     let target_class =
-        if subject_class.is_subtype_of_class_literal(db, target_class.class_literal(db)) {
+        if subject_class.is_subtype_of_class_literal(db, env, target_class.class_literal(db)) {
             subject_class
         } else {
             specialize_generic_class_for_subject(
@@ -2543,7 +2543,7 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
                     return intersect(subject_ty);
                 };
                 let subject_class = instance.class(db, &self.env);
-                if subject_class.is_subtype_of_class_literal(db, class) {
+                if subject_class.is_subtype_of_class_literal(db, &self.env, class) {
                     subject_ty
                 } else if subject_ty.is_disjoint_from(db, &self.env, class_ty) {
                     Type::Never
@@ -2651,12 +2651,15 @@ impl<'db, 'pattern> PatternSuccessAnalyzer<'db, 'pattern> {
                 if original_subject_ty
                     .nominal_class(db, &self.env)
                     .is_some_and(|original_class| {
-                        unknown_pattern_class
-                            .is_subtype_of_class_literal(db, original_class.class_literal(db))
-                            || original_class.is_subtype_of_class_literal(
-                                db,
-                                unknown_pattern_class.class_literal(db),
-                            )
+                        unknown_pattern_class.is_subtype_of_class_literal(
+                            db,
+                            &self.env,
+                            original_class.class_literal(db),
+                        ) || original_class.is_subtype_of_class_literal(
+                            db,
+                            &self.env,
+                            unknown_pattern_class.class_literal(db),
+                        )
                     })
                 {
                     // The pattern class's unknown specialization loses type arguments known

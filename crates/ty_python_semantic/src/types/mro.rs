@@ -935,7 +935,7 @@ impl<'db> DynamicMroError<'db> {
     }
 
     /// Return the fallback MRO to use for type inference.
-    fn fallback_mro(&self) -> &Mro<'db> {
+    pub(super) fn fallback_mro(&self) -> &Mro<'db> {
         &self.fallback_mro
     }
 }

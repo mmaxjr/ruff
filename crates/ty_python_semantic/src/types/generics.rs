@@ -58,12 +58,15 @@ use ty_python_core::{SemanticIndex, semantic_index};
 /// scope.
 pub(crate) fn enclosing_generic_contexts<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     index: &SemanticIndex<'db>,
     scope: FileScopeId,
 ) -> impl Iterator<Item = GenericContext<'db>> {
     index
         .ancestor_scopes(scope)
-        .filter_map(|(_, ancestor_scope)| GenericContext::of_node(db, ancestor_scope.node(), index))
+        .filter_map(|(_, ancestor_scope)| {
+            GenericContext::of_node(db, env, ancestor_scope.node(), index)
+        })
 }
 
 /// Returns the binding contexts introduced by the given scope or any enclosing scope.
@@ -97,6 +100,7 @@ pub(crate) fn enclosing_binding_contexts<'a, 'db>(
 /// bind the typevar with that new binding context.
 pub(crate) fn bind_typevar<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     index: &SemanticIndex<'db>,
     containing_scope: FileScopeId,
     typevar_binding_context: Option<Definition<'db>>,
@@ -104,6 +108,7 @@ pub(crate) fn bind_typevar<'db>(
 ) -> Option<BoundTypeVarInstance<'db>> {
     find_typevar_binding(
         db,
+        env,
         index,
         containing_scope,
         typevar,
@@ -125,12 +130,14 @@ pub(crate) fn bind_typevar<'db>(
 /// without changing the binding selected for the current function's signature.
 pub(crate) fn resolve_typevar_reference<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     index: &SemanticIndex<'db>,
     containing_scope: FileScopeId,
     typevar: TypeVarInstance<'db>,
 ) -> Option<BoundTypeVarInstance<'db>> {
     find_typevar_binding(
         db,
+        env,
         index,
         containing_scope,
         typevar,
@@ -147,6 +154,7 @@ pub(crate) fn resolve_typevar_reference<'db>(
 /// remain visible in inner scopes.
 fn find_typevar_binding<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     index: &SemanticIndex<'db>,
     containing_scope: FileScopeId,
     typevar: TypeVarInstance<'db>,
@@ -236,10 +244,10 @@ fn find_typevar_binding<'db>(
         }
         let generic_context = match return_callable_typevar_scope {
             ReturnCallableTypeVarScope::Lexical => {
-                GenericContext::lexical_of_node(db, ancestor_scope.node(), index)
+                GenericContext::lexical_of_node(db, env, ancestor_scope.node(), index)
             }
             ReturnCallableTypeVarScope::Public => {
-                GenericContext::of_node(db, ancestor_scope.node(), index)
+                GenericContext::of_node(db, env, ancestor_scope.node(), index)
             }
         };
         // If we've already crossed a class boundary, skip class-scoped generic contexts.
@@ -338,6 +346,7 @@ pub(crate) fn typing_self<'db>(
 
     bind_typevar(
         db,
+        &env,
         index,
         containing_scope,
         typevar_binding_context,
@@ -389,6 +398,7 @@ impl<'db> GenericContext<'db> {
 
     pub(crate) fn of_node(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         node: &NodeWithScopeKind,
         index: &SemanticIndex<'db>,
     ) -> Option<Self> {
@@ -401,7 +411,7 @@ impl<'db> GenericContext<'db> {
                 let definition = index.expect_single_definition(function);
                 infer_definition_types(db, definition)
                     .function_type(definition)?
-                    .last_definition_signature(db)
+                    .last_definition_signature(db, env)
                     .generic_context
             }
             NodeWithScopeKind::TypeAlias(type_alias) => {
@@ -421,6 +431,7 @@ impl<'db> GenericContext<'db> {
     /// externally visible signature. Other scope kinds have identical lexical and public contexts.
     pub(super) fn lexical_of_node(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         node: &NodeWithScopeKind,
         index: &SemanticIndex<'db>,
     ) -> Option<Self> {
@@ -431,7 +442,7 @@ impl<'db> GenericContext<'db> {
                 .last_definition_raw_signature(db, ReturnCallableTypeVarScope::Lexical)
                 .generic_context
         } else {
-            Self::of_node(db, node, index)
+            Self::of_node(db, env, node, index)
         }
     }
 
@@ -4701,11 +4712,13 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                                 return Some(combined);
                             }
 
-                            let when = if source_origin
-                                .is_subtype_of_class_literal(db, target_origin.class_literal(db))
-                                || target
-                                    .interface(db, self.env)
-                                    .has_only_finite_members(db, self.env)
+                            let when = if source_origin.is_subtype_of_class_literal(
+                                db,
+                                self.env,
+                                target_origin.class_literal(db),
+                            ) || target
+                                .interface(db, self.env)
+                                .has_only_finite_members(db, self.env)
                             {
                                 Type::ProtocolInstance(source)
                                     .when_constraint_set_assignable_to_owned(

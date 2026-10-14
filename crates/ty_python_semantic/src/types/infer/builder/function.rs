@@ -600,7 +600,12 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             let current_scope = self.scope().file_scope_id(db);
             for type_param in type_params.iter() {
                 let param_name = type_param.name();
-                for enclosing in enclosing_generic_contexts(self.db(), self.index, current_scope) {
+                for enclosing in enclosing_generic_contexts(
+                    self.db(),
+                    self.program_environment(),
+                    self.index,
+                    current_scope,
+                ) {
                     if let Some(other_typevar) = enclosing.binds_named_typevar(db, &param_name.id) {
                         let kind = match type_param {
                             ast::TypeParam::TypeVar(_) => TypeVarKind::Pep695TypeVar,
@@ -2161,7 +2166,7 @@ impl KnownFunction {
                     _ => return,
                 };
 
-                if !class.has_ordering_method_in_mro(db) {
+                if !class.has_ordering_method_in_mro(db, builder.program_environment()) {
                     report_invalid_total_ordering_call(
                         &builder.context,
                         class.class_literal(db),
@@ -2392,7 +2397,7 @@ impl<'db> TypeQuery<'db> for InstanceTruthiness<'db> {
             ty.as_nominal_instance().is_some_and(|instance| {
                 instance
                     .class(db, env)
-                    .is_subtype_of_class_literal(db, class)
+                    .is_subtype_of_class_literal(db, env, class)
             })
         };
 

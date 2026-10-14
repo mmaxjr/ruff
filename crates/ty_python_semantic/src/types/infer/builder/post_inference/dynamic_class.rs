@@ -69,7 +69,7 @@ pub(crate) fn check_dynamic_class_definition<'db>(
             }
         }
 
-        disjoint_bases.remove_redundant_entries(db);
+        disjoint_bases.remove_redundant_entries(db, env);
         if disjoint_bases.len() > 1 {
             report_instance_layout_conflict(
                 context,

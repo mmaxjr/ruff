@@ -1133,7 +1133,7 @@ pub(crate) fn enum_metadata<'db>(
     let new = resolve_enum_method(user_defined_new, || {
         inherited_known_enum_method(db, &env, class, "__new__")
     });
-    let metaclass_may_transform_values = enum_metaclass_may_transform_values(db, class);
+    let metaclass_may_transform_values = enum_metaclass_may_transform_values(db, &env, class);
     let user_defined_generate_next_value =
         custom_enum_method(db, scope_id, "_generate_next_value_").or_else(|| {
             inherited_user_defined_enum_method(db, &env, class, "_generate_next_value_")
@@ -1217,7 +1217,7 @@ pub(crate) fn enum_metadata<'db>(
                                     } else {
                                         let custom_mixins: SmallVec<[Option<KnownClass>; 1]> =
                                             class
-                                                .iter_mro(db)
+                                                .iter_mro(db, &env)
                                                 .skip(1)
                                                 .filter_map(ClassBase::into_class)
                                                 .filter(|class| {
@@ -1374,6 +1374,7 @@ pub(crate) fn enum_metadata<'db>(
 /// enum constructor validates and forwards them to `__new__`/`__init__`.
 fn enum_metaclass_may_transform_values<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     class: StaticClassLiteral<'db>,
 ) -> bool {
     let Some(metaclass) = class.metaclass(db).class_literal_or_origin(db) else {
@@ -1381,7 +1382,7 @@ fn enum_metaclass_may_transform_values<'db>(
     };
 
     metaclass
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .filter_map(|base| base.class_literal(db).as_static())
         .take_while(|base| base.known(db) != Some(KnownClass::EnumType))
@@ -1403,7 +1404,7 @@ fn iter_parent_enum_classes<'db>(
     let env = env.clone();
 
     class
-        .iter_mro(db)
+        .iter_mro(db, &env)
         .skip(1)
         .filter_map(ClassBase::into_class)
         .filter_map(move |class_type| {
@@ -1587,7 +1588,7 @@ fn inherited_user_defined_mixin_new<'db>(
     class: StaticClassLiteral<'db>,
 ) -> Option<EnumMethodBinding<'db>> {
     class
-        .iter_mro(db)
+        .iter_mro(db, env)
         .skip(1)
         .filter_map(ClassBase::into_class)
         .find_map(|class_type| {

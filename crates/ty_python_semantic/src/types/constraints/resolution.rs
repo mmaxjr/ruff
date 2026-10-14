@@ -278,7 +278,10 @@ impl<'db> TypeVisitorHooks<'db> for Dependencies<'_, 'db> {
             Self::signature(db, visit, signature);
         }
         if function.literal(db).has_separate_implementation(db) {
-            for callable in function.implementation_callables(db).iter() {
+            for callable in function
+                .implementation_callables(db, visit.program_environment())
+                .iter()
+            {
                 visit.visit_type_contents(db, Type::Callable(*callable));
             }
         }

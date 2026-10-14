@@ -231,6 +231,7 @@ impl<'db> CodeGeneratorKind<'db> {
             } else if let Ok((_, Some(info))) = class.try_metaclass(db) {
                 Some(CodeGeneratorKind::from_dataclass_transformer(
                     db,
+                    &env,
                     class,
                     info.params,
                 ))
@@ -244,16 +245,18 @@ impl<'db> CodeGeneratorKind<'db> {
                         ClassType::NonGeneric(ClassLiteral::Static(type_class)),
                     )
                 })
-                && let Some(transformer_params) = class.iter_mro(db).skip(1).find_map(|base| {
-                    base.into_class().and_then(|class| {
-                        class
-                            .static_class_literal(db)
-                            .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
+                && let Some(transformer_params) =
+                    class.iter_mro(db, &env).skip(1).find_map(|base| {
+                        base.into_class().and_then(|class| {
+                            class
+                                .static_class_literal(db)
+                                .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
+                        })
                     })
-                })
             {
                 Some(CodeGeneratorKind::from_dataclass_transformer(
                     db,
+                    &env,
                     class,
                     transformer_params,
                 ))
@@ -274,10 +277,11 @@ impl<'db> CodeGeneratorKind<'db> {
 
     fn from_dataclass_transformer(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         class: StaticClassLiteral<'db>,
         transformer_params: DataclassTransformerParams<'db>,
     ) -> Self {
-        if pydantic::is_model(db, class) {
+        if pydantic::is_model(db, env, class) {
             Self::Pydantic(pydantic::ModelMetadata::from_class(
                 db,
                 class,
@@ -298,13 +302,15 @@ impl<'db> CodeGeneratorKind<'db> {
             db: &'db dyn Db,
             class: DynamicClassLiteral<'db>,
         ) -> Option<CodeGeneratorKind<'db>> {
+            let env =
+                TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class.scope(db)));
             // Check if the dynamic class was passed to `dataclass()` as a function.
             if class.dataclass_params(db).is_some() {
                 return Some(CodeGeneratorKind::DataclassLike(None));
             }
 
             // Dynamic classes can also inherit from classes with dataclass_transform.
-            class.iter_mro(db).skip(1).find_map(|base| {
+            class.iter_mro(db, &env).skip(1).find_map(|base| {
                 base.into_class().and_then(|class| {
                     class
                         .static_class_literal(db)
@@ -391,11 +397,14 @@ impl<'db> CodeGeneratorKind<'db> {
     fn synthesizes_constructor_signature_from_fields(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         class: StaticClassLiteral<'db>,
     ) -> bool {
         match self {
             Self::DataclassLike(_) => true,
-            Self::Pydantic(_) => pydantic::synthesizes_constructor_signature_from_fields(db, class),
+            Self::Pydantic(_) => {
+                pydantic::synthesizes_constructor_signature_from_fields(db, env, class)
+            }
             Self::NamedTuple | Self::TypedDict => false,
         }
     }
@@ -749,14 +758,20 @@ impl<'db> ClassLiteral<'db> {
     }
 
     /// Returns an iterator over the MRO.
-    pub(crate) fn iter_mro(self, db: &'db dyn Db) -> MroIterator<'db> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_file(self.program_file(db)));
+    pub(crate) fn iter_mro(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> MroIterator<'db> {
+        let env = env.in_environment(ProgramEnvironment::from_file(self.program_file(db)));
         MroIterator::new(db, &env, self, None)
     }
 
     /// Return the properties shared by all instances of this class.
     pub(super) fn instance_flags(self, db: &'db dyn Db) -> ClassInstanceFlags {
+        let from_mro = |mro: &Mro<'db>| {
+            if mro.iter().copied().any(ClassBase::is_explicit_any_base) {
+                ClassInstanceFlags::INHERITS_FROM_EXPLICIT_ANY
+            } else {
+                ClassInstanceFlags::empty()
+            }
+        };
         match self {
             Self::Static(literal) => literal.instance_flags(db),
             Self::DynamicTypedDict(_) => ClassInstanceFlags::TYPED_DICT,
@@ -767,13 +782,14 @@ impl<'db> ClassLiteral<'db> {
             Self::DynamicEnum(literal) if literal.explicit_bases(db).is_empty() => {
                 ClassInstanceFlags::empty()
             }
-            Self::Dynamic(_) | Self::DynamicEnum(_) => {
-                if self.iter_mro(db).any(ClassBase::is_explicit_any_base) {
-                    ClassInstanceFlags::INHERITS_FROM_EXPLICIT_ANY
-                } else {
-                    ClassInstanceFlags::empty()
-                }
-            }
+            Self::Dynamic(literal) => from_mro(match literal.try_mro(db) {
+                Ok(mro) => mro,
+                Err(error) => error.fallback_mro(),
+            }),
+            Self::DynamicEnum(literal) => from_mro(match literal.try_mro(db) {
+                Ok(mro) => mro,
+                Err(error) => error.fallback_mro(),
+            }),
         }
     }
 
@@ -1438,10 +1454,11 @@ impl<'db> ClassType<'db> {
     pub(crate) fn is_subtype_of_class_literal(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         class_literal: ClassLiteral<'db>,
     ) -> bool {
         self.class_literal(db)
-            .iter_mro(db)
+            .iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .any(|base| base.class_literal(db) == class_literal)
     }
@@ -1572,9 +1589,13 @@ impl<'db> ClassType<'db> {
 
     /// Returns `true` if any class in this class's MRO (excluding `object`) defines an ordering
     /// method (`__lt__`, `__le__`, `__gt__`, `__ge__`). Used by `@total_ordering` validation.
-    pub(super) fn has_ordering_method_in_mro(self, db: &'db dyn Db) -> bool {
+    pub(super) fn has_ordering_method_in_mro(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> bool {
         self.class_literal(db)
-            .iter_mro(db)
+            .iter_mro(db, env)
             .filter_map(ClassBase::into_class)
             .filter(|class| !class.is_object(db))
             .any(|class| class.class_literal(db).has_own_ordering_method(db))
@@ -1734,7 +1755,7 @@ impl<'db> ClassType<'db> {
             ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
         );
         self.class_literal(db)
-            .iter_mro(db)
+            .iter_mro(db, &env)
             .filter_map(ClassBase::into_class)
             .find_map(|base| base.as_disjoint_base(db, &env))
     }
@@ -1930,7 +1951,7 @@ impl<'db> ClassType<'db> {
                 other
                     .nearest_disjoint_base(db)
                     .is_some_and(|disjoint_base_2| {
-                        !disjoint_base_1.could_coexist_in_mro_with(db, &disjoint_base_2)
+                        !disjoint_base_1.could_coexist_in_mro_with(db, env, &disjoint_base_2)
                     })
             })
         {
@@ -3646,18 +3667,23 @@ impl<'db> DisjointBase<'db> {
     }
 
     /// Two disjoint bases can only coexist in a class's MRO if one is a subclass of the other
-    fn could_coexist_in_mro_with(&self, db: &'db dyn Db, other: &Self) -> bool {
+    fn could_coexist_in_mro_with(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        other: &Self,
+    ) -> bool {
         // CPython's layout check operates on runtime classes. Type arguments are irrelevant here:
         // a generic disjoint base and any specialization of that base share the same layout.
         self == other
             || self
                 .class
                 .identity_specialization(db)
-                .is_subtype_of_class_literal(db, other.class)
+                .is_subtype_of_class_literal(db, env, other.class)
             || other
                 .class
                 .identity_specialization(db)
-                .is_subtype_of_class_literal(db, self.class)
+                .is_subtype_of_class_literal(db, env, self.class)
     }
 }
 

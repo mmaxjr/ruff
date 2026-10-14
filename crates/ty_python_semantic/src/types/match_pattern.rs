@@ -449,9 +449,13 @@ fn class_match_args_type<'db>(
 /// Callers must first establish that `__match_args__` is statically absent. A definite definition
 /// overrides match-self behavior, while a conditional definition makes it runtime-dependent;
 /// neither case should consult this flag.
-fn class_has_match_self_flag(db: &dyn Db, class: ClassLiteral<'_>) -> bool {
+fn class_has_match_self_flag<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    class: ClassLiteral<'db>,
+) -> bool {
     class
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .any(|base| {
             matches!(
@@ -488,7 +492,7 @@ pub(crate) fn class_pattern_positional_result<'db>(
     class: ClassLiteral<'db>,
 ) -> Option<ClassPatternPositionalResult<'db>> {
     match class_match_args_type(db, env, class) {
-        ClassMatchArgs::Undefined if class_has_match_self_flag(db, class) => {
+        ClassMatchArgs::Undefined if class_has_match_self_flag(db, env, class) => {
             Some(ClassPatternPositionalResult::Limit(1))
         }
         ClassMatchArgs::Undefined
@@ -537,7 +541,7 @@ pub(crate) fn class_pattern_positional_sources<'db>(
     positional_count: usize,
 ) -> Vec<ClassPatternPositionalSource> {
     let fixed = match class_match_args_type(db, env, class) {
-        ClassMatchArgs::Undefined if class_has_match_self_flag(db, class) => {
+        ClassMatchArgs::Undefined if class_has_match_self_flag(db, env, class) => {
             return (0..positional_count)
                 .map(|index| {
                     if index == 0 {

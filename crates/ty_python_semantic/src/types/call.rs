@@ -145,7 +145,7 @@ fn reflected_method_priority<'db>(
         operator_dispatch_class(db, env, left_ty),
         operator_dispatch_class(db, env, right_ty),
     ) && left_class.class_literal(db) != right_class.class_literal(db)
-        && right_class.is_subtype_of_class_literal(db, left_class.class_literal(db))
+        && right_class.is_subtype_of_class_literal(db, env, left_class.class_literal(db))
     {
         if has_exact_runtime_class(db, env, left_ty) {
             ReflectedMethodPriority::Definitely

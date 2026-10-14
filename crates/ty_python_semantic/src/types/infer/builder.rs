@@ -4307,6 +4307,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 let bound_typevar = match self.expression_type(element) {
                     Type::KnownInstance(KnownInstanceType::TypeVar(typevar)) => bind_typevar(
                         self.db(),
+                        self.program_environment(),
                         self.index,
                         definition.file_scope(db),
                         Some(definition),
@@ -10081,6 +10082,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             {
                 bind_typevar(
                     self.db(),
+                    env,
                     self.index,
                     self.scope().file_scope_id(db),
                     self.typevar_binding_context,
@@ -11162,6 +11164,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             && typevar.is_paramspec(db)
             && let Some(bound_typevar) = bind_typevar(
                 db,
+                env,
                 self.index,
                 self.scope().file_scope_id(db),
                 self.typevar_binding_context,

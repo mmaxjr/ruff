@@ -455,7 +455,7 @@ fn definitions_for_attribute_in_class_hierarchy<'db>(
 ) -> Vec<ResolvedDefinition<'db>> {
     let mut resolved = Vec::new();
     'scopes: for ancestor in class_literal
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .filter_map(|cls: ClassType<'db>| cls.static_class_literal(db).map(|(lit, _)| lit))
     {

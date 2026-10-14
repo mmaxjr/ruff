@@ -190,6 +190,7 @@ impl<'db, 'name> ImplementationsFinder<'db, 'name> {
     /// Creates a member-family finder for roots that resolve the member through their MRO.
     fn for_member_roots(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         roots: Vec<ClassLiteral<'db>>,
         member_name: &'name str,
         accessor_role: Option<PropertyAccessorRole>,
@@ -200,7 +201,7 @@ impl<'db, 'name> ImplementationsFinder<'db, 'name> {
         for root in roots {
             // Avoid scanning every known subclass when the member doesn't resolve on this root.
             let Some(root_definitions) =
-                mro_member_definitions(db, root, member_name, accessor_role)
+                mro_member_definitions(db, env, root, member_name, accessor_role)
             else {
                 continue;
             };
@@ -239,15 +240,16 @@ impl<'db, 'name> ImplementationsFinder<'db, 'name> {
             return Vec::new();
         }
 
+        let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_file(file));
         let roots = &self.roots;
         match &self.kind {
             ImplementationsFinderKind::ClassFamily => {
-                class_implementations_for_file(db, file, roots)
+                class_implementations_for_file(db, env, file, roots)
             }
             ImplementationsFinderKind::MemberFamily {
                 name,
                 accessor_role,
-            } => member_implementations_for_file(db, file, roots, name, *accessor_role),
+            } => member_implementations_for_file(db, env, file, roots, name, *accessor_role),
         }
     }
 
@@ -290,7 +292,13 @@ impl<'db, 'name> ImplementationsFinder<'db, 'name> {
             ast::ExprContext::Invalid => None,
         };
 
-        ImplementationsFinder::for_member_roots(db, roots, attribute.attr.as_str(), accessor_role)
+        ImplementationsFinder::for_member_roots(
+            db,
+            &env,
+            roots,
+            attribute.attr.as_str(),
+            accessor_role,
+        )
     }
 
     /// Creates an `ImplementationsFinder` for a method declaration.
@@ -331,6 +339,7 @@ impl<'db, 'name> ImplementationsFinder<'db, 'name> {
 
         ImplementationsFinder::for_member_roots(
             db,
+            &env,
             vec![root],
             function.name.as_str(),
             accessor_role,
@@ -437,13 +446,14 @@ impl<'db, 'name> ImplementationsFinder<'db, 'name> {
 /// Finds subclasses of `roots` defined in `file`.
 fn class_implementations_for_file<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     file: ProgramFile<'db>,
     roots: &FxHashSet<ClassLiteral<'db>>,
 ) -> Vec<ResolvedDefinition<'db>> {
     let mut definitions = Vec::new();
 
     for candidate in reachable_class_literals_in_file(db, file) {
-        if roots.contains(&candidate) || !class_mro_intersects(db, candidate, roots) {
+        if roots.contains(&candidate) || !class_mro_intersects(db, env, candidate, roots) {
             continue;
         }
         if let Some(definition) = candidate.definition(db) {
@@ -473,6 +483,7 @@ pub fn static_member_type_for_attribute<'db>(
 /// Finds member implementations contributed by subclasses of `roots` defined in `file`.
 fn member_implementations_for_file<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     file: ProgramFile<'db>,
     roots: &FxHashSet<ClassLiteral<'db>>,
     member_name: &str,
@@ -492,7 +503,7 @@ fn member_implementations_for_file<'db>(
             continue;
         }
 
-        if !class_mro_intersects(db, candidate, roots) {
+        if !class_mro_intersects(db, env, candidate, roots) {
             continue;
         }
 
@@ -511,11 +522,12 @@ fn member_implementations_for_file<'db>(
 /// Returns whether any class in `class`'s MRO is one of `roots`.
 fn class_mro_intersects<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     class: ClassLiteral<'db>,
     roots: &FxHashSet<ClassLiteral<'db>>,
 ) -> bool {
     class
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .any(|ancestor| roots.contains(&ancestor.class_literal(db)))
 }
@@ -528,12 +540,13 @@ fn class_mro_intersects<'db>(
 /// such as an overload-only method.
 fn mro_member_definitions<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     class: ClassLiteral<'db>,
     member_name: &str,
     accessor_role: Option<PropertyAccessorRole>,
 ) -> Option<Vec<ResolvedDefinition<'db>>> {
     class
-        .iter_mro(db)
+        .iter_mro(db, env)
         .filter_map(ClassBase::into_class)
         .find_map(|class| {
             own_member_definitions(db, class.class_literal(db), member_name, accessor_role)

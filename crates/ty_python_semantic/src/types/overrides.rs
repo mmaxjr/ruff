@@ -439,7 +439,7 @@ fn conflicting_named_tuple_field_in_mro<'db>(
     class: StaticClassLiteral<'db>,
     field_name: &Name,
 ) -> Option<(ClassType<'db>, Option<Definition<'db>>)> {
-    for class_base in class.iter_mro(db).skip(1) {
+    for class_base in class.iter_mro(db, env).skip(1) {
         let Some(superclass) = class_base.into_class() else {
             continue;
         };

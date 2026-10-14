@@ -3545,7 +3545,7 @@ impl<'db> IncompatibleBases<'db> {
     /// Two disjoint bases are allowed to coexist in an MRO if one is a subclass of the other.
     /// This method therefore removes any entry in `self` that is a subclass of one or more
     /// other entries also contained in `self`.
-    pub(super) fn remove_redundant_entries(&mut self, db: &'db dyn Db) {
+    pub(super) fn remove_redundant_entries(&mut self, db: &'db dyn Db, env: &TypeOperations<'db>) {
         self.0 = self
             .0
             .iter()
@@ -3560,7 +3560,7 @@ impl<'db> IncompatibleBases<'db> {
                         !disjoint_base
                             .class
                             .identity_specialization(db)
-                            .is_subtype_of_class_literal(db, other_base.class)
+                            .is_subtype_of_class_literal(db, env, other_base.class)
                     })
             })
             .map(|(base, info)| (*base, *info))
@@ -6049,7 +6049,7 @@ pub(super) fn report_subclass_of_class_with_non_callable_init_subclass<'db>(
                 builder.into_diagnostic(format_args!("Invalid definition of class `{class_name}`"));
             let env = &context.program_environment();
             let class_and_def = class
-                .iter_mro(db)
+                .iter_mro(db, env)
                 .filter_map(|base| base.into_class()?.class_literal(db).as_static())
                 .find_map(|class| {
                     let scope = class.body_scope(db);
