@@ -425,7 +425,9 @@ impl<'db> TypeQuery<'db> for ResolveClassBase<'db> {
             // in which case we want to treat `Never` in a forgiving way and silence diagnostics
             Type::Never => Some(ClassBase::unknown()),
 
-            Type::NewTypeInstance(newtype) => traversal.visit(db, newtype.concrete_base_type(db)),
+            Type::NewTypeInstance(newtype) => {
+                traversal.visit(db, newtype.concrete_base_type(db, env))
+            }
 
             Type::Recursive(_)
             | Type::TypeAlias(_)

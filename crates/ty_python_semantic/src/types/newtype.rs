@@ -109,17 +109,12 @@ impl<'db> NewType<'db> {
 
     // Walk the `NewTypeBase` chain to find the underlying non-newtype `Type`. There might not be
     // one if this `NewType` is cyclical, and we fall back to `object` in that case.
-    pub fn concrete_base_type(self, db: &'db dyn Db) -> Type<'db> {
+    pub fn concrete_base_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
+        let env = env.in_environment(ProgramEnvironment::from_definition(self.definition(db)));
         for base in self.iter_bases(db) {
             match base {
                 NewTypeBase::NewType(_) => continue,
-                concrete => {
-                    let env = TypeOperations::for_inference(
-                        db,
-                        ProgramEnvironment::from_definition(self.definition(db)),
-                    );
-                    return concrete.instance_type(db, &env);
-                }
+                concrete => return concrete.instance_type(db, &env),
             }
         }
         Type::object()

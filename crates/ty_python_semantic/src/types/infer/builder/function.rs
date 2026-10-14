@@ -2442,7 +2442,7 @@ impl<'db> TypeQuery<'db> for InstanceTruthiness<'db> {
                         found_tvars_or_newtypes = true;
                     } else if let Type::NewTypeInstance(newtype) = positive {
                         found_tvars_or_newtypes = true;
-                        effective.add_positive_in_place(newtype.concrete_base_type(db));
+                        effective.add_positive_in_place(newtype.concrete_base_type(db, env));
                     } else {
                         effective.add_positive_in_place(positive);
                     }
@@ -2475,7 +2475,7 @@ impl<'db> TypeQuery<'db> for InstanceTruthiness<'db> {
             Type::NominalInstance(..) => always_true_if(is_instance(&ty)),
 
             Type::NewTypeInstance(newtype) => {
-                always_true_if(is_instance(&newtype.concrete_base_type(db)))
+                always_true_if(is_instance(&newtype.concrete_base_type(db, env)))
             }
 
             Type::LiteralValue(..) | Type::ModuleLiteral(..) | Type::FunctionLiteral(..) => {

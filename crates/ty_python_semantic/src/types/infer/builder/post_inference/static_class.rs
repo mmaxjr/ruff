@@ -1429,7 +1429,7 @@ fn check_final_class_abstract_methods<'db>(
     let env = context.program_environment();
 
     let class_type = class.identity_specialization(db);
-    let abstract_methods = AbstractMethods::of_class(db, class_type);
+    let abstract_methods = AbstractMethods::of_class(db, env, class_type);
 
     // If there are no abstract methods, we're done.
     let Some(first_method_name) = abstract_methods.first_name() else {

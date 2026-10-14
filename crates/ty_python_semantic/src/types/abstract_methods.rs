@@ -1,5 +1,7 @@
 //! Abstract-method discovery and diagnostics shared by class validation and constructor calls.
 
+use std::borrow::Cow;
+
 use crate::types::TypeOperations;
 use ruff_db::{
     diagnostic::{Annotation, Span, SubDiagnostic, SubDiagnosticSeverity},
@@ -24,18 +26,22 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct AbstractMethods<'db> {
     class: ClassType<'db>,
-    methods: &'db FxIndexMap<Name, AbstractMethod<'db>>,
+    methods: Cow<'db, FxIndexMap<Name, AbstractMethod<'db>>>,
 }
 
 impl<'db> AbstractMethods<'db> {
     /// Find methods that remain abstract after applying overrides in MRO order.
-    pub(super) fn of_class(db: &'db dyn Db, class: ClassType<'db>) -> Self {
+    pub(super) fn of_class(
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        class: ClassType<'db>,
+    ) -> Self {
         Self {
             class,
-            methods: class.abstract_methods(db),
+            methods: class.abstract_methods(db, env),
         }
     }
 
@@ -251,12 +257,45 @@ impl<'db> ClassType<'db> {
     /// and have not been overridden with a concrete implementation anywhere in the MRO
     ///
     /// The value of the map is a struct containing information about the abstract method.
-    // Inferring class members can call constructors that query abstractness again.
-    // Start with no abstract methods while resolving these cycles.
-    #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size, cycle_initial=|_, _, _| FxIndexMap::default())]
     pub(in crate::types) fn abstract_methods(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Cow<'db, FxIndexMap<Name, AbstractMethod<'db>>> {
+        env.cached_query(
+            || Cow::Borrowed(self.cached_abstract_methods(db)),
+            || Cow::Owned(self.abstract_methods_in_operation(db, env)),
+        )
+    }
+
+    #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size, cycle_initial=|_, _, _| FxIndexMap::default())]
+    fn cached_abstract_methods(self, db: &'db dyn Db) -> FxIndexMap<Name, AbstractMethod<'db>> {
+        let env = TypeOperations::for_inference(
+            db,
+            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
+        );
+        self.abstract_methods_in_operation(db, &env)
+    }
+
+    fn abstract_methods_in_operation(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> FxIndexMap<Name, AbstractMethod<'db>> {
+        // Inferring class members can call constructors that query abstractness again.
+        // Start with no abstract methods while resolving these cycles.
+        env.context()
+            .state()
+            .abstract_methods
+            .visit(env, &self, FxIndexMap::default, || {
+                self.compute_abstract_methods(db, env)
+            })
+    }
+
+    fn compute_abstract_methods(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
     ) -> FxIndexMap<Name, AbstractMethod<'db>> {
         fn type_as_abstract_method<'db>(
             db: &'db dyn Db,
@@ -289,10 +328,9 @@ impl<'db> ClassType<'db> {
         }
 
         let mut abstract_methods: FxIndexMap<Name, _> = FxIndexMap::default();
-        let env = &TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
-        );
+        let env = &env.in_environment(ProgramEnvironment::from_file(
+            self.class_literal(db).program_file(db),
+        ));
 
         // Iterate through the MRO in reverse order,
         // skipping `object` (we know it doesn't define any abstract methods)

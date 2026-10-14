@@ -772,7 +772,7 @@ impl<'db> Type<'db> {
                 if let Some(SliceLiteral { start, stop, step }) =
                     maybe_slice_nominal.slice_literal(db)
                     && let Some(tuple) = match value_ty {
-                        Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db),
+                        Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db, env),
                         _ => value_ty,
                     }
                     .tuple_instance_spec(db, env) =>

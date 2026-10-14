@@ -861,14 +861,14 @@ pub(super) fn report_missing_type_arguments<'db>(
             // Don't warn if all type parameters have defaults (PEP 696).
             if generic_context
                 .variables(db)
-                .all(|tv| tv.default_type(db).is_some())
+                .all(|tv| tv.default_type(db, context.program_environment()).is_some())
             {
                 return;
             }
 
             let required_count = generic_context
                 .variables(db)
-                .filter(|tv| tv.default_type(db).is_none())
+                .filter(|tv| tv.default_type(db, context.program_environment()).is_none())
                 .count();
 
             if let Some(builder) = context.report_lint(&MISSING_TYPE_ARGUMENT, annotation) {

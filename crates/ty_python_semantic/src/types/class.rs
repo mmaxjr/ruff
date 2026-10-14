@@ -23,6 +23,7 @@ pub(crate) use self::static_literal::{
 pub(super) use self::typed_dict::{
     DynamicTypedDictAnchor, DynamicTypedDictLiteral, synthesized_typed_dict_class_member,
 };
+use super::cyclic::CycleDetector;
 use super::dedicated::pydantic;
 use super::display;
 use super::{
@@ -2510,8 +2511,12 @@ impl<'db> ClassType<'db> {
 
     /// Return a callable type (or union of callable types) that represents the callable
     /// constructor signature of this class.
-    pub(super) fn into_callable(self, db: &'db dyn Db) -> CallableTypes<'db> {
-        self.into_callable_with_receiver(db, Type::from(self))
+    pub(super) fn into_callable(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> CallableTypes<'db> {
+        self.into_callable_with_receiver(db, env, Type::from(self))
     }
 
     /// Infer this class's constructor using the actual class-object receiver.
@@ -2519,20 +2524,63 @@ impl<'db> ClassType<'db> {
     /// A materialized protocol uses its class origin for constructor lookup, but `Self` must be
     /// bound to the materialized receiver. Keeping lookup and receiver separate preserves both
     /// instance-returning constructors and constructors that explicitly return another type.
+    pub(super) fn into_callable_with_receiver(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        receiver: Type<'db>,
+    ) -> CallableTypes<'db> {
+        env.cached_query(
+            || self.cached_constructor_callables(db, receiver),
+            || self.constructor_callables(db, env, receiver),
+        )
+    }
+
     #[salsa::tracked(
         returns(clone),
         cycle_initial=|db, _, _, _| CallableTypes::one(CallableType::bottom(db)),
         heap_size=ruff_memory_usage::heap_size
     )]
-    pub(super) fn into_callable_with_receiver(
+    fn cached_constructor_callables(
         self,
         db: &'db dyn Db,
         receiver: Type<'db>,
     ) -> CallableTypes<'db> {
-        let env = &TypeOperations::for_inference(
+        let env = TypeOperations::for_inference(
             db,
             ProgramEnvironment::from_file(self.class_literal(db).program_file(db)),
         );
+        self.constructor_callables(db, &env, receiver)
+    }
+
+    fn constructor_callables(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        receiver: Type<'db>,
+    ) -> CallableTypes<'db> {
+        env.context()
+            .state()
+            .class_constructors
+            .get_or_init(|| Box::new(CycleDetector::new(())))
+            .visit_active(db, env, (Type::from(self), receiver), |cycle| {
+                if cycle.is_some() {
+                    CallableTypes::one(CallableType::bottom(db))
+                } else {
+                    self.compute_constructor_callables(db, env, receiver)
+                }
+            })
+    }
+
+    fn compute_constructor_callables(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        receiver: Type<'db>,
+    ) -> CallableTypes<'db> {
+        let env = &env.in_environment(ProgramEnvironment::from_file(
+            self.class_literal(db).program_file(db),
+        ));
         // TODO: This mimics a lot of the logic in Type::try_call_from_constructor. Can we
         // consolidate the two? Can we invoke a class by upcasting the class into a Callable, and
         // then relying on the call binding machinery to Just Work™?

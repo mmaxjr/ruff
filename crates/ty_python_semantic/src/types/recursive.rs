@@ -533,14 +533,14 @@ impl<'db> ExpandedType<'_, 'db> {
 
         let exposed_union = match exposed_type {
             Type::Union(union) => Some(union),
-            Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db).as_union(),
+            Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db, env).as_union(),
             _ => None,
         };
         let exposed_alternatives =
             exposed_union.map_or(std::slice::from_ref(&exposed), |union| union.elements(db));
         let binding_union = match binding {
             Type::Union(union) => Some(union),
-            Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db).as_union(),
+            Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db, env).as_union(),
             _ => None,
         };
         let binding_alternatives =
@@ -911,7 +911,7 @@ impl<'db> ExpandedType<'_, 'db> {
             Type::NominalInstance(instance) => Some(instance.class(db, env)),
             Type::ProtocolInstance(instance) => instance.class_origin(db).map(|class| *class),
             Type::NewTypeInstance(newtype) => newtype
-                .concrete_base_type(db)
+                .concrete_base_type(db, env)
                 .nominal_class_in(db, inspector),
             Type::TypeVar(typevar) => {
                 let TypeVarBoundOrConstraints::UpperBound(bound) =
@@ -3235,7 +3235,7 @@ impl<'db> NormalizedType<'_, 'db> {
             ty if self.was_union => Some(std::borrow::Cow::Owned(vec![ty])),
             Type::NewTypeInstance(newtype) => inspector.inspect_normalized(
                 db,
-                newtype.concrete_base_type(db),
+                newtype.concrete_base_type(db, inspector.environment()),
                 |_, _| None,
                 |inspector, normalized| normalized.narrow_targets(db, inspector),
             ),

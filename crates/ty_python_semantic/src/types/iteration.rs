@@ -276,7 +276,7 @@ impl<'db> Type<'db> {
                 }
                 Type::NominalInstance(nominal) => nominal.tuple_spec(db, env),
                 Type::NewTypeInstance(newtype) => traversal
-                    .visit_with(db, newtype.concrete_base_type(db), false)
+                    .visit_with(db, newtype.concrete_base_type(db, env), false)
                     .ok()
                     .flatten(),
                 Type::GenericAlias(alias) if alias.origin(db).is_tuple(db) => Some(Cow::Owned(

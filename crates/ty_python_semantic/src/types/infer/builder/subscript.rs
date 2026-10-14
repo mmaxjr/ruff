@@ -915,7 +915,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         {
             match item {
                 EitherOrBoth::Both(typevar, type_argument) => {
-                    if typevar.default_type(db).is_some() {
+                    if typevar.default_type(db, env).is_some() {
                         typevar_with_defaults += 1;
                     }
 
@@ -1076,7 +1076,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     }
                 }
                 EitherOrBoth::Left(typevar) => {
-                    if typevar.default_type(db).is_none() {
+                    if typevar.default_type(db, env).is_none() {
                         // This is an error case, so no need to push into the specialization types.
                         missing_typevars.push(typevar);
                     } else {

@@ -675,10 +675,10 @@ fn evaluate_structural_comparison<'db>(
         },
 
         (Type::NewTypeInstance(newtype), other) => evaluator
-            .evaluate(newtype.concrete_base_type(db), other, branch, operator)
+            .evaluate(newtype.concrete_base_type(db, env), other, branch, operator)
             .discard_narrowing(),
         (other, Type::NewTypeInstance(newtype)) => evaluator
-            .evaluate(other, newtype.concrete_base_type(db), branch, operator)
+            .evaluate(other, newtype.concrete_base_type(db, env), branch, operator)
             .discard_narrowing(),
 
         (Type::Union(union), other) => {
@@ -1046,7 +1046,9 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for EnumDomain<'db> {
                 .elements(db)
                 .iter()
                 .all(|element| traversal.visit(db, *element)),
-            Type::NewTypeInstance(newtype) => traversal.visit(db, newtype.concrete_base_type(db)),
+            Type::NewTypeInstance(newtype) => {
+                traversal.visit(db, newtype.concrete_base_type(db, env))
+            }
             Type::NominalInstance(instance) => {
                 instance.class_literal(db, env) == self.right.enum_class(db)
             }
@@ -1389,7 +1391,7 @@ fn finite_alternatives<'db>(
                 .then(|| complement.remaining_literal_types(db, env))
         }
         Type::NewTypeInstance(newtype) => {
-            let base = newtype.concrete_base_type(db);
+            let base = newtype.concrete_base_type(db, env);
             if base.is_enum(db, env) {
                 finite_alternatives(db, env, base, operator)
             } else {

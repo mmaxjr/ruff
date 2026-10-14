@@ -1353,7 +1353,9 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             .iter()
             .any(|element| match element {
                 Type::TypeVar(tvar) => !tvar.is_inferable(db, self.inferable),
-                Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db).is_union(),
+                Type::NewTypeInstance(newtype) => {
+                    newtype.concrete_base_type(db, self.env).is_union()
+                }
                 _ => false,
             })
     }
@@ -1447,7 +1449,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                     )
                 }
                 Type::NewTypeInstance(newtype) => {
-                    let concrete_base = newtype.concrete_base_type(db);
+                    let concrete_base = newtype.concrete_base_type(db, self.env);
                     if concrete_base.is_union() {
                         self.check_type_pair(db, concrete_base, target)
                     } else {
@@ -2575,7 +2577,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             // `NewType <: TypeVar`, we use the TypeVar handling rather than falling back
             // to the NewType's concrete base type.
             (Type::NewTypeInstance(source_newtype), _) => {
-                self.check_type_pair(db, source_newtype.concrete_base_type(db), target)
+                self.check_type_pair(db, source_newtype.concrete_base_type(db, env), target)
             }
 
             // Note that the definition of `Type::AlwaysFalsy` depends on the return value of `__bool__`.
@@ -3838,7 +3840,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             (class @ Type::SubclassOf(_), Type::NewTypeInstance(newtype))
             | (Type::NewTypeInstance(newtype), class @ Type::SubclassOf(_)) => {
                 nontrivial_check(self, || {
-                    self.check_type_pair(db, class, newtype.concrete_base_type(db))
+                    self.check_type_pair(db, class, newtype.concrete_base_type(db, env))
                 })
             }
 
@@ -4344,7 +4346,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
                 other @ (Type::LiteralValue(_) | Type::TypeIs(_) | Type::TypeGuard(_)),
                 Type::NewTypeInstance(newtype),
             ) => nontrivial_check(self, || {
-                self.check_type_pair(db, newtype.concrete_base_type(db), other)
+                self.check_type_pair(db, newtype.concrete_base_type(db, env), other)
             }),
 
             (Type::TypeIs(_) | Type::TypeGuard(_), _)
@@ -4587,7 +4589,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             }
             (Type::NewTypeInstance(newtype), other) | (other, Type::NewTypeInstance(newtype)) => {
                 nontrivial_check(self, || {
-                    self.check_type_pair(db, newtype.concrete_base_type(db), other)
+                    self.check_type_pair(db, newtype.concrete_base_type(db, env), other)
                 })
             }
 

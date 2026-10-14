@@ -392,7 +392,7 @@ fn pytest_test_class_kind<'db>(
     if Type::ClassLiteral(class).is_subtype_of(db, &env, KnownClass::ABCMeta.to_instance(db, &env))
         && class
             .identity_specialization(db)
-            .abstract_methods(db)
+            .abstract_methods(db, &env)
             .values()
             .any(|method| method.kind.is_explicit())
     {

@@ -754,7 +754,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 .or_else(|| {
                     self.infer_binary_expression_type_impl(
                         node,
-                        newtype.concrete_base_type(db),
+                        newtype.concrete_base_type(db, env),
                         rhs,
                         op,
                         visitor,
@@ -767,7 +767,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     self.infer_binary_expression_type_impl(
                         node,
                         lhs,
-                        newtype.concrete_base_type(db),
+                        newtype.concrete_base_type(db, env),
                         op,
                         visitor,
                         state,

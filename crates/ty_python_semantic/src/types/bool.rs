@@ -385,7 +385,7 @@ impl<'db> TypeQuery<'db> for TryBool {
             },
 
             Type::NewTypeInstance(newtype) => {
-                traversal.visit(db, newtype.concrete_base_type(db))?
+                traversal.visit(db, newtype.concrete_base_type(db, env))?
             }
         };
 

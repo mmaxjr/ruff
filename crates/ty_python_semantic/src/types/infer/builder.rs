@@ -9764,7 +9764,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         protocol,
                     );
                 } else if self.context.is_lint_enabled(&CALL_NON_CALLABLE) {
-                    let abstract_methods = AbstractMethods::of_class(db, class);
+                    let abstract_methods = AbstractMethods::of_class(db, env, class);
                     if !abstract_methods.is_empty() {
                         report_attempted_instantiation_of_abstract_class(
                             &self.context,
@@ -11127,13 +11127,15 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                 in_union: bool,
             ) -> Self::Output {
                 if let Type::NewTypeInstance(newtype) = ty
-                    && newtype.concrete_base_type(db).has_outer_type(
-                        db,
-                        traversal.environment(),
-                        super::super::Type::is_union,
-                    )
+                    && newtype
+                        .concrete_base_type(db, traversal.environment())
+                        .has_outer_type(db, traversal.environment(), super::super::Type::is_union)
                 {
-                    return traversal.visit_with(db, newtype.concrete_base_type(db), in_union);
+                    return traversal.visit_with(
+                        db,
+                        newtype.concrete_base_type(db, traversal.environment()),
+                        in_union,
+                    );
                 }
                 if let Type::Union(union) = ty {
                     union

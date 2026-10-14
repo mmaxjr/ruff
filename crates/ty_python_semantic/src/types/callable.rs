@@ -313,14 +313,16 @@ impl<'db> Type<'db> {
                     None
                 }
             }
-            Type::ClassLiteral(class_literal) => {
-                Some(class_literal.identity_specialization(db).into_callable(db))
-            }
+            Type::ClassLiteral(class_literal) => Some(
+                class_literal
+                    .identity_specialization(db)
+                    .into_callable(db, env),
+            ),
 
-            Type::GenericAlias(alias) => Some(ClassType::Generic(alias).into_callable(db)),
+            Type::GenericAlias(alias) => Some(ClassType::Generic(alias).into_callable(db, env)),
 
             Type::NewTypeInstance(newtype) => newtype
-                .concrete_base_type(db)
+                .concrete_base_type(db, env)
                 .try_upcast_to_callable_with_policy_and_context(db, env, policy, context, receiver),
 
             Type::SubclassOf(subclass_of_ty) if policy == UpcastPolicy::Sound => {
@@ -332,15 +334,15 @@ impl<'db> Type<'db> {
 
             // TODO: This is unsound so in future we can consider an opt-in option to disable it.
             Type::SubclassOf(subclass_of_ty) => match subclass_of_ty.subclass_of() {
-                SubclassOfInner::Class(class) => Some(class.into_callable(db)),
+                SubclassOfInner::Class(class) => Some(class.into_callable(db, env)),
                 SubclassOfInner::Protocol(protocol) => protocol.class_origin(db).map(|origin| {
                     if protocol.materialization_kind(db).is_some() {
                         // The origin supplies the constructor, but the actual receiver retains
                         // `Top[P]` or `Bottom[P]`. Infer with both so instance-returning overloads
                         // are materialized without replacing explicit non-instance returns.
-                        (*origin).into_callable_with_receiver(db, self)
+                        (*origin).into_callable_with_receiver(db, env, self)
                     } else {
-                        (*origin).into_callable(db)
+                        (*origin).into_callable(db, env)
                     }
                 }),
                 SubclassOfInner::TypeVar(tvar) => {

@@ -433,6 +433,9 @@ fn apply_type_alias_specialization<'db>(
     )
 }
 
+/// A source type alias with optional type arguments and materialization.
+///
+/// Reading a definition requires a scoped semantic operation; the raw body is private.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
 pub enum TypeAliasType<'db> {
     /// A type alias defined using the PEP 695 `type` statement.

@@ -556,7 +556,7 @@ impl<'db> TypeRecursionContext<'db> {
     }
 }
 
-type TypeRecursionRevision = [u64; 20];
+type TypeRecursionRevision = [u64; 23];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
@@ -569,9 +569,12 @@ impl TypeRecursionContext<'_> {
             lambda_return_dependencies,
             protocol_queries,
             materialized_bounds,
+            typevar_defaults,
             sequent_derivation,
             specialized_mro,
             class_fields,
+            class_constructors,
+            abstract_methods,
             typed_dict_openness,
             meta_type:
                 MetaTypeRecursion {
@@ -596,9 +599,12 @@ impl TypeRecursionContext<'_> {
                 .map_or(0, |guard| guard.revision()),
             protocol_queries.get().map_or(0, |guard| guard.revision()),
             materialized_bounds.revision(),
+            typevar_defaults.revision(),
             sequent_derivation.revision(),
             specialized_mro.revision(),
             class_fields.revision(),
+            class_constructors.get().map_or(0, |guard| guard.revision()),
+            abstract_methods.revision(),
             typed_dict_openness.revision(),
             aliases.revision(),
             growing_aliases.revision(),
@@ -624,9 +630,12 @@ struct TypeRecursionState<'db> {
     lambda_return_dependencies: OnceCell<Box<CycleDetector<'db, (), Type<'db>, (), 1>>>,
     protocol_queries: OnceCell<Box<ProtocolQueryRecursion<'db>>>,
     materialized_bounds: cyclic::AcyclicRecursionDetector<BoundTypeVarInstance<'db>>,
+    typevar_defaults: cyclic::AcyclicRecursionDetector<BoundTypeVarInstance<'db>>,
     sequent_derivation: ActiveRecursionDetector<(Program<'db>, salsa::Id, Option<salsa::Id>)>,
     specialized_mro: ActiveRecursionDetector<GenericAlias<'db>>,
     class_fields: ActiveRecursionDetector<class::ClassFieldQuery<'db>>,
+    class_constructors: OnceCell<Box<ClassConstructorRecursion<'db>>>,
+    abstract_methods: ActiveRecursionDetector<ClassType<'db>>,
     typed_dict_openness: ActiveRecursionDetector<TypedDictType<'db>>,
     operation: operations::OperationState,
     meta_type: MetaTypeRecursion<'db>,
@@ -639,6 +648,8 @@ struct TypeRecursionState<'db> {
     alias_definitions: ActiveRecursionDetector<Definition<'db>>,
     comparisons: OnceCell<Box<relation::ComparisonRecursion<'db>>>,
 }
+
+type ClassConstructorRecursion<'db> = CycleDetector<'db, (), (Type<'db>, Type<'db>), (), 2>;
 
 struct SignatureExpansionTag;
 type SignatureExpansionRecursion<'db> = CycleDetector<'db, SignatureExpansionTag, Type<'db>, (), 2>;
@@ -4815,7 +4826,7 @@ impl<'db> Type<'db> {
                     Type::NominalInstance(instance) => {
                         instance.class(db, env).instance_member(db, env, name)
                     }
-                    Type::NewTypeInstance(newtype) => delegate(newtype.concrete_base_type(db)),
+                    Type::NewTypeInstance(newtype) => delegate(newtype.concrete_base_type(db, env)),
 
                     Type::ProtocolInstance(protocol) => protocol.instance_member(db, env, name),
 
@@ -5081,9 +5092,9 @@ impl<'db> Type<'db> {
                         return Ok(result);
                     }
                     if let Type::NewTypeInstance(newtype) = ty
-                        && let Type::Union(_) = newtype.concrete_base_type(db)
+                        && let Type::Union(_) = newtype.concrete_base_type(db, env)
                     {
-                        return traversal.visit(db, newtype.concrete_base_type(db));
+                        return traversal.visit(db, newtype.concrete_base_type(db, env));
                     }
                     if matches!(ty, Type::Recursive(_)) {
                         return Ok(None);
@@ -6525,15 +6536,13 @@ impl<'db> Type<'db> {
                 // through, because we generally do want e.g. methods that return `Self` to return the
                 // `NewType`.
                 Type::NewTypeInstance(new_type_instance)
-                    if new_type_instance.concrete_base_type(db).has_outer_type(
-                        db,
-                        env,
-                        Type::is_union,
-                    ) =>
+                    if new_type_instance
+                        .concrete_base_type(db, env)
+                        .has_outer_type(db, env, Type::is_union) =>
                 {
                     return traversal.visit_with(
                         db,
-                        new_type_instance.concrete_base_type(db),
+                        new_type_instance.concrete_base_type(db, env),
                         None,
                     );
                 }
@@ -10745,7 +10754,9 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
                     todo_type!("TypedDict synthesized meta-type").expect_dynamic(),
                 ),
             },
-            Type::NewTypeInstance(newtype) => traversal.visit(db, newtype.concrete_base_type(db)),
+            Type::NewTypeInstance(newtype) => {
+                traversal.visit(db, newtype.concrete_base_type(db, env))
+            }
         }
     }
 }
@@ -10884,7 +10895,9 @@ impl<'db> TypeQuery<'db> for IsSingleton {
             Type::TypeGuard(type_guard) => type_guard.is_bound(db),
             Type::TypeForm(_) => false,
             Type::TypedDict(_) => false,
-            Type::NewTypeInstance(newtype) => traversal.visit(db, newtype.concrete_base_type(db)),
+            Type::NewTypeInstance(newtype) => {
+                traversal.visit(db, newtype.concrete_base_type(db, env))
+            }
         }
     }
 }

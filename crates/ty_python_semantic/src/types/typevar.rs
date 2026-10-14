@@ -1446,8 +1446,41 @@ impl<'db> BoundTypeVarInstance<'db> {
     /// By using `U` in the generic class, it becomes bound, and so we have a
     /// `BoundTypeVarInstance`. As part of binding `U` we must also bind its default value
     /// (resulting in `T@C`).
-    pub(crate) fn default_type(self, db: &'db dyn Db) -> Option<Type<'db>> {
-        bound_typevar_default_type(db, self)
+    pub(crate) fn default_type(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> Option<Type<'db>> {
+        env.cached_query(
+            || bound_typevar_default_type(db, self),
+            || self.compute_default_type(db, env),
+        )
+    }
+
+    fn default_environment(self, db: &'db dyn Db) -> ProgramEnvironment<'db> {
+        self.typevar(db).definition(db).map_or_else(
+            || ProgramEnvironment::from_program(self.binding_context(db).program(db)),
+            ProgramEnvironment::from_definition,
+        )
+    }
+
+    /// A default that depends on itself cannot supply a type argument. Reject the enclosing
+    /// computation too, so it cannot retain a partially bound default from a nested cycle.
+    fn compute_default_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Option<Type<'db>> {
+        let env = env.in_environment(self.default_environment(db));
+        env.context()
+            .state()
+            .typevar_defaults
+            .visit(&env, &self, || {
+                let default = self.typevar(db).default_type(db, &env)?;
+                Some(default.apply_type_mapping(
+                    db,
+                    &env,
+                    &TypeMapping::BindLegacyTypevars(self.binding_context(db)),
+                    TypeContext::default(),
+                ))
+            })
+            .flatten()
     }
 
     fn materialize_impl(
@@ -1475,7 +1508,7 @@ impl<'db> BoundTypeVarInstance<'db> {
     ) -> Self {
         let typevar = self.typevar(db);
         let bound_or_constraints = typevar.bound_or_constraints(db, visitor.env);
-        let default = self.default_type(db);
+        let default = self.default_type(db, visitor.env);
 
         if bound_or_constraints.is_none() && default.is_none() {
             return Self::new(
@@ -1935,21 +1968,8 @@ fn bound_typevar_default_type<'db>(
     db: &'db dyn Db,
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
-    let typevar = bound_typevar.typevar(db);
-    typevar._default(db)?;
-    let definition = typevar
-        .definition(db)
-        .expect("a bound TypeVar with a default must have a source definition");
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_definition(definition));
-    let default = typevar.default_type(db, &env)?;
-    let binding_context = bound_typevar.binding_context(db);
-
-    Some(default.apply_type_mapping(
-        db,
-        &env,
-        &TypeMapping::BindLegacyTypevars(binding_context),
-        TypeContext::default(),
-    ))
+    let env = TypeOperations::for_inference(db, bound_typevar.default_environment(db));
+    bound_typevar.compute_default_type(db, &env)
 }
 
 #[expect(clippy::ref_option)]
@@ -1961,12 +1981,7 @@ fn bound_typevar_default_type_cycle_recover<'db>(
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
     let default = default?;
-    let program_file = bound_typevar
-        .typevar(db)
-        .definition(db)
-        .expect("a bound TypeVar with a default must have a source definition")
-        .program_file(db);
-    let env = TypeOperations::for_inference(db, ProgramEnvironment::from_file(program_file));
+    let env = TypeOperations::for_inference(db, bound_typevar.default_environment(db));
     Some(match previous_default {
         Some(previous) => default.cycle_normalized(db, &env, *previous, cycle),
         None => default.recursive_type_normalized(db, &env, cycle),

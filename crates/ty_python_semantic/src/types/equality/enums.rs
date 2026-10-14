@@ -414,7 +414,7 @@ impl<'db> EnumValueSet<'db> {
                 members: EnumValueSetMembers::All,
             },
             Type::NewTypeInstance(newtype) => {
-                EnumValueSet::from_type(db, newtype.concrete_base_type(db), visitor)?
+                EnumValueSet::from_type(db, newtype.concrete_base_type(db, env), visitor)?
             }
             Type::EnumComplement(complement) => EnumValueSet {
                 enum_class: complement.enum_class_literal(db),

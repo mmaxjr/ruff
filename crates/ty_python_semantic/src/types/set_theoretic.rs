@@ -1545,7 +1545,7 @@ fn expand_intersection_typevars_and_newtypes<'db>(
                 }
             },
             Type::NewTypeInstance(newtype) => {
-                builder.add_positive_in_place(newtype.concrete_base_type(db));
+                builder.add_positive_in_place(newtype.concrete_base_type(db, env));
             }
             _ => builder.add_positive_in_place(element),
         }

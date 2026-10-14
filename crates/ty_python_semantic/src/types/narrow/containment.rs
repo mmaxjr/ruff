@@ -104,7 +104,7 @@ pub(in crate::types) fn containment_behavior_resolved<'db>(
             },
         ),
         Type::NewTypeInstance(newtype) => {
-            containment_behavior_in(db, inspector, newtype.concrete_base_type(db))
+            containment_behavior_in(db, inspector, newtype.concrete_base_type(db, env))
         }
         Type::Intersection(intersection) => {
             // Preserve the narrowing already supported on main for unsimplified intersections

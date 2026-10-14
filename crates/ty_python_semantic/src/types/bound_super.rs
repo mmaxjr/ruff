@@ -910,7 +910,7 @@ impl<'db> BoundSuperType<'db> {
                 ));
             }
             Type::NewTypeInstance(newtype) => {
-                return delegate_to(newtype.concrete_base_type(db));
+                return delegate_to(newtype.concrete_base_type(db, env));
             }
             Type::Callable(callable) if let Some(class) = callable.runtime_class(db) => {
                 return delegate_to(class.to_instance(db, env));

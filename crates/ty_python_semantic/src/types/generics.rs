@@ -1142,7 +1142,7 @@ impl<'db> GenericContext<'db> {
         for (ty, typevar) in types.zip(variables) {
             let ty = if let Some(ty) = ty {
                 ty
-            } else if let Some(default) = typevar.default_type(db) {
+            } else if let Some(default) = typevar.default_type(db, &env) {
                 // Typevars are only allowed to refer to earlier typevars in their defaults.
                 // This is statically enforced for PEP 695 contexts, and explicitly required
                 // for legacy contexts.
@@ -5548,7 +5548,7 @@ mod tests {
         let TypeVarInferenceSolutions::Alternatives(paths) = inference.solutions(db) else {
             anyhow::bail!("expected a retained unresolved dependency");
         };
-        assert_eq!(u.default_type(db), Some(int));
+        assert_eq!(u.default_type(db, &env), Some(int));
         assert_eq!(paths.len(), 1);
         assert_eq!(&*paths[0], [Some(Unresolved(Type::TypeVar(u))), None]);
         assert_eq!(inference.merged_types(db), [Some(Type::TypeVar(u)), None]);
@@ -5676,7 +5676,7 @@ mod tests {
             anyhow::bail!("expected resolved alternatives containing the outer type variable");
         };
         assert_ne!(t.identity(db), outer.identity(db));
-        assert_eq!(outer.default_type(db), Some(str));
+        assert_eq!(outer.default_type(db, &env), Some(str));
         assert_eq!(
             paths.iter().map(AsRef::as_ref).collect::<FxHashSet<_>>(),
             FxHashSet::from_iter([

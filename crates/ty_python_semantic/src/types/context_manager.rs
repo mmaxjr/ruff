@@ -48,10 +48,10 @@ impl<'db> TypeQuery<'db> for CanSuppressExceptions {
         let is_async = self.is_async;
         if let Type::NewTypeInstance(newtype) = manager
             && newtype
-                .concrete_base_type(db)
+                .concrete_base_type(db, env)
                 .has_outer_type(db, env, super::Type::is_union)
         {
-            return traversal.visit(db, newtype.concrete_base_type(db));
+            return traversal.visit(db, newtype.concrete_base_type(db, env));
         }
         let method = if is_async { "__aexit__" } else { "__exit__" };
         let Some(callables) = manager

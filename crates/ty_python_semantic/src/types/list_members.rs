@@ -289,7 +289,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
             }
 
             Type::NewTypeInstance(newtype) => {
-                self.extend_with_type(db, newtype.concrete_base_type(db));
+                self.extend_with_type(db, newtype.concrete_base_type(db, env));
             }
 
             Type::ClassLiteral(class_literal) if class_literal.is_typed_dict(db) => {

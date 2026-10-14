@@ -598,7 +598,7 @@ fn infer_binary_type_comparison_inner<'db>(
                 visitor.visit(db, (left, op, right), || {
                     infer_binary_type_comparison_inner(
                         context,
-                        newtype.concrete_base_type(db),
+                        newtype.concrete_base_type(db, env),
                         op,
                         right,
                         range,
@@ -614,7 +614,7 @@ fn infer_binary_type_comparison_inner<'db>(
                         context,
                         left,
                         op,
-                        newtype.concrete_base_type(db),
+                        newtype.concrete_base_type(db, env),
                         range,
                         visitor,
                     )
@@ -1624,7 +1624,7 @@ fn upcast<'db>(
         }),
         Type::NewTypeInstance(newtype) => visit_type(db, ty, visitor, |_| {
             IdentityUpcastResult::unstable(
-                upcast(db, env, newtype.concrete_base_type(db), visitor).ty,
+                upcast(db, env, newtype.concrete_base_type(db, env), visitor).ty,
             )
         }),
         Type::FunctionLiteral(function) => IdentityUpcastResult::unstable(Type::FunctionLiteral(

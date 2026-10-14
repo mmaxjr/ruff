@@ -8220,7 +8220,7 @@ impl<'db> Binding<'db> {
         // inferred from arguments. Only the former are ignored during fixpoint iteration.
         let argument_specialization = self.inference.map(|inference| {
             inference.merged_specialization_with(db, env, |typevar, inferred| {
-                (inferred.is_none() && typevar.default_type(db).is_none())
+                (inferred.is_none() && typevar.default_type(db, env).is_none())
                     .then_some(Type::Dynamic(DynamicType::UnspecializedTypeVar))
             })
         });

@@ -1711,7 +1711,7 @@ impl<'db> Signature<'db> {
             }
 
             if typevar
-                .default_type(db)
+                .default_type(db, env)
                 .is_some_and(|ty| ty.contains_self(db, env))
             {
                 return None;
