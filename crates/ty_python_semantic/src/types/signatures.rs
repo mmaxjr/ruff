@@ -859,7 +859,7 @@ impl<'db> PartialApplication<'db> {
 }
 
 impl<'db> Signature<'db> {
-    pub(super) fn map_recursive_references(
+    fn map_recursive_references(
         &self,
         db: &'db dyn Db,
         mapper: &RecursiveReferenceMapper<'db>,

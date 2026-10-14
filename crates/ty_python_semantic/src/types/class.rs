@@ -586,7 +586,7 @@ impl<'db> VarianceInferable<'db> for GenericAlias<'db> {
 #[salsa::tracked]
 impl<'db> GenericAlias<'db> {
     /// Resolve the specialized ancestry within the consuming operation.
-    pub(in crate::types) fn try_mro(
+    fn try_mro(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,

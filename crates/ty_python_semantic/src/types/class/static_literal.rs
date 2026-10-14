@@ -925,7 +925,7 @@ impl<'db> StaticClassLiteral<'db> {
     }
 
     /// Apply type arguments to the declared ancestry within the caller's operation.
-    pub(crate) fn iter_mro_specialized(
+    fn iter_mro_specialized(
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,

@@ -3590,7 +3590,7 @@ impl<'db> UnfoldResult<'db, Type<'db>> {
     /// Callers that recursively process the returned type must use their own recursion guards.
     /// Unfolding one layer does not eliminate cycles, even when it makes progress.
     #[inline]
-    pub(super) fn into_type(self) -> Type<'db> {
+    fn into_type(self) -> Type<'db> {
         match self {
             Self::Unfolded(ty) => ty,
             Self::Unchanged(recursive) => Type::Recursive(recursive),
@@ -3601,7 +3601,7 @@ impl<'db> UnfoldResult<'db, Type<'db>> {
 impl<'db, T> UnfoldResult<'db, T> {
     /// Return the contained value if unfolding made progress.
     #[inline]
-    pub(crate) fn into_unfolded(self) -> Option<T> {
+    fn into_unfolded(self) -> Option<T> {
         match self {
             Self::Unfolded(value) => Some(value),
             Self::Unchanged(_) => None,
@@ -3610,7 +3610,7 @@ impl<'db, T> UnfoldResult<'db, T> {
 
     /// Transform the contained value, preserving the original recursive type if unfolding made no progress.
     #[inline]
-    pub(crate) fn map<U>(self, operation: impl FnOnce(T) -> U) -> UnfoldResult<'db, U> {
+    fn map<U>(self, operation: impl FnOnce(T) -> U) -> UnfoldResult<'db, U> {
         match self {
             Self::Unfolded(value) => UnfoldResult::Unfolded(operation(value)),
             Self::Unchanged(recursive) => UnfoldResult::Unchanged(recursive),

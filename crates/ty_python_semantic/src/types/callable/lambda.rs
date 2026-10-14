@@ -916,11 +916,7 @@ impl<'db> LambdaSignature<'db> {
     }
 
     /// Transform captured inputs without inferring the lambda's body.
-    pub(in crate::types) fn captured_typevars(
-        self,
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-    ) -> GenericContext<'db> {
+    fn captured_typevars(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> GenericContext<'db> {
         let source = LambdaSource::of(db, self).captured_typevars(db);
         let Some(plan) = self.mapping(db) else {
             return source;

@@ -5,7 +5,9 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use salsa::plumbing::AsId;
-use ty_python_core::{Program, ProgramFile};
+#[cfg(any(test, feature = "testing"))]
+use ty_python_core::Program;
+use ty_python_core::ProgramFile;
 
 use super::cyclic::GuardToken;
 use super::{ApplyTypeMappingVisitor, TypeRecursionState};

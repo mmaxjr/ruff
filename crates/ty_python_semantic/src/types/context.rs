@@ -39,7 +39,7 @@ pub struct ProgramEnvironment<'db> {
 
 impl<'db> ProgramEnvironment<'db> {
     /// Creates an environment that lazily obtains its program from `file`.
-    pub fn from_file(file: ProgramFile<'db>) -> Self {
+    pub(crate) fn from_file(file: ProgramFile<'db>) -> Self {
         Self {
             environment: Cell::new(ProgramSource::File(file.as_id())),
             lifetime: PhantomData,
@@ -63,7 +63,7 @@ impl<'db> ProgramEnvironment<'db> {
     }
 
     /// Creates an environment with an already-established program.
-    pub fn from_program(program: Program<'db>) -> Self {
+    pub(crate) fn from_program(program: Program<'db>) -> Self {
         Self {
             environment: Cell::new(ProgramSource::Program(program.as_id())),
             lifetime: PhantomData,

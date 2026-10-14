@@ -1450,7 +1450,7 @@ where
 
 /// Whether a recursive operation revisited the same type or another specialization of it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CycleKind {
+pub(crate) enum CycleKind {
     Exact,
     /// The types have the same recursive identity, but their arguments can differ.
     MatchingIdentity,

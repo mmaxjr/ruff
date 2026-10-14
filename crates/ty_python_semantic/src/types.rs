@@ -30,9 +30,10 @@ use ty_module_resolver::{
 
 pub(crate) use self::callable::UpcastPolicy;
 use self::class::ClassInstanceFlags;
+pub use self::cyclic::CycleDetector;
+pub(crate) use self::cyclic::CycleKind;
 pub(crate) use self::cyclic::TypeTransformer;
 use self::cyclic::{ActiveRecursionDetector, TypeIdentity};
-pub use self::cyclic::{CycleDetector, CycleKind};
 pub use self::dedicated::pytest::{
     FixtureBinding, FixtureExposure, FixtureNameSource, PytestTest, fixture_bindings_for_parameter,
     fixture_exposures_for_definition, pytest_global_plugin_files, pytest_tests_in_file,

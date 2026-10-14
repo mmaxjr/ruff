@@ -1648,7 +1648,7 @@ impl<'scope, 'db> ExpandedSignatures<'scope, 'db> {
         }
     }
 
-    pub(super) fn collect_legacy_typevars(
+    fn collect_legacy_typevars(
         self,
         db: &'db dyn Db,
         binding_context: Option<Definition<'db>>,
@@ -1776,7 +1776,7 @@ impl<'db> CallableType<'db> {
     }
 
     /// Retain the source of an unfinished conversion without manufacturing a complete signature.
-    pub(super) fn incomplete_projection(db: &'db dyn Db, source: Type<'db>) -> Self {
+    fn incomplete_projection(db: &'db dyn Db, source: Type<'db>) -> Self {
         Self::new_internal(
             db,
             SignatureSource::<CallableSignature<'db>>::Projected(ProjectedSignature {
@@ -1935,7 +1935,7 @@ impl<'db> CallableType<'db> {
     }
 
     /// Replace return types without evaluating a deferred body that will be discarded.
-    pub(super) fn with_return_type(self, db: &'db dyn Db, return_ty: Type<'db>) -> Self {
+    fn with_return_type(self, db: &'db dyn Db, return_ty: Type<'db>) -> Self {
         let signatures = match self.parameter_source(db) {
             ParameterSource::Explicit(signatures) => CallableSignature::from_overloads(
                 signatures
@@ -2127,11 +2127,7 @@ impl<'db> CallableType<'db> {
         )
     }
 
-    pub(super) fn with_lambda_signature(
-        self,
-        db: &'db dyn Db,
-        lambda: LambdaSignature<'db>,
-    ) -> Self {
+    fn with_lambda_signature(self, db: &'db dyn Db, lambda: LambdaSignature<'db>) -> Self {
         Self::new_internal(
             db,
             SignatureSource::<CallableSignature<'db>>::Lambda(lambda),
@@ -2616,11 +2612,7 @@ impl<'a, 'db> IntoIterator for &'a CallableTypes<'db> {
 }
 
 impl<'db> CallableType<'db> {
-    pub(super) fn with_signature_source(
-        self,
-        db: &'db dyn Db,
-        source: SignatureSource<'db>,
-    ) -> Self {
+    fn with_signature_source(self, db: &'db dyn Db, source: SignatureSource<'db>) -> Self {
         Self::new_internal(db, source, self.kind(db), self.deprecated(db))
     }
 }
