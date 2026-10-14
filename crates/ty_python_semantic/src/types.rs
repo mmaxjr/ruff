@@ -552,7 +552,7 @@ impl<'db> TypeRecursionContext<'db> {
     }
 }
 
-type TypeRecursionRevision = [u64; 17];
+type TypeRecursionRevision = [u64; 19];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
@@ -567,6 +567,8 @@ impl TypeRecursionContext<'_> {
             materialized_bounds,
             sequent_derivation,
             specialized_mro,
+            class_fields,
+            typed_dict_openness,
             meta_type:
                 MetaTypeRecursion {
                     aliases,
@@ -591,6 +593,8 @@ impl TypeRecursionContext<'_> {
             materialized_bounds.revision(),
             sequent_derivation.revision(),
             specialized_mro.revision(),
+            class_fields.revision(),
+            typed_dict_openness.revision(),
             aliases.revision(),
             growing_aliases.revision(),
             typevars.revision(),
@@ -616,6 +620,8 @@ struct TypeRecursionState<'db> {
     materialized_bounds: cyclic::AcyclicRecursionDetector<BoundTypeVarInstance<'db>>,
     sequent_derivation: ActiveRecursionDetector<(Program<'db>, salsa::Id, Option<salsa::Id>)>,
     specialized_mro: ActiveRecursionDetector<GenericAlias<'db>>,
+    class_fields: ActiveRecursionDetector<class::ClassFieldQuery<'db>>,
+    typed_dict_openness: ActiveRecursionDetector<TypedDictType<'db>>,
     operation: operations::OperationState,
     meta_type: MetaTypeRecursion<'db>,
     normalization: ActiveRecursionDetector<()>,

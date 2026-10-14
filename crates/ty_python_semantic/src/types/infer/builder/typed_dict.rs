@@ -351,8 +351,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
 
             let value_ty = if let Some(key_ty) = key_ty
                 && let Some(key) = key_ty.as_string_literal()
-                && let Some(field) = typed_dict.item(self.db(), key.value(self.db()))
-            {
+                && let Some(field) = typed_dict.item(
+                    self.db(),
+                    self.context.program_environment(),
+                    key.value(self.db()),
+                ) {
                 self.infer_expression(&item.value, TypeContext::declared(Some(field.declared_ty)))
             } else if let Some(key_ty) = key_ty {
                 if key_ty.is_assignable_to(db, env, KnownClass::Str.to_instance(db, env))
@@ -469,7 +472,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     keyword
                         .arg
                         .as_ref()
-                        .and_then(|name| typed_dict.item(db, name.id.as_str()))
+                        .and_then(|name| typed_dict.item(db, env, name.id.as_str()))
                         .is_some_and(|field| {
                             !self.expression_type(&keyword.value).is_assignable_to(
                                 db,
@@ -538,7 +541,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             && !has_gradual_class_context
             && arguments.keywords.iter().all(|keyword| {
                 let permits_field_inference = |name: &str| {
-                    typed_dict.item(db, name).is_none_or(|field| {
+                    typed_dict.item(db, env, name).is_none_or(|field| {
                         !any_over_type_expanding_aliases(db, env, field.declared_ty, |nested| {
                             nested.is_typed_dict() && nested.has_typevar(db, env)
                         })
@@ -557,7 +560,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                         |_, _| false,
                         |_, ty| {
                             ty.as_typed_dict().is_some_and(|unpacked| {
-                                unpacked.items(db).iter().all(|(name, field)| {
+                                unpacked.items(db, env).iter().all(|(name, field)| {
                                     field.is_required() && permits_field_inference(name.as_str())
                                 })
                             })
@@ -605,7 +608,12 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                     &unpacked_keyword_types,
                     &mut |expr, tcx| self.get_or_infer_expression(expr, tcx),
                 );
-                let positional_target = typed_dict_with_relaxed_keys(db, typed_dict, &keyword_keys);
+                let positional_target = typed_dict_with_relaxed_keys(
+                    db,
+                    self.program_environment(),
+                    typed_dict,
+                    &keyword_keys,
+                );
                 let target_ty = Type::TypedDict(positional_target);
                 self.get_or_infer_expression(
                     &arguments.args[0],
@@ -648,7 +656,13 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             let value_tcx = keyword
                 .arg
                 .as_ref()
-                .and_then(|arg_name| typed_dict.item(self.db(), arg_name.id.as_str()))
+                .and_then(|arg_name| {
+                    typed_dict.item(
+                        self.db(),
+                        self.context.program_environment(),
+                        arg_name.id.as_str(),
+                    )
+                })
                 .map(|field| TypeContext::declared(Some(field.declared_ty)))
                 .unwrap_or_default();
             self.get_or_infer_expression(&keyword.value, value_tcx);
@@ -677,8 +691,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 .as_ref()
                 .map(|key| self.get_or_infer_expression(key, key_tcx));
             let value_tcx = if let Some(key) = key_ty.and_then(Type::as_string_literal)
-                && let Some(field) = typed_dict.item(self.db(), key.value(self.db()))
-            {
+                && let Some(field) = typed_dict.item(
+                    self.db(),
+                    self.context.program_environment(),
+                    key.value(self.db()),
+                ) {
                 TypeContext::declared(Some(field.declared_ty))
             } else if let Some(key_ty) = key_ty {
                 if key_ty.is_assignable_to(db, env, KnownClass::Str.to_instance(db, env)) {

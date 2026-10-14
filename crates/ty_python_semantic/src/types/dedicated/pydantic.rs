@@ -1210,7 +1210,8 @@ fn root_model_input_type<'db>(
     else {
         return Some(Type::any());
     };
-    let Some(root_field) = class.fields(db, specialization, field_policy).get("root") else {
+    let fields = class.fields(db, env, specialization, field_policy);
+    let Some(root_field) = fields.get("root") else {
         return Some(Type::any());
     };
 

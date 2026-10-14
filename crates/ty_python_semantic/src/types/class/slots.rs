@@ -285,6 +285,7 @@ impl<'db> StaticClassLiteral<'db> {
     )]
     fn slot_definition(self, db: &'db dyn Db) -> SlotDefinition {
         let body_scope = self.body_scope(db);
+        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(body_scope));
         // A bare annotation does not bind `__slots__`, but an annotated assignment does:
         //
         //     __slots__: tuple[str, ...]
@@ -328,7 +329,7 @@ impl<'db> StaticClassLiteral<'db> {
                 .collect();
             let weakref_name = Name::new_static("__weakref__");
             let mut names: Vec<_> = self
-                .fields(db, None, field_policy)
+                .fields(db, &env, None, field_policy)
                 .keys()
                 .filter(|name| !inherited_slots.contains(*name))
                 .cloned()
@@ -345,7 +346,6 @@ impl<'db> StaticClassLiteral<'db> {
         //
         //     if condition:
         //         __slots__ = ("value",)
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(body_scope));
         let use_def = use_def_map(db, body_scope);
         let bindings = use_def.end_of_scope_symbol_bindings(symbol);
         let Place::Defined(DefinedPlace {

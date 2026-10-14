@@ -2748,7 +2748,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (Type::TypedDict(typed_dict), _) => {
                 {
                     let dict_value_type =
-                        typed_dict.dict_value_type_if(db, |field_ty, extra_ty| {
+                        typed_dict.dict_value_type_if(db, env, |field_ty, extra_ty| {
                             let result = if self.relation.is_assignability() {
                                 // Mutual assignability lets gradual field types satisfy the mutable
                                 // dict contract. Check the schema without inferring type variables or
@@ -2798,10 +2798,10 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                                     .push(ErrorContext::TypedDictNotAssignableToDict(typed_dict));
                             }
                             Some(KnownClass::Mapping)
-                                if typed_dict.openness(db).is_implicitly_open() =>
+                                if typed_dict.openness(db, env).is_implicitly_open() =>
                             {
-                                let field_types =
-                                    typed_dict.items(db).values().map(|field| field.declared_ty);
+                                let items = typed_dict.items(db, env);
+                                let field_types = items.values().map(|field| field.declared_ty);
                                 let mapping_fallback_spec = &[
                                     KnownClass::Str.to_instance(db, env),
                                     UnionType::from_elements(db, env, field_types),

@@ -5342,7 +5342,9 @@ impl<'db> TypeQuery<'db> for ContainsTypedDict<'_> {
         _state: (),
     ) -> bool {
         match ty {
-            Type::TypedDict(td) => self.key.is_none_or(|key| td.items(db).contains_key(key)),
+            Type::TypedDict(td) => self
+                .key
+                .is_none_or(|key| td.items(db, traversal.environment()).contains_key(key)),
             Type::Union(union) => union
                 .elements(db)
                 .iter()
@@ -5460,7 +5462,7 @@ impl<'a, 'db, F: FnMut(Type<'db>)> TypeWalk<'db, &'a mut F> for VisitTypedDictFi
     ) {
         let elements = match ty {
             Type::TypedDict(td) => {
-                if let Some(field) = td.items(db).get(self.field_name) {
+                if let Some(field) = td.items(db, traversal.environment()).get(self.field_name) {
                     visit(field.declared_ty);
                 }
                 return;
@@ -5611,11 +5613,11 @@ impl<'db> PatternSuccessAnalyzer<'db, '_> {
                 inspector.inspect(db, key_ty, |_, _| None, |_, ty| ty.as_string_literal())
             {
                 return typed_dict
-                    .item(db, key.value(db))
+                    .item(db, &self.env, key.value(db))
                     .map(|field| field.declared_ty)
                     .or_else(|| {
                         typed_dict
-                            .openness(db)
+                            .openness(db, &self.env)
                             .is_implicitly_open()
                             .then_some(Type::object())
                     });

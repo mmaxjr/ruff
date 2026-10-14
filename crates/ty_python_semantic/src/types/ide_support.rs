@@ -763,7 +763,9 @@ pub fn typed_dict_key_definition<'db>(
 ) -> Option<ResolvedDefinition<'db>> {
     let value_ty = subscript.value.inferred_type(model)?;
     let typed_dict = value_ty.as_typed_dict()?;
-    let field = typed_dict.items(model.db()).get(key)?;
+    let env = model.program_environment();
+    let items = typed_dict.items(model.db(), &env);
+    let field = items.get(key)?;
     let definition = field.first_declaration()?;
     Some(ResolvedDefinition::Definition(definition))
 }
@@ -782,7 +784,9 @@ pub fn typed_dict_key_hover<'db>(
     let owner = value_ty
         .display(db, &model.program_environment())
         .to_string();
-    let field = typed_dict.items(model.db()).get(key)?;
+    let env = model.program_environment();
+    let items = typed_dict.items(model.db(), &env);
+    let field = items.get(key)?;
     let docstring = field
         .first_declaration()
         .and_then(|declaration| declaration.docstring(model.db()));

@@ -619,16 +619,18 @@ fn mapping_pattern_is_exhaustive<'pattern, 'db>(
             let Some(key) = key_ty.as_string_literal() else {
                 return false;
             };
-            typed_dict.item(db, key.value(db)).is_some_and(|field| {
-                field.is_required()
-                    && pattern_is_exhaustive_for_subject(
-                        db,
-                        env,
-                        &entry.pattern,
-                        field.declared_ty,
-                        cache,
-                    )
-            })
+            typed_dict
+                .item(db, env, key.value(db))
+                .is_some_and(|field| {
+                    field.is_required()
+                        && pattern_is_exhaustive_for_subject(
+                            db,
+                            env,
+                            &entry.pattern,
+                            field.declared_ty,
+                            cache,
+                        )
+                })
         })
     })
 }

@@ -2389,11 +2389,11 @@ impl<'db> ClassType<'db> {
     ) -> Option<Type<'db>> {
         match self {
             Self::NonGeneric(ClassLiteral::Static(class)) => {
-                class.converter_input_type_for_field(db, name)
+                class.converter_input_type_for_field(db, env, name)
             }
             Self::Generic(generic) => generic
                 .origin(db)
-                .converter_input_type_for_field(db, name)
+                .converter_input_type_for_field(db, env, name)
                 .map(|ty| {
                     ty.apply_optional_specialization(db, env, Some(generic.specialization(db)))
                 }),
@@ -2991,6 +2991,21 @@ pub(crate) enum FieldKind<'db> {
         /// Whether this field is marked read-only
         is_read_only: bool,
     },
+}
+
+/// Distinguish declared fields from the complete inherited field collection.
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+pub(super) enum ClassFieldQuery<'db> {
+    Declared(
+        StaticClassLiteral<'db>,
+        Option<Specialization<'db>>,
+        CodeGeneratorKind<'db>,
+    ),
+    Inherited(
+        StaticClassLiteral<'db>,
+        Option<Specialization<'db>>,
+        CodeGeneratorKind<'db>,
+    ),
 }
 
 /// Metadata regarding a dataclass field/attribute or a `TypedDict` "item" / key-value pair.

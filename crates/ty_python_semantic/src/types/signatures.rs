@@ -4846,7 +4846,13 @@ impl<'db> Parameters<'db> {
 
         for parameter in parameters {
             if let Some(unpacked_typed_dict) = parameter.unpacked_typed_dict(db, env) {
-                Self::push_unpacked_typed_dict(db, &mut value, &parameter, unpacked_typed_dict);
+                Self::push_unpacked_typed_dict(
+                    db,
+                    env,
+                    &mut value,
+                    &parameter,
+                    unpacked_typed_dict,
+                );
             } else {
                 value.push(parameter);
             }
@@ -4857,6 +4863,7 @@ impl<'db> Parameters<'db> {
 
     fn push_unpacked_typed_dict(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         value: &mut Vec<Parameter<'db>>,
         parameter: &Parameter<'db>,
         unpacked_typed_dict: TypedDictType<'db>,
@@ -4866,7 +4873,7 @@ impl<'db> Parameters<'db> {
             .expect("keyword variadic parameter always has a name")
             .clone();
 
-        for (name, field) in unpacked_typed_dict.items(db) {
+        for (name, field) in unpacked_typed_dict.items(db, env).iter() {
             if value
                 .iter()
                 .any(|existing| existing.callable_by_name(name.as_str()))
@@ -4883,7 +4890,10 @@ impl<'db> Parameters<'db> {
             );
         }
 
-        if let Some(extra_items) = unpacked_typed_dict.openness(db).effective_extra_items() {
+        if let Some(extra_items) = unpacked_typed_dict
+            .openness(db, env)
+            .effective_extra_items()
+        {
             value.push(
                 Parameter::keyword_variadic(kwargs_name)
                     .with_annotated_type(extra_items.declared_ty)

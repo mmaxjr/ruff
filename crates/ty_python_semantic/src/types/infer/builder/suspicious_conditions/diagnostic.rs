@@ -544,12 +544,12 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 diagnostic
             } else if let Type::TypedDict(typed_dict) = test_type
                 && let Some(field) = typed_dict
-                    .items(db)
+                    .items(db, env)
                     .iter()
                     .find_map(|(_, field)| field.is_required().then_some(field))
             {
                 let num_required_keys = typed_dict
-                    .items(db)
+                    .items(db, env)
                     .iter()
                     .filter(|(_, field)| field.is_required())
                     .count();

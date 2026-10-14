@@ -9549,10 +9549,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         .map(|key_literal| key_literal.value(self.db())),
                 })
             {
-                let items = typed_dict_ty.items(self.db());
+                let items = typed_dict_ty.items(self.db(), env);
                 let is_declared = items.contains_key(key);
 
-                if let Some(field) = typed_dict_ty.item(self.db(), key) {
+                if let Some(field) = typed_dict_ty.item(self.db(), env, key) {
                     // Key exists - check if it's a `pop()` on a required field
                     if is_declared && method_name == "pop" && field.is_required() {
                         report_cannot_pop_required_field_on_typed_dict(
@@ -9673,7 +9673,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         Type::TypedDict(typed_dict_ty),
                         None,
                         key_ty,
-                        items,
+                        &items,
                     );
                     // Return `Unknown` to prevent the overload system from generating its own error
                     return Type::unknown();

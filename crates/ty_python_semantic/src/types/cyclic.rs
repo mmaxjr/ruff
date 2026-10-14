@@ -748,6 +748,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
     /// Visits the definition with each formal parameter mapped to itself.
     /// Returns `false` if the body is incomplete and could still introduce recursive references.
     fn visit_definition_body(&self, db: &'db dyn Db, source: RecursiveDefinition<'db>) -> bool {
+        let env = &self.env;
         let traversal = TypeVisitorContext::new(self);
         match source {
             RecursiveDefinition::Structural(recursive) => {
@@ -773,10 +774,10 @@ impl<'db> SpecializationFlowVisitor<'db> {
             }
             RecursiveDefinition::TypedDict(origin) => {
                 let typed_dict = TypedDictType::new(origin.identity_specialization(db));
-                for field in typed_dict.items(db).values() {
+                for field in typed_dict.items(db, env).values() {
                     traversal.visit_type(db, field.declared_ty);
                 }
-                if let Some(extra_items) = typed_dict.explicit_extra_items(db) {
+                if let Some(extra_items) = typed_dict.explicit_extra_items(db, env) {
                     traversal.visit_type(db, extra_items.declared_ty);
                 }
             }

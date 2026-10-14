@@ -524,7 +524,7 @@ impl<'db> TypeQuery<'db> for ResolveClassBase<'db> {
 
                 SpecialFormType::NamedTuple => {
                     let class = subclass?.as_static()?;
-                    let fields = class.own_fields(db, None, CodeGeneratorKind::NamedTuple);
+                    let fields = class.own_fields(db, env, None, CodeGeneratorKind::NamedTuple);
                     traversal.visit(
                         db,
                         TupleType::heterogeneous(

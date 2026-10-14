@@ -211,7 +211,10 @@ pub(crate) fn check_static_class_definitions<'db>(
 
         let mut field_with_default_encountered = None;
 
-        for (field_name, field) in class.own_fields(db, None, CodeGeneratorKind::NamedTuple) {
+        for (field_name, field) in class
+            .own_fields(db, env, None, CodeGeneratorKind::NamedTuple)
+            .iter()
+        {
             if field_name.starts_with('_') {
                 report_named_tuple_field_with_leading_underscore(
                     context,
@@ -1028,7 +1031,7 @@ pub(crate) fn check_static_class_definitions<'db>(
     {
         let specialization = None;
         let class_init = class.has_dataclass_param(db, field_policy, DataclassFlags::INIT);
-        let own_fields = class.own_fields(db, specialization, field_policy);
+        let own_fields = class.own_fields(db, env, specialization, field_policy);
 
         let kw_only_sentinel_fields: Vec<_> = own_fields
             .iter()
@@ -1037,7 +1040,8 @@ pub(crate) fn check_static_class_definitions<'db>(
         let mut field_order_violations = vec![];
         let mut previous_default_field = None;
 
-        for (name, field) in class.fields(db, specialization, field_policy) {
+        let fields = class.fields(db, env, specialization, field_policy);
+        for (name, field) in fields.iter() {
             // Extract dataclass field properties
             let FieldKind::Dataclass {
                 default_ty,
@@ -1088,6 +1092,7 @@ pub(crate) fn check_static_class_definitions<'db>(
                     && !own_fields.contains_key(name)
                     && has_inherited_dataclass_field_order_violation(
                         db,
+                        env,
                         class,
                         default_name,
                         default_field,
@@ -1176,6 +1181,7 @@ pub(crate) fn check_static_class_definitions<'db>(
 /// provenance preserves diagnostics when a subclass redeclares either field.
 fn has_inherited_dataclass_field_order_violation<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     class: StaticClassLiteral<'db>,
     default_name: &Name,
     default_field: &Field<'db>,
@@ -1197,7 +1203,7 @@ fn has_inherited_dataclass_field_order_violation<'db>(
                 return false;
             }
 
-            let fields = ancestor.fields(db, specialization, field_policy);
+            let fields = ancestor.fields(db, env, specialization, field_policy);
             let Some((default_index, _, inherited_default_field)) = fields.get_full(default_name)
             else {
                 return false;

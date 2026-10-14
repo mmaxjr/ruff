@@ -435,6 +435,7 @@ fn enum_class_creation_manages_conflict<'db>(
 /// Returns the first inherited `NamedTuple` field in the MRO for `field_name`.
 fn conflicting_named_tuple_field_in_mro<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     class: StaticClassLiteral<'db>,
     field_name: &Name,
 ) -> Option<(ClassType<'db>, Option<Definition<'db>>)> {
@@ -450,7 +451,12 @@ fn conflicting_named_tuple_field_in_mro<'db>(
             match superclass_literal {
                 ClassLiteral::Static(superclass_literal) => {
                     if let Some(field) = superclass_literal
-                        .own_fields(db, superclass_specialization, CodeGeneratorKind::NamedTuple)
+                        .own_fields(
+                            db,
+                            env,
+                            superclass_specialization,
+                            CodeGeneratorKind::NamedTuple,
+                        )
                         .get(field_name)
                     {
                         return Some((superclass, field.first_declaration));
@@ -545,7 +551,7 @@ fn check_class_declaration<'db>(
 
     if configuration.check_invalid_named_tuple_field_overrides()
         && let Some((superclass, overridden_field_declaration)) =
-            conflicting_named_tuple_field_in_mro(db, literal, &member.name)
+            conflicting_named_tuple_field_in_mro(db, env, literal, &member.name)
         && let Some(builder) = context.report_lint(
             &INVALID_NAMED_TUPLE_OVERRIDE,
             first_reachable_definition.focus_range(db, context.module()),
@@ -1912,18 +1918,16 @@ fn check_post_init_signature<'db>(
     };
     let env = &context.program_environment();
 
-    let init_var_fields = static_class
-        .fields(db, spec, policy)
-        .iter()
-        .filter(|(_, field)| {
-            matches!(
-                field.kind,
-                FieldKind::Dataclass {
-                    init_only: true,
-                    ..
-                }
-            )
-        });
+    let fields = static_class.fields(db, env, spec, policy);
+    let init_var_fields = fields.iter().filter(|(_, field)| {
+        matches!(
+            field.kind,
+            FieldKind::Dataclass {
+                init_only: true,
+                ..
+            }
+        )
+    });
 
     let first_parameter = Parameter::positional_only(Some(Name::new_static("self")))
         .with_annotated_type(Type::instance(db, env, class));

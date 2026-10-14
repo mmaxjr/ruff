@@ -163,7 +163,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 // TypedDicts are "open" (can have additional string keys), so this
                 // is still a dynamic namespace for unknown attributes.
                 let members: Box<[(ast::name::Name, Type<'db>)]> = typed_dict
-                    .items(db)
+                    .items(db, env)
                     .iter()
                     .map(|(name, field)| (name.clone(), field.declared_ty))
                     .collect();

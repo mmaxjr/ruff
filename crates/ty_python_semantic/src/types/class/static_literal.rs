@@ -207,7 +207,7 @@ struct InheritedFrozenDataclassFields<'db> {
 /// ```
 ///
 /// Here, `required` is a constructor field and `value` masks an inherited `Base.value` field.
-#[derive(Debug, Default, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
 struct OwnClassFields<'db> {
     fields: FxIndexMap<Name, Field<'db>>,
     class_variables: Box<[Name]>,
@@ -599,7 +599,11 @@ impl<'db> StaticClassLiteral<'db> {
     /// ## Note
     /// Only call this function from queries in the same file or your
     /// query depends on the AST of another file (bad!).
-    fn node<'ast>(self, db: &'db dyn Db, module: &'ast ParsedModuleRef) -> &'ast ast::StmtClassDef {
+    pub(in crate::types) fn node<'ast>(
+        self,
+        db: &'db dyn Db,
+        module: &'ast ParsedModuleRef,
+    ) -> &'ast ast::StmtClassDef {
         self.body_scope(db).node(db).expect_class().node(module)
     }
 
@@ -1638,7 +1642,7 @@ impl<'db> StaticClassLiteral<'db> {
 
         if CodeGeneratorKind::NamedTuple.matches(db, self.into()) {
             if let Some(field) = self
-                .own_fields(db, specialization, CodeGeneratorKind::NamedTuple)
+                .own_fields(db, env, specialization, CodeGeneratorKind::NamedTuple)
                 .get(name)
             {
                 let property_getter_signature = Signature::new(
@@ -1825,7 +1829,7 @@ impl<'db> StaticClassLiteral<'db> {
                 pydantic::extend_settings_constructor_parameters(db, self, &mut parameters);
             }
 
-            for (field_name, field) in self.fields(db, specialization, field_policy) {
+            for (field_name, field) in self.fields(db, env, specialization, field_policy).iter() {
                 let (init, mut default_ty, kw_only, alias, converter, strict) = match &field.kind {
                     FieldKind::NamedTuple { default_ty } => (
                         true,
@@ -2077,7 +2081,7 @@ impl<'db> StaticClassLiteral<'db> {
                 CodeGeneratorKind::NamedTuple,
                 "__match_args__" | "__new__" | "_replace" | "__replace__" | "_fields" | "__slots__",
             ) => {
-                let fields = self.fields(db, specialization, field_policy);
+                let fields = self.fields(db, env, specialization, field_policy);
                 let fields_iter = fields.iter().map(|(name, field)| {
                     let default_ty = match &field.kind {
                         FieldKind::NamedTuple { default_ty } => *default_ty,
@@ -2154,7 +2158,7 @@ impl<'db> StaticClassLiteral<'db> {
                 let kw_only_default =
                     self.has_dataclass_param(db, field_policy, DataclassFlags::KW_ONLY);
 
-                let fields = self.fields(db, specialization, field_policy);
+                let fields = self.fields(db, env, specialization, field_policy);
                 let match_args = fields
                     .iter()
                     .filter(|(_, field)| {
@@ -2243,7 +2247,7 @@ impl<'db> StaticClassLiteral<'db> {
                         );
                     }
 
-                    let fields = self.fields(db, specialization, field_policy);
+                    let fields = self.fields(db, env, specialization, field_policy);
                     let slots = fields.keys().map(|name| Type::string_literal(db, name));
                     Type::heterogeneous_tuple(db, env, slots)
                 }),
@@ -2254,7 +2258,7 @@ impl<'db> StaticClassLiteral<'db> {
                     .as_typed_dict()
                     .expect("TypedDict code generation should use a TypedDict instance"),
                 name,
-                || TypedDictFields::Static(self.fields(db, specialization, field_policy)),
+                || TypedDictFields::Static(self.fields(db, env, specialization, field_policy)),
             ),
             _ => None,
         }
@@ -2419,7 +2423,7 @@ impl<'db> StaticClassLiteral<'db> {
 
                 names.extend(
                     base_class
-                        .fields(db, base_specialization, field_policy)
+                        .fields(db, env, base_specialization, field_policy)
                         .iter()
                         .filter(|(_, field)| {
                             !matches!(
@@ -2472,16 +2476,25 @@ impl<'db> StaticClassLiteral<'db> {
     pub(crate) fn fields(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
-    ) -> &'db FxIndexMap<Name, Field<'db>> {
+    ) -> Cow<'db, FxIndexMap<Name, Field<'db>>> {
         if field_policy == CodeGeneratorKind::NamedTuple {
-            // NamedTuples do not allow multiple inheritance, so it is sufficient to enumerate the
-            // fields of this class only.
-            return self.own_fields(db, specialization, field_policy);
+            return self.own_fields(db, env, specialization, field_policy);
         }
 
-        self.fields_inner(db, specialization, field_policy)
+        env.cached_query(
+            || Cow::Borrowed(self.fields_inner(db, specialization, field_policy)),
+            || {
+                Cow::Owned(env.context().state().class_fields.visit(
+                    env,
+                    &super::ClassFieldQuery::Inherited(self, specialization, field_policy),
+                    FxIndexMap::default,
+                    || self.compute_fields(db, env, specialization, field_policy),
+                ))
+            },
+        )
     }
 
     #[salsa::tracked(
@@ -2495,13 +2508,24 @@ impl<'db> StaticClassLiteral<'db> {
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
     ) -> FxIndexMap<Name, Field<'db>> {
+        let env =
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        self.compute_fields(db, &env, specialization, field_policy)
+    }
+
+    fn compute_fields(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        specialization: Option<Specialization<'db>>,
+        field_policy: CodeGeneratorKind<'db>,
+    ) -> FxIndexMap<Name, Field<'db>> {
         enum FieldSource<'db> {
             Static(StaticClassLiteral<'db>, Option<Specialization<'db>>),
             DynamicTypedDict(DynamicTypedDictLiteral<'db>),
         }
 
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        let env = env.in_environment(ProgramEnvironment::from_scope(self.body_scope(db)));
 
         debug_assert_ne!(
             field_policy,
@@ -2535,8 +2559,12 @@ impl<'db> StaticClassLiteral<'db> {
             })
             .flat_map(|source| match source {
                 FieldSource::Static(class, specialization) => {
-                    let own_fields =
-                        class.own_fields_with_class_variables(db, specialization, field_policy);
+                    let own_fields = class.own_fields_with_class_variables(
+                        db,
+                        &env,
+                        specialization,
+                        field_policy,
+                    );
 
                     if field_policy.is_dataclass_like() {
                         class_variables.extend(own_fields.class_variables.iter().cloned());
@@ -2546,10 +2574,11 @@ impl<'db> StaticClassLiteral<'db> {
                     }
 
                     Either::Left(
-                        own_fields
-                            .fields
-                            .iter()
-                            .map(|(name, field)| (name.clone(), field.clone())),
+                        match own_fields {
+                            Cow::Borrowed(fields) => fields.fields.clone(),
+                            Cow::Owned(fields) => fields.fields,
+                        }
+                        .into_iter(),
                     )
                 }
                 FieldSource::DynamicTypedDict(typeddict) => {
@@ -2667,21 +2696,34 @@ impl<'db> StaticClassLiteral<'db> {
     pub(crate) fn own_fields(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
-    ) -> &'db FxIndexMap<Name, Field<'db>> {
-        &self
-            .own_fields_with_class_variables(db, specialization, field_policy)
-            .fields
+    ) -> Cow<'db, FxIndexMap<Name, Field<'db>>> {
+        match self.own_fields_with_class_variables(db, env, specialization, field_policy) {
+            Cow::Borrowed(fields) => Cow::Borrowed(&fields.fields),
+            Cow::Owned(fields) => Cow::Owned(fields.fields),
+        }
     }
 
     fn own_fields_with_class_variables(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
-    ) -> &'db OwnClassFields<'db> {
-        self.own_fields_inner(db, specialization, field_policy)
+    ) -> Cow<'db, OwnClassFields<'db>> {
+        env.cached_query(
+            || Cow::Borrowed(self.own_fields_inner(db, specialization, field_policy)),
+            || {
+                Cow::Owned(env.context().state().class_fields.visit(
+                    env,
+                    &super::ClassFieldQuery::Declared(self, specialization, field_policy),
+                    OwnClassFields::default,
+                    || self.compute_own_fields(db, env, specialization, field_policy),
+                ))
+            },
+        )
     }
 
     /// Collects ordered constructor fields and `ClassVar` masks in one pass over a class body.
@@ -2698,9 +2740,20 @@ impl<'db> StaticClassLiteral<'db> {
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
     ) -> OwnClassFields<'db> {
-        let class_body_scope = self.body_scope(db);
         let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(class_body_scope));
+            TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self.body_scope(db)));
+        self.compute_own_fields(db, &env, specialization, field_policy)
+    }
+
+    fn compute_own_fields(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        specialization: Option<Specialization<'db>>,
+        field_policy: CodeGeneratorKind<'db>,
+    ) -> OwnClassFields<'db> {
+        let class_body_scope = self.body_scope(db);
+        let env = env.in_environment(ProgramEnvironment::from_scope(class_body_scope));
         let table = place_table(db, class_body_scope);
 
         let use_def = use_def_map(db, class_body_scope);
@@ -3019,7 +3072,7 @@ impl<'db> StaticClassLiteral<'db> {
         // shadows the name with a normal class attribute.
         if CodeGeneratorKind::NamedTuple.matches(db, self.into())
             && self
-                .own_fields(db, None, CodeGeneratorKind::NamedTuple)
+                .own_fields(db, env, None, CodeGeneratorKind::NamedTuple)
                 .contains_key(name)
         {
             return Member::unbound();
@@ -3119,7 +3172,7 @@ impl<'db> StaticClassLiteral<'db> {
                                     .with_qualifiers(qualifiers),
                                 }
                             }
-                        } else if self.is_own_dataclass_instance_field(db, name)
+                        } else if self.is_own_dataclass_instance_field(db, env, name)
                             && declared_ty
                                 .class_member(db, env, "__get__")
                                 .place
@@ -3216,7 +3269,12 @@ impl<'db> StaticClassLiteral<'db> {
     /// should be treated as defining an instance attribute: dataclass fields are
     /// implicitly assigned in `__init__`, so they behave as instance attributes
     /// even though no explicit binding exists in the class body.
-    pub(crate) fn is_own_dataclass_instance_field(self, db: &'db dyn Db, name: &str) -> bool {
+    pub(crate) fn is_own_dataclass_instance_field(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        name: &str,
+    ) -> bool {
         let Some(field_policy) = CodeGeneratorKind::from_static_class(db, self) else {
             return false;
         };
@@ -3224,7 +3282,7 @@ impl<'db> StaticClassLiteral<'db> {
             return false;
         }
 
-        let fields = self.own_fields(db, None, field_policy);
+        let fields = self.own_fields(db, env, None, field_policy);
         let Some(field) = fields.get(name) else {
             return false;
         };
@@ -3242,6 +3300,7 @@ impl<'db> StaticClassLiteral<'db> {
     pub(super) fn converter_input_type_for_field(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> Option<Type<'db>> {
         let field_policy @ CodeGeneratorKind::DataclassLike(_) =
@@ -3249,7 +3308,7 @@ impl<'db> StaticClassLiteral<'db> {
         else {
             return None;
         };
-        let fields = self.fields(db, None, field_policy);
+        let fields = self.fields(db, env, None, field_policy);
         let field = fields.get(name)?;
         if let FieldKind::Dataclass { converter, .. } = field.kind {
             converter.map(|(input_ty, _)| input_ty)

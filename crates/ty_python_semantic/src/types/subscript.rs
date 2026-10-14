@@ -295,7 +295,7 @@ impl<'db> SubscriptErrorKind<'db> {
                             *value_ty,
                             None,
                             *slice_ty,
-                            typed_dict.items(db),
+                            &typed_dict.items(db, env),
                         );
                     } else if let Some(builder) =
                         context.report_lint(&INVALID_ARGUMENT_TYPE, value_node)
@@ -333,7 +333,7 @@ impl<'db> SubscriptErrorKind<'db> {
                     typed_dict_ty,
                     *full_object_ty,
                     *slice_ty,
-                    typed_dict.items(db),
+                    &typed_dict.items(db, env),
                 );
             }
             Self::NotSubscriptable { value_ty, method } => {
@@ -521,12 +521,12 @@ fn typed_dict_subscript<'db>(
         .as_string_literal()
         .map(|literal| literal.value(db))
     else {
-        if typed_dict.explicit_extra_items(db).is_some()
+        if typed_dict.explicit_extra_items(db, env).is_some()
             && slice_ty.is_assignable_to(db, env, KnownClass::Str.to_instance(db, env))
         {
             return Ok(typed_dict.value_type(db, env));
         }
-        let result_ty = if typed_dict.openness(db).is_closed()
+        let result_ty = if typed_dict.openness(db, env).is_closed()
             && slice_ty.is_assignable_to(db, env, KnownClass::Str.to_instance(db, env))
         {
             typed_dict.value_type(db, env)
@@ -543,7 +543,7 @@ fn typed_dict_subscript<'db>(
         ));
     };
 
-    typed_dict.item(db, key).map_or_else(
+    typed_dict.item(db, env, key).map_or_else(
         || {
             Err(SubscriptError::new(
                 Type::unknown(),

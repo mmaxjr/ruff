@@ -126,7 +126,7 @@ fn member_contract<'db>(
     // NamedTuple fields have a dedicated override rule, including synthesized properties.
     if CodeGeneratorKind::NamedTuple.matches(db, literal.into())
         && literal
-            .own_fields(db, None, CodeGeneratorKind::NamedTuple)
+            .own_fields(db, env, None, CodeGeneratorKind::NamedTuple)
             .contains_key(name)
     {
         return None;
@@ -374,7 +374,7 @@ fn attribute_violation<'db>(
             .and_then(|class| class.static_class_literal(db))
             .is_some_and(|(literal, _)| {
                 literal.is_frozen_dataclass(db) == Some(true)
-                    && literal.is_own_dataclass_instance_field(db, name)
+                    && literal.is_own_dataclass_instance_field(db, env, name)
             })
     {
         return None;

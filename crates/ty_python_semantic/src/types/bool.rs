@@ -269,11 +269,11 @@ impl<'db> TypeQuery<'db> for TryBool {
             Type::Never => Truthiness::Uninhabited,
 
             Type::TypedDict(td) => {
-                if td.items(db).values().any(TypedDictField::is_required) {
+                if td.items(db, env).values().any(TypedDictField::is_required) {
                     Truthiness::AlwaysTrue
-                } else if td.openness(db).is_closed()
+                } else if td.openness(db, env).is_closed()
                     && td
-                        .items(db)
+                        .items(db, env)
                         .values()
                         .all(|field| !field.may_be_present(db, env))
                 {

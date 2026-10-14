@@ -2574,16 +2574,17 @@ impl<'db> RecursiveType<'db> {
             recursive: RecursiveType<'db>,
             (): (),
         ) -> AliasCycleSummary<'db> {
-            let body = match recursive.body(db) {
-                RecursiveBody::Type(body) => body,
-                RecursiveBody::TypedDictValues(class) => {
-                    TypedDictType::new(class.identity_specialization(db)).unfold_value_type(db)
-                }
-            };
             let env = TypeOperations::for_inference(
                 db,
                 ProgramEnvironment::from_definition(recursive.definition(db)),
             );
+            let body = match recursive.body(db) {
+                RecursiveBody::Type(body) => body,
+                RecursiveBody::TypedDictValues(class) => {
+                    TypedDictType::new(class.identity_specialization(db))
+                        .unfold_value_type(db, &env)
+                }
+            };
             let mut summary = AliasCycleSummary::from_type(db, &env, body);
             // Nested bodies can refer to an enclosing binder. Close only the cycle marker,
             // so recovery never exposes an unbound variable as a standalone type.
@@ -2798,7 +2799,7 @@ impl<'db> RecursiveType<'db> {
                 let constructor = self.constructor(db);
                 if self == constructor {
                     return TypedDictType::new(origin.identity_specialization(db))
-                        .unfold_value_type(db);
+                        .unfold_value_type(db, visitor.env);
                 }
 
                 // Specialize one shared constructor body. Reading each specialized schema can

@@ -1816,14 +1816,14 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     // instead refer to any declared field, so deletion is only safe when all
                     // possible fields are optional and mutable.
                     let can_delete_extra_literals = typed_dict
-                        .explicit_extra_items(db)
+                        .explicit_extra_items(db, env)
                         .is_some_and(|extra_items| !extra_items.is_read_only())
                         && string_literal_values(db, slice_ty).is_some_and(|mut literals| {
-                            literals.all(|literal| !typed_dict.items(db).contains_key(literal))
+                            literals.all(|literal| !typed_dict.items(db, env).contains_key(literal))
                         });
                     let can_delete_arbitrary_key =
                         slice_ty.is_assignable_to(db, env, KnownClass::Str.to_instance(db, env))
-                            && typed_dict.supports_arbitrary_key_deletion(db);
+                            && typed_dict.supports_arbitrary_key_deletion(db, env);
                     if can_delete_extra_literals || can_delete_arbitrary_key {
                         return;
                     }
@@ -1873,7 +1873,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                 if let Some(typed_dict) = object_ty.as_typed_dict() {
                                     if let Some(string_literal) = slice_ty.as_string_literal() {
                                         let key = string_literal.value(db);
-                                        let items = typed_dict.items(db);
+                                        let items = typed_dict.items(db, env);
 
                                         if let Some(field) = items.get(key) {
                                             // Key exists but is required (i.e., can't be deleted).
@@ -1886,7 +1886,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                                                 TypedDictDeleteErrorKind::RequiredKey,
                                             );
                                         } else if typed_dict
-                                            .explicit_extra_items(db)
+                                            .explicit_extra_items(db, env)
                                             .is_some_and(TypedDictExtraItems::is_read_only)
                                         {
                                             report_cannot_delete_typed_dict_key(
@@ -2242,11 +2242,11 @@ impl<'db> TypeQuery<'db> for TypedDictKeyExpectedType {
         let env = context.environment();
         let keys = match ty {
             Type::TypedDict(typed_dict) => {
-                if typed_dict.explicit_extra_items(db).is_some() {
+                if typed_dict.explicit_extra_items(db, env).is_some() {
                     return Some(KnownClass::Str.to_instance(db, env));
                 }
                 typed_dict
-                    .items(db)
+                    .items(db, env)
                     .keys()
                     .map(|key| Type::string_literal(db, key))
                     .collect_vec()
@@ -2477,7 +2477,7 @@ impl<'db, 'ast> SubscriptAssignment<'_, 'db, 'ast> {
 
                 for key in keys {
                     // Infer the value with type context.
-                    let item = typed_dict.item(db, key);
+                    let item = typed_dict.item(db, env, key);
                     let value_ty = infer_rhs_value.infer_silent(
                         inference,
                         TypeContext::declared(item.as_ref().map(|item| item.declared_ty)),
