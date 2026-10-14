@@ -1,5 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use std::cell::LazyCell;
 use std::fmt::Write;
 
@@ -427,6 +428,18 @@ pub(super) fn walk_generic_alias<'db, V: super::visitor::TypeVisitor<'db> + ?Siz
 impl get_size2::GetSize for GenericAlias<'_> {}
 
 impl<'db> GenericAlias<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        Self::new(
+            db,
+            self.origin(db),
+            self.specialization(db).map_recursive_references(db, mapper),
+        )
+    }
+
     /// Merge two cycle iterations that specialize the same class origin.
     ///
     /// A semantic union of these class objects is not a valid class base. Keep the shared class
@@ -471,14 +484,11 @@ impl<'db> GenericAlias<'db> {
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
     ) -> Self {
-        let tcx = if type_mapping.is_structural() {
-            &[]
-        } else {
-            tcx.annotation
-                .and_then(|ty| ty.specialization_of(db, visitor.env, self.origin(db)))
-                .map(|specialization| specialization.types(db))
-                .unwrap_or(&[])
-        };
+        let tcx = tcx
+            .annotation
+            .and_then(|ty| ty.specialization_of(db, visitor.env, self.origin(db)))
+            .map(|specialization| specialization.types(db))
+            .unwrap_or(&[]);
 
         let original_specialization = self.specialization(db);
         let specialization =

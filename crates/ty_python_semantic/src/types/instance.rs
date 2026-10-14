@@ -2,6 +2,7 @@
 
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::debug_assert_matches;
@@ -232,6 +233,22 @@ pub(super) fn walk_nominal_instance_type<'db, V: super::visitor::TypeVisitor<'db
 }
 
 impl<'db> NominalInstanceType<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        match self.0 {
+            NominalInstanceInner::ExactTuple(tuple) => Self(NominalInstanceInner::ExactTuple(
+                tuple.map_recursive_references(db, mapper),
+            )),
+            NominalInstanceInner::NonTuple(class) => Self(NominalInstanceInner::NonTuple(
+                class.with_class(db, mapper.map_class(db, class.class(db))),
+            )),
+            NominalInstanceInner::Object | NominalInstanceInner::SysVersionInfo => self,
+        }
+    }
+
     fn from_class(db: &'db dyn Db, class: ClassType<'db>) -> Self {
         Self(NominalInstanceInner::NonTuple(
             NominalInstanceClass::from_class(db, class),
@@ -1739,6 +1756,26 @@ pub(super) fn walk_protocol_instance_type<'db, V: super::visitor::TypeVisitor<'d
 }
 
 impl<'db> ProtocolInstanceType<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        match self.inner {
+            Protocol::FromClass(class) => {
+                Self::from_class(class.map_recursive_references(db, mapper))
+            }
+            Protocol::Synthesized(synthesized) => Self::synthesized(SynthesizedProtocolType::new(
+                synthesized.interface().map_recursive_references(db, mapper),
+            )),
+            Protocol::Materialized(materialized) => Self::materialized(
+                db,
+                materialized.origin(db).map_recursive_references(db, mapper),
+                materialized.materialization_kind(db),
+            ),
+        }
+    }
+
     /// Return `true` if this is the standard-library `Hashable` protocol.
     pub(super) fn is_hashable(self, db: &'db dyn Db) -> bool {
         self.class_origin(db)

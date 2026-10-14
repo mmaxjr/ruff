@@ -1,5 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use std::fmt::Write;
 
 use crate::{
@@ -453,6 +454,37 @@ pub(super) fn walk_type_alias_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>(
 
 #[salsa::tracked]
 impl<'db> TypeAliasType<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        let Some(specialization) = self.specialization(db) else {
+            return self;
+        };
+        let mapped = specialization.map_recursive_references(db, mapper);
+        if mapped == specialization {
+            return self;
+        }
+        match self {
+            Self::PEP695(alias) => Self::PEP695(PEP695TypeAliasType::new(
+                db,
+                alias.name(db),
+                alias.rhs_scope(db),
+                Some(mapped),
+                alias.materialization_kind(db),
+            )),
+            Self::ManualPEP695(alias) => Self::ManualPEP695(ManualPEP695TypeAliasType::new(
+                db,
+                alias.name(db),
+                alias.definition(db),
+                alias.typing_module(db),
+                Some(mapped),
+                alias.materialization_kind(db),
+            )),
+        }
+    }
+
     /// Summarize an alias's raw definition once, sharing the result across references.
     /// Specializations reuse this summary and check their exposed arguments separately.
     fn cycle_summary(self, db: &'db dyn Db) -> &'db AliasCycleSummary<'db> {
@@ -637,9 +669,6 @@ impl<'db> TypeAliasType<'db> {
     ) -> Type<'db> {
         let ty = Type::TypeAlias(self);
         match type_mapping {
-            TypeMapping::ApplyRecursiveSubstitution(_) => {
-                Type::TypeAlias(self.map_stored_specialization(db, type_mapping, visitor))
-            }
             TypeMapping::Materialize(_) if self.materialization_kind(db).is_some() => ty,
             TypeMapping::EagerExpansion if self.materialization_kind(db).is_some() => visitor
                 .transformer(type_mapping)
@@ -694,39 +723,6 @@ impl<'db> TypeAliasType<'db> {
                     },
                 )
             }
-        }
-    }
-
-    /// Rewrite stored arguments without evaluating the alias's definition or defaults.
-    fn map_stored_specialization(
-        self,
-        db: &'db dyn Db,
-        mapping: &TypeMapping<'_, 'db>,
-        visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> Self {
-        let Some(specialization) = self.specialization(db) else {
-            return self;
-        };
-        let mapped = specialization.apply_type_mapping_impl(db, mapping, &[], visitor);
-        if mapped == specialization {
-            return self;
-        }
-        match self {
-            Self::PEP695(alias) => Self::PEP695(PEP695TypeAliasType::new(
-                db,
-                alias.name(db),
-                alias.rhs_scope(db),
-                Some(mapped),
-                alias.materialization_kind(db),
-            )),
-            Self::ManualPEP695(alias) => Self::ManualPEP695(ManualPEP695TypeAliasType::new(
-                db,
-                alias.name(db),
-                alias.definition(db),
-                alias.typing_module(db),
-                Some(mapped),
-                alias.materialization_kind(db),
-            )),
         }
     }
 

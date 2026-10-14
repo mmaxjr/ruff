@@ -1,6 +1,7 @@
 //! Transform lambda signatures without making their inferred return types part of their identity.
 
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use std::cell::RefCell;
 
 use rustc_hash::FxHashSet;
@@ -310,7 +311,7 @@ impl<'db> LambdaMapping<'db> {
             TypeMapping::Materialize(kind) => Self::Materialize(*kind),
             TypeMapping::ReplaceParameterDefaults => Self::ReplaceParameterDefaults,
             TypeMapping::EagerExpansion => Self::EagerExpansion,
-            TypeMapping::ApplyRecursiveSubstitution(_) | TypeMapping::RescopeReturnCallables(_) => {
+            TypeMapping::RescopeReturnCallables(_) => {
                 return None;
             }
         })
@@ -389,6 +390,68 @@ impl<'db> CallableType<'db> {
 
 #[salsa::tracked]
 impl<'db> LambdaSignature<'db> {
+    pub(in crate::types) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        let map = |ty| mapper.map_type(db, ty);
+        let deferred = self.mapping(db).as_ref().map(|plan| {
+            let steps = plan
+                .steps
+                .iter()
+                .cloned()
+                .map(|mut step| {
+                    match &mut step.mapping {
+                        LambdaMapping::Specialize { specialization, .. } => {
+                            *specialization = specialization.map_recursive_references(db, mapper)
+                        }
+                        LambdaMapping::BindSelf(binding) => binding.ty = map(binding.ty),
+                        LambdaMapping::ReplaceSelf(ty) => *ty = map(*ty),
+                        LambdaMapping::BindReceiver {
+                            receiver,
+                            self_binding,
+                        }
+                        | LambdaMapping::ApplyReceiver {
+                            receiver,
+                            self_binding,
+                        } => {
+                            *receiver = map(*receiver);
+                            self_binding.ty = map(self_binding.ty);
+                        }
+                        LambdaMapping::BindParameters(parameters) => {
+                            *parameters = parameters.map_recursive_references(db, mapper)
+                        }
+                        LambdaMapping::Promote(..)
+                        | LambdaMapping::BindLegacyTypevars(_)
+                        | LambdaMapping::FreshenBoundTypeVars(..)
+                        | LambdaMapping::Materialize(_)
+                        | LambdaMapping::ReplaceParameterDefaults
+                        | LambdaMapping::EagerExpansion => {}
+                    }
+                    step.context = step
+                        .context
+                        .with_annotation(step.context.annotation.map(map));
+                    step
+                })
+                .collect();
+            LambdaSignatureMapping {
+                source: plan.source.map_recursive_references(db, mapper),
+                steps,
+            }
+        });
+        Self::new(
+            db,
+            self.parameters(db).map_recursive_references(db, mapper),
+            self.scope(db),
+            self.body(db),
+            self.return_context(db)
+                .with_annotation(self.return_context(db).annotation.map(map)),
+            self.environment(db),
+            deferred,
+        )
+    }
+
     /// Compose the source return equation with its captured arguments. Parameter binding is
     /// already reflected in the visible parameters, so it never requires opening the return.
     pub(super) fn variance_of(

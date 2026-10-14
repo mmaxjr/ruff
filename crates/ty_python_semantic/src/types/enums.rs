@@ -1,5 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::recursive::TypeInspector;
 use compact_str::ToCompactString;
 use ruff_db::parsed::parsed_module;
@@ -716,6 +717,22 @@ pub(crate) type EnumComplement<'db> = EnumComplementType<'db>;
 
 #[salsa::tracked]
 impl<'db> EnumComplementType<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        Self::new(
+            db,
+            self.enum_class_literal(db),
+            self.excluded_names(db).clone(),
+            self.rest(db)
+                .iter()
+                .map(|ty| mapper.map_type(db, *ty))
+                .collect::<FxOrderSet<_>>(),
+        )
+    }
+
     /// Recognize the compact enum-complement shape inside an intersection.
     pub(crate) fn from_intersection_parts(
         db: &'db dyn Db,
@@ -918,24 +935,12 @@ impl<'db> EnumComplementType<'db> {
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
     ) -> Type<'db> {
-        if type_mapping.is_structural() {
-            Type::EnumComplement(EnumComplementType::new(
-                db,
-                self.enum_class_literal(db),
-                self.excluded_names(db).clone(),
-                self.rest(db)
-                    .iter()
-                    .map(|ty| ty.apply_type_mapping_impl(db, type_mapping, tcx, visitor))
-                    .collect::<FxOrderSet<_>>(),
-            ))
+        let intersection = self.to_intersection(db, visitor.env);
+        let mapped = intersection.apply_type_mapping_impl(db, type_mapping, tcx, visitor);
+        if mapped == intersection {
+            Type::EnumComplement(self)
         } else {
-            let intersection = self.to_intersection(db, visitor.env);
-            let mapped = intersection.apply_type_mapping_impl(db, type_mapping, tcx, visitor);
-            if mapped == intersection {
-                Type::EnumComplement(self)
-            } else {
-                mapped
-            }
+            mapped
         }
     }
 

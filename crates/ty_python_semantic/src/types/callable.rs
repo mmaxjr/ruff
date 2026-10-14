@@ -5,6 +5,7 @@ use super::infer::TransparentCallableReturn;
 use super::protocol_class::StructuralMemberPriority;
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use itertools::Either;
 use rustc_hash::FxHashSet;
 use smallvec::{SmallVec, smallvec_inline};
@@ -1447,6 +1448,22 @@ impl<'db> ExpandedSignatures<'_, 'db> {
 }
 
 impl<'db> CallableType<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        let source = match self.signature_source(db) {
+            SignatureSource::Explicit(signatures) => {
+                SignatureSource::Explicit(signatures.map_recursive_references(db, mapper))
+            }
+            SignatureSource::Lambda(lambda) => {
+                SignatureSource::Lambda(lambda.map_recursive_references(db, mapper))
+            }
+        };
+        self.with_signature_source(db, source)
+    }
+
     /// Construct a callable with explicit signatures and the given binding behavior.
     pub(crate) fn new<S>(db: &'db dyn Db, signatures: S, kind: CallableTypeKind) -> Self
     where
@@ -2116,5 +2133,15 @@ mod tests {
         assert_eq!(paramspec_value, bottom);
         let top = paramspec_value.top_materialization(&db, &env);
         assert_eq!(paramspec_value, top);
+    }
+}
+
+impl<'db> CallableType<'db> {
+    pub(super) fn with_signature_source(
+        self,
+        db: &'db dyn Db,
+        source: SignatureSource<'db>,
+    ) -> Self {
+        Self::new_internal(db, source, self.kind(db), self.deprecated(db))
     }
 }

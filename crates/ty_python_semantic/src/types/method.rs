@@ -1,4 +1,5 @@
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use itertools::Either;
 use ruff_python_ast::name::Name;
 
@@ -127,6 +128,20 @@ pub(super) fn walk_bound_method_type<'db, V: visitor::TypeVisitor<'db> + ?Sized>
 
 #[salsa::tracked]
 impl<'db> BoundMethodType<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        Self::new_internal(
+            db,
+            mapper.map_type(db, self.func(db)),
+            self.program(db),
+            self.class_method(db),
+            self.receiver(db).map(db, |ty| mapper.map_type(db, ty)),
+        )
+    }
+
     /// Analyze the bound callable view without expanding a lambda's return signature.
     pub(super) fn variance_of(
         self,

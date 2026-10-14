@@ -101,6 +101,9 @@ use super::{
 };
 use crate::{Db, ProgramEnvironment};
 
+mod structural;
+pub(super) use structural::RecursiveReferenceMapper;
+
 /// Access to recursive bodies while a caller's recursion guard is active.
 ///
 /// A mapping visitor alone does not establish a recursion guard for the operation that reads the
@@ -2473,35 +2476,6 @@ pub struct RecursiveVar<'db> {
 
 impl get_size2::GetSize for RecursiveVar<'_> {}
 
-impl<'db> RecursiveVar<'db> {
-    /// Unfold references to the target cycle, retaining variables bound by other cycles.
-    pub(super) fn apply_type_mapping_impl(
-        self,
-        db: &'db dyn Db,
-        mapping: &TypeMapping<'_, 'db>,
-        visitor: &ApplyTypeMappingVisitor<'_, 'db>,
-    ) -> Type<'db> {
-        let arguments = self
-            .arguments(db)
-            .map(|arguments| arguments.apply_type_mapping_impl(db, mapping, &[], visitor));
-        match mapping {
-            TypeMapping::ApplyRecursiveSubstitution(RecursiveMapping(
-                RecursiveSubstitution::Unfold(recursive),
-            )) if self.cycle(db) == recursive.cycle(db) => {
-                Type::Recursive(recursive.with_arguments(db, arguments))
-            }
-            TypeMapping::ApplyRecursiveSubstitution(_) => {
-                Type::RecursiveVar(Self::new_internal(db, self.cycle(db), arguments))
-            }
-            _ => unreachable!("semantic operation on an unbound recursive variable"),
-        }
-    }
-}
-
-/// A structural substitution that only the recursive-type binder can construct.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize)]
-pub struct RecursiveMapping<'db>(RecursiveSubstitution<'db>);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize)]
 enum RecursiveSubstitution<'db> {
     /// Replace references to a binder with applications of its recursive constructor.
@@ -2671,14 +2645,8 @@ impl<'db> RecursiveType<'db> {
     /// Bind references to this alias's query cycle in a closed inference result.
     /// Each bound occurrence retains its arguments and refers to this constructor's cycle.
     fn bind(self, db: &'db dyn Db, env: &TypeOperations<'db>, original: Type<'db>) -> Type<'db> {
-        let body = original.apply_type_mapping_impl(
-            db,
-            &TypeMapping::ApplyRecursiveSubstitution(RecursiveMapping(
-                RecursiveSubstitution::Bind(self.cycle(db)),
-            )),
-            TypeContext::default(),
-            &ApplyTypeMappingVisitor::new(env),
-        );
+        let body = RecursiveReferenceMapper::new(RecursiveSubstitution::Bind(self.cycle(db)))
+            .map_type(db, original);
         // Alias arguments can expose a reference without introducing a container.
         if body.has_unguarded_alias_cycle(db, env) {
             Type::divergent_alias(self.cycle(db).id())
@@ -2842,14 +2810,8 @@ impl<'db> RecursiveType<'db> {
             }
         };
         let env = visitor.env.in_environment(self.environment(db));
-        let unfolded = body.apply_type_mapping_impl(
-            db,
-            &TypeMapping::ApplyRecursiveSubstitution(RecursiveMapping(
-                RecursiveSubstitution::Unfold(self),
-            )),
-            TypeContext::default(),
-            &ApplyTypeMappingVisitor::new(&env),
-        );
+        let unfolded =
+            RecursiveReferenceMapper::new(RecursiveSubstitution::Unfold(self)).map_type(db, body);
         match self.arguments(db) {
             Some(arguments) => unfolded.apply_type_mapping(
                 db,
@@ -2870,34 +2832,6 @@ impl<'db> RecursiveType<'db> {
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
     ) -> Type<'db> {
         match mapping {
-            TypeMapping::ApplyRecursiveSubstitution(RecursiveMapping(
-                RecursiveSubstitution::Bind(cycle),
-            )) if self.cycle(db) == *cycle && self.materialization_kind(db).is_none() => {
-                let arguments = self
-                    .arguments(db)
-                    .map(|arguments| arguments.apply_type_mapping_impl(db, mapping, &[], visitor));
-                Type::RecursiveVar(RecursiveVar::new_internal(db, self.cycle(db), arguments))
-            }
-            TypeMapping::ApplyRecursiveSubstitution(RecursiveMapping(substitution)) => {
-                // This binder shadows the target in its body, but not in its arguments.
-                let body = match self.body(db) {
-                    RecursiveBody::Type(body) if self.cycle(db) != substitution.cycle(db) => {
-                        RecursiveBody::Type(body.apply_type_mapping_impl(db, mapping, tcx, visitor))
-                    }
-                    body => body,
-                };
-                let arguments = self
-                    .arguments(db)
-                    .map(|arguments| arguments.apply_type_mapping_impl(db, mapping, &[], visitor));
-                Type::Recursive(Self::new_internal(
-                    db,
-                    self.definition(db),
-                    self.cycle(db),
-                    body,
-                    arguments,
-                    self.materialization_kind(db),
-                ))
-            }
             TypeMapping::ApplySpecialization(_)
             | TypeMapping::ApplySpecializationWithMaterialization { .. }
             | TypeMapping::BindLegacyTypevars(_)

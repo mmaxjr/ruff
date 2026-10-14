@@ -14,6 +14,7 @@
 //! element because a user-defined tuple subclass can inhabit that type.
 
 use crate::types::TypeOperations;
+use crate::types::recursive::RecursiveReferenceMapper;
 use crate::types::typevar::TypeVarSet;
 use crate::{Program, ProgramEnvironment};
 use std::cmp::Ordering;
@@ -172,6 +173,43 @@ impl get_size2::GetSize for TupleType<'_> {}
 
 #[salsa::tracked]
 impl<'db> TupleType<'db> {
+    pub(super) fn map_recursive_references(
+        self,
+        db: &'db dyn Db,
+        mapper: &RecursiveReferenceMapper<'db>,
+    ) -> Self {
+        let tuple = match self.tuple(db) {
+            Tuple::Fixed(tuple) => Tuple::Fixed(FixedLengthTuple::from_elements(
+                tuple
+                    .all_elements()
+                    .iter()
+                    .map(|ty| mapper.map_type(db, *ty)),
+            )),
+            Tuple::Variable(tuple) => {
+                let variable = match tuple.variable() {
+                    VariableSegment::Homogeneous(ty) => {
+                        VariableSegment::Homogeneous(mapper.map_type(db, ty))
+                    }
+                    VariableSegment::TypeVarTuple(typevar) => {
+                        VariableSegment::TypeVarTuple(typevar)
+                    }
+                };
+                VariableLengthTuple::mixed(
+                    tuple
+                        .prefix_elements()
+                        .iter()
+                        .map(|ty| mapper.map_type(db, *ty)),
+                    variable,
+                    tuple
+                        .suffix_elements()
+                        .iter()
+                        .map(|ty| mapper.map_type(db, *ty)),
+                )
+            }
+        };
+        Self::new_internal(db, self.program(db), tuple)
+    }
+
     pub(crate) fn new(
         db: &'db dyn Db,
         env: &ProgramEnvironment<'db>,
@@ -329,14 +367,6 @@ impl<'db> TupleType<'db> {
         tcx: TypeContext<'db>,
         visitor: &ApplyTypeMappingVisitor<'_, 'db>,
     ) -> Self {
-        if type_mapping.is_structural() {
-            return TupleType::new_internal(
-                db,
-                self.program(db),
-                self.tuple(db)
-                    .apply_type_mapping_impl(db, type_mapping, tcx, visitor),
-            );
-        }
         TupleType::new(
             db,
             visitor.env,
