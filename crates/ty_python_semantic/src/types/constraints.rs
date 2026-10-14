@@ -131,8 +131,8 @@ mod variables;
 use owned::OwnedConstraintSetBuilder;
 use paths::PathAssignments;
 use solutions::{Polarity, SolutionWalker};
-use variables::{AtomicConstraint, Constraint};
 pub(crate) use variables::ConstraintProvenance;
+use variables::{AtomicConstraint, Constraint};
 
 /// An extension trait for building constraint sets from [`Option`] values.
 pub(crate) trait OptionConstraintsExtension<T> {
@@ -511,7 +511,8 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
         // TypeVarEquivalenceBound, we'll intern the left/right typevars in a builder-specific
         // stable order.
         storage.intern_typevar(db, typevar);
-        let constraints = AtomicConstraint::new_equivalence_bound(db, env, provenance, typevar, bound);
+        let constraints =
+            AtomicConstraint::new_equivalence_bound(db, env, provenance, typevar, bound);
         let (node, source_order) = Constraint::new_nodes(db, env, &mut storage, constraints);
         Self::from_node(builder, node, source_order)
     }
@@ -839,7 +840,10 @@ impl<'db, 'c> ConstraintSet<'db, 'c> {
             let storage = self.builder.storage.borrow();
             let constraint = storage.constraint_data(constraint_id).clone();
             drop(storage);
-            mapped_constraints.insert(constraint_id, constraint.apply_type_mapping_impl(db, self.builder, type_mapping, tcx, visitor));
+            mapped_constraints.insert(
+                constraint_id,
+                constraint.apply_type_mapping_impl(db, self.builder, type_mapping, tcx, visitor),
+            );
         }
 
         let mut storage = self.builder.storage.borrow_mut();
@@ -3546,7 +3550,7 @@ impl<'db> CandidateSolutions<'db> {
             return ControlFlow::Continue(path_bounds);
         }
 
-        let mut walker = SolutionWalker::new(db, storage, source_orders, inferable, limits, node);
+        let walker = SolutionWalker::new(db, storage, source_orders, inferable, limits, node);
         // Sequent discovery must also happen in source order. Sorting the collected paths is
         // too late: sequent pairs are not commutative, and TDD traversal order can otherwise
         // discard gradual evidence before solution extraction.
@@ -3560,8 +3564,7 @@ impl<'db> CandidateSolutions<'db> {
             node_support.as_ref(),
             Polarity::Positive,
             node,
-        )?;
-        ControlFlow::Continue(walker.finish())
+        )
     }
 
     /// Solves a constraint set when it represents a _simple conjunction_: it can be expressed as a
