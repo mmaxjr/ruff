@@ -420,7 +420,7 @@ impl<'db> EnumValueSet<'db> {
                 enum_class: complement.enum_class_literal(db),
                 members: EnumValueSetMembers::AllExcept(complement),
             },
-            Type::Union(union) => EnumValueSet::from_union(db, env, union.elements(db), visitor)?,
+            Type::Union(union) => EnumValueSet::from_union(db, union.elements(db), visitor)?,
             Type::Intersection(intersection) => {
                 EnumValueSet::from_intersection(db, env, intersection, visitor)?
             }
@@ -449,7 +449,6 @@ impl<'db> EnumValueSet<'db> {
     /// Whole-domain and complement arms are rejected because they are not exact included sets.
     fn from_union(
         db: &'db dyn Db,
-        env: &TypeOperations<'db>,
         elements: &[Type<'db>],
         visitor: &EnumDomainVisitor<'_, 'db>,
     ) -> Option<Self> {

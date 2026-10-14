@@ -67,7 +67,7 @@ use crate::types::{
 };
 use crate::{Db, FxIndexSet};
 
-use builder::TypeInferenceBuilder;
+pub(super) use builder::TypeInferenceBuilder;
 pub(super) use builder::binary_expressions::BinaryOperand;
 pub(super) use comparisons::UnsupportedComparisonError;
 pub(super) use comparisons::{IdentityUpcast, IdentityUpcastResult};
@@ -1085,31 +1085,14 @@ impl<'db> TypeContext<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
     ) -> Option<Cow<'db, [Type<'db>]>> {
-        fn targets<'db>(
-            db: &'db dyn Db,
-            inspector: &TypeInspector<'_, 'db>,
-            ty: Type<'db>,
-        ) -> Option<Cow<'db, [Type<'db>]>> {
+        TypeInspector::scope(env, |inspector| {
             inspector.inspect_normalized(
                 db,
-                ty,
+                self.annotation?,
                 |_, _| None,
-                |inspector, normalized| {
-                    match normalized.ty {
-                        Type::Union(union) => Some(Cow::Borrowed(union.elements(db))),
-                        // A union can collapse to one alternative. Use the resolved context
-                        // instead of retrying inference with the original aliases.
-                        ty if normalized.was_union => Some(Cow::Owned(vec![ty])),
-                        Type::NewTypeInstance(newtype) => {
-                            targets(db, inspector, newtype.concrete_base_type(db))
-                        }
-                        _ => None,
-                    }
-                },
+                |inspector, normalized| normalized.narrow_targets(db, inspector),
             )
-        }
-        // Trying the power set of these alternatives would require exponentially many attempts.
-        TypeInspector::scope(env, |inspector| targets(db, inspector, self.annotation?))
+        })
     }
 }
 
@@ -2719,3 +2702,9 @@ pub(super) use builder::{ContextualLambda, TransparentCallableReturn};
 pub(super) use builder::OverloadInconsistency;
 
 pub(super) use comparisons::{BinaryComparisonOperand, upcast_partial_body};
+
+pub(super) use builder::SubscriptAssignment;
+
+pub(super) use builder::ConditionKind;
+
+pub(super) use builder::{ClassBindingUpdate, ClassMethodVarianceCheck};

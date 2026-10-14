@@ -640,31 +640,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         db,
                         ty,
                         |_, _| None,
-                        |inspector, ty| match ty {
-                            Type::Union(union) => {
-                                union.try_map(db, inspector.environment(), |ty| {
-                                    wrap(db, inspector, *ty, kind)
-                                })
-                            }
-                            Type::FunctionLiteral(function)
-                                if function.callable_type_kind(db)
-                                    == CallableTypeKind::FunctionLike
-                                    || function.callable_type_kind(db) == kind =>
-                            {
-                                Some(Type::FunctionLiteral(
-                                    function.with_descriptor_kind(db, kind),
-                                ))
-                            }
-                            Type::Callable(callable)
-                                if matches!(
-                                    callable.kind(db),
-                                    CallableTypeKind::Regular | CallableTypeKind::FunctionLike
-                                ) || callable.kind(db) == kind =>
-                            {
-                                Some(Type::Callable(callable.with_kind(db, kind)))
-                            }
-                            _ => None,
-                        },
+                        |inspector, ty| ty.wrap_descriptor(db, inspector, kind),
                     )
                 }
                 let wrapped = TypeInspector::scope(self.program_environment(), |inspector| {

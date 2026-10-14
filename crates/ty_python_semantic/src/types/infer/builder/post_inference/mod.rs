@@ -12,3 +12,5 @@ pub(super) mod typed_dict;
 pub(super) mod typeguard;
 
 pub(in crate::types) use overloaded_function::OverloadInconsistency;
+
+pub(in crate::types) use function::ClassMethodVarianceCheck;

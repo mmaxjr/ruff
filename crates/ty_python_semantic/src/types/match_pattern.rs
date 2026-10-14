@@ -503,23 +503,7 @@ pub(crate) fn class_pattern_positional_result<'db>(
             env,
             member_type,
             |_, _| None,
-            |_, match_args| {
-                if let Some(limit) = match_args.exact_tuple_instance_spec(db).and_then(|tuple| {
-                    tuple
-                        .as_fixed_length()
-                        .map(super::tuple::FixedLengthTuple::len)
-                }) {
-                    Some(ClassPatternPositionalResult::Limit(limit))
-                } else {
-                    match_args
-                        .is_disjoint_from(
-                            db,
-                            env,
-                            Type::homogeneous_tuple(db, env, Type::unknown()),
-                        )
-                        .then_some(ClassPatternPositionalResult::InvalidType(match_args))
-                }
-            },
+            |_, match_args| match_args.class_pattern_positional_result(db),
         ),
         ClassMatchArgs::Undefined | ClassMatchArgs::PossiblyUndefined => None,
     }

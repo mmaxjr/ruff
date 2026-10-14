@@ -2932,36 +2932,11 @@ impl<'db> Type<'db> {
         db: &'db dyn Db,
         inspector: &TypeInspector<'_, 'db>,
     ) -> Option<ClassType<'db>> {
-        let env = inspector.environment();
         inspector.inspect(
             db,
             self,
             |_, _| None,
-            |inspector, ty| match ty {
-                Type::NominalInstance(instance) => Some(instance.class(db, env)),
-                Type::ProtocolInstance(instance) => instance.class_origin(db).map(|class| *class),
-                Type::NewTypeInstance(newtype) => newtype
-                    .concrete_base_type(db)
-                    .nominal_class_in(db, inspector),
-                Type::TypeVar(typevar) => {
-                    let TypeVarBoundOrConstraints::UpperBound(bound) =
-                        typevar.typevar(db).bound_or_constraints(db, env)?
-                    else {
-                        return None;
-                    };
-                    bound.nominal_class_in(db, inspector)
-                }
-                Type::LiteralValue(literal) => literal
-                    .fallback_instance(db, env)
-                    .nominal_class_in(db, inspector),
-                Type::PropertyInstance(property) => property
-                    .instance_fallback(db, env)
-                    .nominal_class_in(db, inspector),
-                Type::SlotDescriptor(_) => KnownClass::MemberDescriptorType
-                    .to_instance(db, env)
-                    .nominal_class_in(db, inspector),
-                _ => None,
-            },
+            |inspector, ty| ty.nominal_class(db, inspector),
         )
     }
 
@@ -3136,7 +3111,13 @@ impl<'db> Type<'db> {
             Type::TypeAlias(_) | Type::Recursive(_) => {}
             _ => return predicate(self),
         }
-        TypeInspector::inspect_root(db, env, self, |ty, _| predicate(ty), |_, ty| predicate(ty))
+        TypeInspector::inspect_root(
+            db,
+            env,
+            self,
+            |ty, _| predicate(ty),
+            |_, ty| ty.matches(predicate),
+        )
     }
 
     /// Compare type identities after resolving their outer aliases.
@@ -3146,42 +3127,28 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
-        fn compare_right<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            left: Type<'db>,
-            right: Type<'db>,
-        ) -> bool {
-            match right {
-                Type::TypeAlias(_) | Type::Recursive(_) => {}
-                _ => return left == right,
+        let compare_right = |left| {
+            if !other.is_alias_like() {
+                return left == other;
             }
             TypeInspector::inspect_root(
                 db,
                 env,
-                right,
+                other,
                 |right, _| left == right,
-                |_, right| left == right,
+                |_, right| right.has_same_type(left),
             )
-        }
-        match self {
-            Type::TypeAlias(_) | Type::Recursive(_) => {}
-            _ => return compare_right(db, env, self, other),
+        };
+        if !self.is_alias_like() {
+            return compare_right(self);
         }
         TypeInspector::inspect_root(
             db,
             env,
             self,
-            |left, _| compare_right(db, env, left, other),
-            |_, left| compare_right(db, env, left, other),
+            |left, _| compare_right(left),
+            |_, left| left.has_same_resolved_type(db, other),
         )
-    }
-
-    /// Resolve outermost aliases and expand aliases that expose top-level union elements.
-    ///
-    /// Aliases nested inside non-union types remain unexpanded.
-    fn expand_top_level_aliases(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Self {
-        TypeInspector::inspect_root(db, env, self, |ty, _| ty, |_, ty| ty)
     }
 
     /// Selects the constructor used for a type variable's upper bound.
@@ -3198,13 +3165,7 @@ impl<'db> Type<'db> {
             env,
             self,
             |_, _| Type::unknown(),
-            |_, bound| {
-                if bound.is_object() {
-                    KnownClass::Object.to_class_literal(db, env)
-                } else {
-                    bound.to_meta_type(db, env)
-                }
-            },
+            |_, bound| bound.constructor_for_bound(db),
         )
     }
 
@@ -3420,27 +3381,11 @@ impl<'db> Type<'db> {
         db: &'db dyn Db,
         inspector: &TypeInspector<'_, 'db>,
     ) -> bool {
-        let env = inspector.environment();
         inspector.inspect(
             db,
             *self,
             |_, _| false,
-            |inspector, ty| match ty {
-                Type::Union(union) => union
-                    .elements(db)
-                    .iter()
-                    .all(|ty| ty.is_literal_or_union_of_literals_in(db, inspector)),
-                Type::LiteralValue(literal) => match literal.kind() {
-                    LiteralValueTypeKind::String(_)
-                    | LiteralValueTypeKind::Bytes(_)
-                    | LiteralValueTypeKind::Int(_)
-                    | LiteralValueTypeKind::Bool(_)
-                    | LiteralValueTypeKind::Enum(_) => true,
-                    LiteralValueTypeKind::LiteralString => false,
-                },
-                Type::NominalInstance(_) => ty.is_none(db) || ty.is_bool(db) || ty.is_enum(db, env),
-                _ => false,
-            },
+            |inspector, ty| ty.is_literal_or_union_of_literals(db, inspector),
         )
     }
 
@@ -3700,23 +3645,17 @@ impl<'db> Type<'db> {
         self,
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
-        mut f: impl FnMut(&Type<'db>) -> bool,
+        f: impl FnMut(&Type<'db>) -> bool,
     ) -> Type<'db> {
         TypeInspector::scope(env, |inspector| {
             inspector.inspect_normalized(
                 db,
                 self,
                 |_, _| self,
-                |_, normalized| match normalized.ty {
-                    Type::Union(union) => union.filter(db, f),
-                    ty if normalized.was_union => {
-                        if f(&ty) {
-                            ty
-                        } else {
-                            Type::Never
-                        }
-                    }
-                    _ => self,
+                |_, normalized| {
+                    normalized
+                        .ty
+                        .filter_union(db, self, normalized.was_union, f)
                 },
             )
         })
@@ -5836,30 +5775,13 @@ impl<'db> Type<'db> {
         if member.is_class_var() {
             return false;
         }
-        let ty = ty.expand_top_level_aliases(db, env);
-        let alternatives = match &ty {
-            Type::Union(union) => union.elements(db),
-            _ => std::slice::from_ref(&ty),
-        };
-        alternatives.iter().any(|ty| {
-            // Synthesized methods bind through `try_call_dunder_get` without necessarily
-            // exposing a `__get__` member on their meta-type.
-            if let Type::Callable(callable) = ty
-                && callable.is_method_like(db)
-            {
-                return false;
-            }
-
-            // Descriptors define their own class-access behavior, but do not exempt other
-            // alternatives in a union from the restriction on generic instance storage.
-            ty.class_member(db, env, "__get__").is_undefined()
-                // Variance accounts for aliases without expanding recursive specializations,
-                // and ignores alias arguments that do not affect the resulting type.
-                && generic_context.variables(db).any(|typevar| {
-                    ty.variance_of(db, env, typevar.identity(db)).evaluate(db)
-                        != TypeVarVariance::Bivariant
-                })
-        })
+        TypeInspector::inspect_root(
+            db,
+            env,
+            ty,
+            |_, _| false,
+            |_, ty| ty.requires_generic_instance_storage(db, generic_context),
+        )
     }
 
     /// Similar to [`Type::member`], but allows the caller to specify what policy should be used

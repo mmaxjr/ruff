@@ -677,16 +677,7 @@ fn possible_class_attribute_descriptor<'db>(
         env,
         descriptor_ty,
         |_, _| None,
-        |_, descriptor_ty| {
-            let descriptor_ty = match descriptor_ty {
-                Type::TypeForm(typeform) => typeform.type_argument(db).to_meta_type(db, env),
-                descriptor_ty => descriptor_ty,
-            };
-
-            descriptor_ty
-                .is_data_descriptor(db, env)
-                .then_some(descriptor_ty)
-        },
+        |_, descriptor_ty| descriptor_ty.data_descriptor(db),
     )
 }
 
@@ -1103,25 +1094,7 @@ pub(super) fn descriptor_setter_domain<'db>(
         env,
         descriptor_ty,
         |_, _| DescriptorSetterDomain::Deferred,
-        |_, descriptor_ty| match descriptor_ty {
-            Type::Union(union) => {
-                let mut write_types = Vec::with_capacity(union.elements(db).len());
-                for descriptor_ty in union.elements(db) {
-                    match single_descriptor_setter_domain(db, env, *descriptor_ty, receiver_ty) {
-                        DescriptorSetterDomain::Missing => return DescriptorSetterDomain::Missing,
-                        DescriptorSetterDomain::Known(write_ty) => write_types.push(write_ty),
-                        DescriptorSetterDomain::Deferred => {
-                            return DescriptorSetterDomain::Deferred;
-                        }
-                    }
-                }
-                IntersectionType::bounded_from_elements(db, env, write_types).map_or(
-                    DescriptorSetterDomain::Deferred,
-                    DescriptorSetterDomain::Known,
-                )
-            }
-            _ => single_descriptor_setter_domain(db, env, descriptor_ty, receiver_ty),
-        },
+        |_, descriptor_ty| descriptor_ty.descriptor_setter_domain(db, receiver_ty),
     )
 }
 
@@ -1774,4 +1747,31 @@ pub(super) fn signatures_setter_domain<'db>(
         }
     }
     Some(UnionType::from_elements(db, env, write_types))
+}
+
+pub(super) fn descriptor_setter_domain_resolved<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    descriptor_ty: Type<'db>,
+    receiver_ty: Type<'db>,
+) -> DescriptorSetterDomain<'db> {
+    match descriptor_ty {
+        Type::Union(union) => {
+            let mut write_types = Vec::with_capacity(union.elements(db).len());
+            for descriptor_ty in union.elements(db) {
+                match single_descriptor_setter_domain(db, env, *descriptor_ty, receiver_ty) {
+                    DescriptorSetterDomain::Missing => return DescriptorSetterDomain::Missing,
+                    DescriptorSetterDomain::Known(write_ty) => write_types.push(write_ty),
+                    DescriptorSetterDomain::Deferred => {
+                        return DescriptorSetterDomain::Deferred;
+                    }
+                }
+            }
+            IntersectionType::bounded_from_elements(db, env, write_types).map_or(
+                DescriptorSetterDomain::Deferred,
+                DescriptorSetterDomain::Known,
+            )
+        }
+        _ => single_descriptor_setter_domain(db, env, descriptor_ty, receiver_ty),
+    }
 }

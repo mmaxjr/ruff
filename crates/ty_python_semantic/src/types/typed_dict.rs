@@ -2273,14 +2273,7 @@ fn unpacked_keyword_is_gradual<'db>(
         env,
         ty,
         |_, _| false,
-        |_, ty| match ty {
-            ty if ty.is_never() || ty.is_dynamic() => true,
-            Type::Union(union) => union
-                .elements(db)
-                .iter()
-                .any(|element| element.has_outer_type(db, env, |ty| ty.is_dynamic())),
-            _ => false,
-        },
+        |_, ty| ty.unpacked_keyword_is_gradual(db),
     )
 }
 

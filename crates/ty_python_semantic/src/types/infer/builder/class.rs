@@ -392,37 +392,15 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 decorated_ty,
                 |ty, _| ty,
                 |_, resolved| {
-                    if is_unknown_decorator_result(db, env, decorated_ty) {
-                        inferred_ty
-                    } else if let divergent_ty @ Type::Divergent(_) = resolved {
-                        // Keep the current binding to bootstrap decorators whose return annotations
-                        // depend on the decorated class. Retain the cycle marker too: replacing it with
-                        // only the class lets inferred lambda return types grow on every iteration.
-                        UnionType::from_elements_cycle_recovery(
-                            db,
-                            env,
-                            [inferred_ty, divergent_ty],
-                        )
-                    } else if class_decorator_preserves_class_binding(
+                    resolved.class_decorator_result(
                         db,
-                        env,
-                        original_class_ty,
-                        decorated_ty,
-                    ) {
-                        merge_class_preserving_decorator_result(
-                            db,
-                            env,
+                        ClassBindingUpdate {
                             original_class_ty,
-                            inferred_ty,
                             decorated_ty,
-                        )
-                    } else {
-                        // Only record an undecorated type once a decorator actually replaces the public
-                        // binding. If all decorators preserve the class, there is no alternate class type
-                        // to expose.
-                        undecorated_ty.get_or_insert(inferred_ty);
-                        decorated_ty
-                    }
+                            inferred_ty,
+                            undecorated_ty: &mut undecorated_ty,
+                        },
+                    )
                 },
             );
         }
@@ -671,5 +649,52 @@ fn merge_class_preserving_decorator_result<'db>(
             .as_class_literal()
             .map(Type::ClassLiteral)
             .unwrap_or(original_class)
+    }
+}
+
+pub(in crate::types) struct ClassBindingUpdate<'a, 'db> {
+    original_class_ty: Type<'db>,
+    decorated_ty: Type<'db>,
+    inferred_ty: Type<'db>,
+    undecorated_ty: &'a mut Option<Type<'db>>,
+}
+
+impl<'db> ClassBindingUpdate<'_, 'db> {
+    pub(in crate::types) fn apply(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        resolved: Type<'db>,
+    ) -> Type<'db> {
+        let Self {
+            original_class_ty,
+            decorated_ty,
+            inferred_ty,
+            undecorated_ty,
+        } = self;
+
+        if is_unknown_decorator_result(db, env, decorated_ty) {
+            inferred_ty
+        } else if let divergent_ty @ Type::Divergent(_) = resolved {
+            // Keep the current binding to bootstrap decorators whose return annotations
+            // depend on the decorated class. Retain the cycle marker too: replacing it with
+            // only the class lets inferred lambda return types grow on every iteration.
+            UnionType::from_elements_cycle_recovery(db, env, [inferred_ty, divergent_ty])
+        } else if class_decorator_preserves_class_binding(db, env, original_class_ty, decorated_ty)
+        {
+            merge_class_preserving_decorator_result(
+                db,
+                env,
+                original_class_ty,
+                inferred_ty,
+                decorated_ty,
+            )
+        } else {
+            // Only record an undecorated type once a decorator actually replaces the public
+            // binding. If all decorators preserve the class, there is no alternate class type
+            // to expose.
+            undecorated_ty.get_or_insert(inferred_ty);
+            decorated_ty
+        }
     }
 }

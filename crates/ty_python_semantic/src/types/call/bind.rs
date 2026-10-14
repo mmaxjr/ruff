@@ -272,23 +272,7 @@ fn normalize_constraint_bound<'db>(
         env,
         bound,
         |_, _| None,
-        |_, bound| match bound {
-            Type::Callable(callable)
-                if !callable.has_generic_context(db)
-                    && let Some(paramspec) = callable
-                        .single_parameters(db)
-                        .and_then(Parameters::as_paramspec) =>
-            {
-                Some(Type::TypeVar(paramspec))
-            }
-            Type::Callable(callable) => Some(Type::Callable(callable.into_paramspec_value(db))),
-            Type::TypeVar(bound)
-                if bound.is_paramspec(db) && bound.paramspec_attr(db).is_none() =>
-            {
-                Some(Type::TypeVar(bound))
-            }
-            _ => None,
-        },
+        |_, bound| bound.paramspec_bound(db),
     )
 }
 
@@ -5672,7 +5656,7 @@ impl<'a, 'db> ArgumentMatcher<'a, 'db> {
     }
 }
 
-struct ArgumentTypeChecker<'a, 'db> {
+pub(in crate::types) struct ArgumentTypeChecker<'a, 'db> {
     db: &'db dyn Db,
     env: &'a TypeOperations<'db>,
     signature_type: Type<'db>,
@@ -6002,40 +5986,17 @@ impl<'db> ArgumentTypeChecker<'_, 'db> {
                         let argument_type = argument_types
                             .source_types()
                             .get_for_declared_type(declared_type);
-                        let paramspec_prefix_len = |candidate: Type<'db>| {
-                            candidate
-                                .try_upcast_to_callable(db, env)?
-                                .iter()
-                                .find_map(|callable| {
-                                    callable.parameter_lists(db).find_map(|parameters| {
-                                        let (prefix, declared_paramspec) =
-                                            parameters.as_paramspec_with_prefix()?;
-                                        (declared_paramspec == paramspec).then_some(prefix.len())
-                                    })
-                                })
-                        };
                         let prefix_len = TypeInspector::inspect_root(
                             db,
                             env,
                             declared_type,
                             |_, _| None,
                             |_, declared_type| {
-                                if let Type::Union(union) = declared_type {
-                                    union.elements(db).iter().find_map(|candidate| {
-                                        let specialized_candidate = candidate
-                                            .apply_optional_specialization(
-                                                db,
-                                                self.env,
-                                                self.merged_specialization(),
-                                            );
-                                        argument_type
-                                            .is_assignable_to(db, env, specialized_candidate)
-                                            .then_some(*candidate)
-                                            .and_then(paramspec_prefix_len)
-                                    })
-                                } else {
-                                    paramspec_prefix_len(declared_type)
-                                }
+                                declared_type.paramspec_prefix_length(
+                                    self,
+                                    argument_type,
+                                    paramspec,
+                                )
                             },
                         )?;
                         let (source_type, partial_signature) = match argument_type {
@@ -10789,5 +10750,46 @@ expected: tuple[list[object], A | B, C | D | E]
             [[Some(Resolved(Type::object())), None].as_slice()]
         );
         Ok(())
+    }
+}
+
+pub(in crate::types) use constructor::constructor_returns_instance_resolved;
+
+impl<'db> ArgumentTypeChecker<'_, 'db> {
+    pub(in crate::types) fn paramspec_prefix_length_resolved(
+        &self,
+        declared_type: Type<'db>,
+        argument_type: Type<'db>,
+        paramspec: BoundTypeVarInstance<'db>,
+    ) -> Option<usize> {
+        let db = self.db;
+        let env = self.env;
+        let paramspec_prefix_len = |candidate: Type<'db>| {
+            candidate
+                .try_upcast_to_callable(db, env)?
+                .iter()
+                .find_map(|callable| {
+                    callable.parameter_lists(db).find_map(|parameters| {
+                        let (prefix, declared_paramspec) = parameters.as_paramspec_with_prefix()?;
+                        (declared_paramspec == paramspec).then_some(prefix.len())
+                    })
+                })
+        };
+
+        if let Type::Union(union) = declared_type {
+            union.elements(db).iter().find_map(|candidate| {
+                let specialized_candidate = candidate.apply_optional_specialization(
+                    db,
+                    self.env,
+                    self.merged_specialization(),
+                );
+                argument_type
+                    .is_assignable_to(db, env, specialized_candidate)
+                    .then_some(*candidate)
+                    .and_then(paramspec_prefix_len)
+            })
+        } else {
+            paramspec_prefix_len(declared_type)
+        }
     }
 }

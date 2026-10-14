@@ -55,8 +55,8 @@ use crate::types::visitor::any_over_type;
 use crate::types::{
     ApplyTypeMappingVisitor, BytesLiteralType, ClassLiteral, CycleDetector, CycleKind,
     EnumLiteralType, IntersectionType, KnownClass, KnownInstanceType, LiteralValueType,
-    LiteralValueTypeKind, NegativeIntersectionElements, StringLiteralType, SubclassOfType, Type,
-    TypePair, TypeTraversal, TypeVarBoundOrConstraints, TypeWalk, UnionType,
+    LiteralValueTypeKind, NegativeIntersectionElements, StringLiteralType, Type, TypePair,
+    TypeTraversal, TypeVarBoundOrConstraints, TypeWalk, UnionType,
 };
 use crate::{Db, FxIndexSet, FxOrderMap, FxOrderSet, ProgramEnvironment};
 use rustc_hash::FxHashSet;
@@ -2058,7 +2058,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
                     env,
                     typeform.type_argument(db),
                     |_, _| None,
-                    |_, ty| SubclassOfType::try_from_instance(db, env, ty).ok(),
+                    |_, ty| ty.subclass_type(db),
                 ) && self
                     .positive
                     .swap_remove(&KnownClass::Type.to_instance(db, env))
@@ -2077,11 +2077,7 @@ impl<'db> InnerIntersectionBuilder<'db> {
                                 env,
                                 typeform.type_argument(db),
                                 |_, _| None,
-                                |_, ty| {
-                                    SubclassOfType::try_from_instance(db, env, ty)
-                                        .ok()
-                                        .map(|narrowed| (index, narrowed))
-                                },
+                                |_, ty| ty.subclass_type(db).map(|narrowed| (index, narrowed)),
                             ),
                             _ => None,
                         })

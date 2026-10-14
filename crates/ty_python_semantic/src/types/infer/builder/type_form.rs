@@ -28,19 +28,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             env,
             target,
             |_, _| None,
-            |_, target| match target {
-                Type::TypeForm(_) => Some(None),
-                Type::Union(union)
-                    if union.elements(self.db()).iter().any(|element| {
-                        element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
-                    }) =>
-                {
-                    Some(Some(target.filter_union(db, env, |element| {
-                        !element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
-                    })))
-                }
-                _ => None,
-            },
+            |_, target| target.type_form_context_fallback(db),
         )?;
 
         // Suppress contextual `TypeForm` evaluation only if ordinary inference already

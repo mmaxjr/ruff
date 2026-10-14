@@ -1497,8 +1497,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             if ty.is_never()
                 || !self
                     .type_before_if_chain(name)?
-                    .expand_top_level_aliases(db, env)
-                    .is_union()
+                    .has_outer_type(db, env, |ty| ty.is_union())
             {
                 return None;
             }

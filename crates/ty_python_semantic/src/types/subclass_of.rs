@@ -208,11 +208,7 @@ impl<'db> SubclassOfType<'db> {
                     env,
                     bound,
                     |_, _| None,
-                    |_, bound| {
-                        let bound = Self::try_from_instance(db, env, bound).ok()?;
-                        matches!(bound, Type::ClassLiteral(_) | Type::GenericAlias(_))
-                            .then_some(bound)
-                    },
+                    |_, bound| bound.exact_class_for_bound(db),
                 )
             })
     }

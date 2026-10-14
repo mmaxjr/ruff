@@ -496,20 +496,11 @@ fn known_constructor_preserves_value_type_in<'db>(
     value: Type<'db>,
     annotation: Type<'db>,
 ) -> bool {
-    let env = inspector.environment();
     inspector.inspect(
         db,
         value,
         |_, _| false,
-        |inspector, value| match value {
-            Type::Union(union) => union.elements(db).iter().all(|element| {
-                known_constructor_preserves_value_type_in(db, inspector, *element, annotation)
-            }),
-            Type::LiteralValue(literal) => literal
-                .fallback_instance(db, env)
-                .is_same_resolved_type(db, env, annotation),
-            value => value.is_same_resolved_type(db, env, annotation),
-        },
+        |inspector, value| value.known_constructor_preserves_value_type(db, inspector, annotation),
     )
 }
 
@@ -533,23 +524,11 @@ fn value_has_exact_known_class_in<'db>(
     value: Type<'db>,
     data_type: KnownClass,
 ) -> bool {
-    let env = inspector.environment();
     inspector.inspect(
         db,
         value,
         |_, _| false,
-        |inspector, value| match value {
-            Type::Union(union) => union
-                .elements(db)
-                .iter()
-                .all(|element| value_has_exact_known_class_in(db, inspector, *element, data_type)),
-            Type::LiteralValue(literal) => match literal.fallback_instance(db, env) {
-                Type::NominalInstance(instance) => instance.has_known_class(db, data_type),
-                _ => false,
-            },
-            Type::NominalInstance(instance) => instance.has_known_class(db, data_type),
-            _ => false,
-        },
+        |inspector, value| value.value_has_exact_known_class(db, inspector, data_type),
     )
 }
 
@@ -1738,5 +1717,44 @@ pub(crate) fn try_unwrap_nonmember_value<'db>(
             )
         }
         _ => None,
+    }
+}
+
+pub(super) fn known_constructor_preserves_value_type_resolved<'db>(
+    db: &'db dyn Db,
+    inspector: &TypeInspector<'_, 'db>,
+    value: Type<'db>,
+    annotation: Type<'db>,
+) -> bool {
+    let env = inspector.environment();
+    match value {
+        Type::Union(union) => union.elements(db).iter().all(|element| {
+            known_constructor_preserves_value_type_in(db, inspector, *element, annotation)
+        }),
+        Type::LiteralValue(literal) => literal
+            .fallback_instance(db, env)
+            .is_same_resolved_type(db, env, annotation),
+        value => value.is_same_resolved_type(db, env, annotation),
+    }
+}
+
+pub(super) fn value_has_exact_known_class_resolved<'db>(
+    db: &'db dyn Db,
+    inspector: &TypeInspector<'_, 'db>,
+    value: Type<'db>,
+    data_type: KnownClass,
+) -> bool {
+    let env = inspector.environment();
+    match value {
+        Type::Union(union) => union
+            .elements(db)
+            .iter()
+            .all(|element| value_has_exact_known_class_in(db, inspector, *element, data_type)),
+        Type::LiteralValue(literal) => match literal.fallback_instance(db, env) {
+            Type::NominalInstance(instance) => instance.has_known_class(db, data_type),
+            _ => false,
+        },
+        Type::NominalInstance(instance) => instance.has_known_class(db, data_type),
+        _ => false,
     }
 }

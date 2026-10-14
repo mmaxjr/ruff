@@ -2488,53 +2488,7 @@ fn descriptor_decorated_protocol_member<'db>(
         env,
         descriptor_ty,
         |_, _| None,
-        |_, descriptor_ty| {
-            // Applying a generic descriptor decorator to a method that refers to an enclosing type
-            // variable can currently materialize that variable as `Unknown`. Reducing the descriptor to
-            // its `__get__` result would then erase the remaining descriptor structure and weaken the
-            // protocol member to a bare `Unknown`.
-            if super::visitor::any_over_type(db, env, descriptor_ty, false, |ty| ty.is_unknown()) {
-                return None;
-            }
-
-            let Place::Defined(DefinedPlace {
-                definedness: Definedness::AlwaysDefined,
-                ..
-            }) = descriptor_ty
-                .class_member_with_policy(db, env, "__get__", MemberLookupPolicy::REQUIRE_CONCRETE)
-                .place
-            else {
-                return None;
-            };
-
-            let receiver_ty = Type::instance(db, env, protocol);
-            let read_ty = descriptor_ty
-                .try_call_dunder_get(
-                    db,
-                    env,
-                    Some(receiver_ty),
-                    receiver_ty.to_meta_type(db, env),
-                )
-                .unwrap_or_else(|error| Some(error.fallback()))?
-                .return_type;
-            let read = Some(ProtocolPropertyType::with_definition(read_ty, definition));
-
-            let write = match descriptor_setter_domain(db, env, descriptor_ty, receiver_ty) {
-                DescriptorSetterDomain::Missing => None,
-                DescriptorSetterDomain::Known(domain) => Some(ProtocolMemberWrite::descriptor(
-                    descriptor_ty,
-                    Some(domain),
-                    definition,
-                )),
-                DescriptorSetterDomain::Deferred => Some(ProtocolMemberWrite::descriptor(
-                    descriptor_ty,
-                    None,
-                    definition,
-                )),
-            };
-
-            Some(ProtocolMemberData::property(read, write, definition))
-        },
+        |_, descriptor_ty| descriptor_ty.protocol_descriptor_member(db, protocol, definition),
     )
 }
 
@@ -3681,4 +3635,58 @@ pub(super) fn supports_protocol_variance_type<'db>(
         ty,
         |nested| matches!(nested, Type::ProtocolInstance(protocol) if protocol.class_origin(db).is_none_or(|class| !class.supports_variance_inference(db))),
     )
+}
+
+pub(super) fn protocol_descriptor_member_resolved<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    descriptor_ty: Type<'db>,
+    protocol: ClassType<'db>,
+    definition: Option<Definition<'db>>,
+) -> Option<ProtocolMemberData<'db>> {
+    // Applying a generic descriptor decorator to a method that refers to an enclosing type
+    // variable can currently materialize that variable as `Unknown`. Reducing the descriptor to
+    // its `__get__` result would then erase the remaining descriptor structure and weaken the
+    // protocol member to a bare `Unknown`.
+    if super::visitor::any_over_type(db, env, descriptor_ty, false, |ty| ty.is_unknown()) {
+        return None;
+    }
+
+    let Place::Defined(DefinedPlace {
+        definedness: Definedness::AlwaysDefined,
+        ..
+    }) = descriptor_ty
+        .class_member_with_policy(db, env, "__get__", MemberLookupPolicy::REQUIRE_CONCRETE)
+        .place
+    else {
+        return None;
+    };
+
+    let receiver_ty = Type::instance(db, env, protocol);
+    let read_ty = descriptor_ty
+        .try_call_dunder_get(
+            db,
+            env,
+            Some(receiver_ty),
+            receiver_ty.to_meta_type(db, env),
+        )
+        .unwrap_or_else(|error| Some(error.fallback()))?
+        .return_type;
+    let read = Some(ProtocolPropertyType::with_definition(read_ty, definition));
+
+    let write = match descriptor_setter_domain(db, env, descriptor_ty, receiver_ty) {
+        DescriptorSetterDomain::Missing => None,
+        DescriptorSetterDomain::Known(domain) => Some(ProtocolMemberWrite::descriptor(
+            descriptor_ty,
+            Some(domain),
+            definition,
+        )),
+        DescriptorSetterDomain::Deferred => Some(ProtocolMemberWrite::descriptor(
+            descriptor_ty,
+            None,
+            definition,
+        )),
+    };
+
+    Some(ProtocolMemberData::property(read, write, definition))
 }

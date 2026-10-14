@@ -2042,3 +2042,5 @@ fn check_enum_member_against_constructor_method<'db>(
         }
     }
 }
+
+pub(super) use attributes::descriptor_write_domain_resolved;

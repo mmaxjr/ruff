@@ -54,7 +54,7 @@
 mod diagnostic;
 mod exemptions;
 
-use crate::types::TypeOperations;
+use crate::types::recursive::TypeInspector;
 use bitflags::bitflags;
 use ruff_python_ast::{
     self as ast,
@@ -86,7 +86,7 @@ use self::exemptions::RedundantConditionContext;
 ///
 /// This is used to determine which diagnostic rule would apply to the condition.
 #[derive(Debug, PartialEq, Eq)]
-enum ConditionKind<'db> {
+pub(in crate::types) enum ConditionKind<'db> {
     /// A condition whose value type is assignable to `int`, including `bool`.
     ///
     /// These tests commonly enforce runtime invariants, so they are only flagged by the
@@ -719,21 +719,13 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let env = self.program_environment();
 
         let kind = if truthiness.is_ambiguous() {
-            let expanded_type = ExpandedType::new(db, env, value_type);
-
-            if let Some(union) =
-                self.truthiness_test_of_none_union_candidate(expression, expanded_type)
-            {
-                ConditionKind::NoneUnion(union)
-            } else if let Some(callables) =
-                self.truthiness_test_of_callable_candidate(expanded_type)
-            {
-                ConditionKind::Callable(callables)
-            } else if self.is_truthiness_test_of_iterable_candidate(value_type) {
-                ConditionKind::Iterable
-            } else {
-                return None;
-            }
+            TypeInspector::inspect_root(
+                db,
+                env,
+                value_type,
+                |ty, _| self.ambiguous_truthiness_condition(expression, ty, value_type),
+                |_, ty| ty.ambiguous_truthiness_condition(self, expression, value_type),
+            )?
         } else if value_type.is_assignable_to(db, env, KnownClass::Int.to_instance(db, env)) {
             ConditionKind::Boolean
         } else if value_type.bool(db, env).is_ambiguous() {
@@ -758,7 +750,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
     fn truthiness_test_of_none_union_candidate(
         &self,
         expression: &ast::Expr,
-        expanded_type: ExpandedType<'db>,
+        expanded_type: Type<'db>,
     ) -> Option<UnionType<'db>> {
         // Only check types that are unions with `None`:
         let union = expanded_type.as_union()?;
@@ -813,11 +805,8 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         // value-producing operand to qualify independently, including through assignments.
         // The shared condition traversal prefers operand diagnostics where possible.
         let is_candidate = |operand: &ast::Expr| {
-            self.truthiness_test_of_none_union_candidate(
-                operand,
-                ExpandedType::new(db, env, self.expression_type(operand)),
-            )
-            .is_some()
+            self.truthiness_test_of_none_union_from_type(operand, self.expression_type(operand))
+                .is_some()
         };
 
         let has_suspicious_operand = match expression {
@@ -833,12 +822,12 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
 
     fn truthiness_test_of_callable_candidate(
         &self,
-        expanded_type: ExpandedType<'db>,
+        expanded_type: Type<'db>,
     ) -> Option<CallableTypes<'db>> {
         let db = self.db();
         let env = self.program_environment();
 
-        match *expanded_type {
+        match expanded_type {
             Type::Callable(callable) => Some(CallableTypes::one(callable)),
             Type::Union(union) => {
                 let mut emit_diagnostic = true;
@@ -1343,22 +1332,44 @@ fn is_trivial_statement(stmt: &ast::Stmt) -> bool {
     }
 }
 
-/// A type with outermost aliases resolved and aliases exposing top-level union elements expanded.
-///
-/// Aliases nested inside non-union types remain unexpanded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ExpandedType<'db>(Type<'db>);
-
-impl<'db> ExpandedType<'db> {
-    fn new(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> Self {
-        Self(ty.expand_top_level_aliases(db, env))
+impl<'db> TypeInferenceBuilder<'db, '_> {
+    pub(in crate::types) fn ambiguous_truthiness_condition(
+        &self,
+        expression: &ast::Expr,
+        expanded_type: Type<'db>,
+        value_type: Type<'db>,
+    ) -> Option<ConditionKind<'db>> {
+        if let Some(union) = self.truthiness_test_of_none_union_candidate(expression, expanded_type)
+        {
+            Some(ConditionKind::NoneUnion(union))
+        } else if let Some(callables) = self.truthiness_test_of_callable_candidate(expanded_type) {
+            Some(ConditionKind::Callable(callables))
+        } else if self.is_truthiness_test_of_iterable_candidate(value_type) {
+            Some(ConditionKind::Iterable)
+        } else {
+            return None;
+        }
     }
-}
 
-impl<'db> std::ops::Deref for ExpandedType<'db> {
-    type Target = Type<'db>;
+    fn truthiness_test_of_none_union_from_type(
+        &self,
+        expression: &ast::Expr,
+        ty: Type<'db>,
+    ) -> Option<UnionType<'db>> {
+        TypeInspector::inspect_root(
+            self.db(),
+            self.program_environment(),
+            ty,
+            |_, _| None,
+            |_, ty| ty.truthiness_none_union(self, expression),
+        )
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.0
+    pub(in crate::types) fn truthiness_none_union_resolved(
+        &self,
+        expression: &ast::Expr,
+        ty: Type<'db>,
+    ) -> Option<UnionType<'db>> {
+        self.truthiness_test_of_none_union_candidate(expression, ty)
     }
 }

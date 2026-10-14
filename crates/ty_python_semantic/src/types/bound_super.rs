@@ -553,11 +553,11 @@ impl<'db> BoundSuperType<'db> {
                     typevar_context: None,
                 })
             },
-            |inspector, owner_type| Self::build_impl(db, inspector, pivot_class_type, owner_type),
+            |inspector, owner_type| owner_type.build_super(db, inspector, pivot_class_type),
         )
     }
 
-    fn build_impl(
+    pub(super) fn build_impl(
         db: &'db dyn Db,
         inspector: &TypeInspector<'_, 'db>,
         pivot_class_type: Type<'db>,

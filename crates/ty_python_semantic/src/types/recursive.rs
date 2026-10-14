@@ -66,7 +66,8 @@
 //! before inspecting the values. These projections have no source alias name; ordinary union
 //! construction and type display expand their completed bodies.
 
-use crate::types::TypeOperations;
+use crate::subscript::PyIndex;
+use crate::types::{TypeOperations, TypeVarVariance};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::hash::Hash;
 use std::marker::PhantomData;
@@ -94,8 +95,9 @@ use super::typevar::TypeVarDefaultSearch;
 use super::variance::{VarianceInferable, VarianceOrigin};
 use super::{
     ApplyTypeMappingVisitor, BoundTypeVarIdentity, CallableType, ClassLiteral, ClassType,
-    GenericContext, MaterializationKind, Type, TypeContext, TypeMapping, TypedDictType,
-    VarianceTerm,
+    GenericContext, KnownClass, LiteralValueTypeKind, MaterializationKind, Parameters,
+    SubclassOfInner, Type, TypeContext, TypeMapping, TypeVarBoundOrConstraints, TypedDictType,
+    UnionType, VarianceTerm,
 };
 use crate::{Db, ProgramEnvironment};
 
@@ -164,6 +166,1024 @@ impl<'scope, 'db> ExpandedRecursive<'scope, 'db> {
 }
 
 impl<'db> ExpandedType<'_, 'db> {
+    pub(super) fn narrow_identity_comparison(
+        self,
+        builder: &super::narrow::NarrowingConstraintsBuilder<'db, '_>,
+        lhs: Type<'db>,
+        rhs: Type<'db>,
+        identity: Type<'db>,
+    ) -> Option<Type<'db>> {
+        builder.narrow_identity_resolved(self.ty, lhs, rhs, identity)
+    }
+    pub(super) fn finish_identity_overlap(
+        self,
+        overlap: super::narrow::RuntimeOverlap<'_, 'db, '_>,
+    ) -> Option<Type<'db>> {
+        overlap.finish(self.ty)
+    }
+
+    pub(super) fn paramspec_prefix_length(
+        self,
+        checker: &super::call::bind::ArgumentTypeChecker<'_, 'db>,
+        argument: Type<'db>,
+        paramspec: super::BoundTypeVarInstance<'db>,
+    ) -> Option<usize> {
+        checker.paramspec_prefix_length_resolved(self.ty, argument, paramspec)
+    }
+    pub(super) fn narrow_missing_typed_dict_key(
+        self,
+        db: &'db dyn Db,
+        key: &str,
+    ) -> Option<Type<'db>> {
+        let env = self.mapping.env;
+        let resolved_rhs_type = self.ty;
+        let requires_key = |td: TypedDictType<'db>| -> bool {
+            td.key_membership_truthiness(db, env, key).is_always_true()
+        };
+
+        let narrowed = match resolved_rhs_type {
+            Type::TypedDict(td) => {
+                if requires_key(td) {
+                    Type::Never
+                } else {
+                    resolved_rhs_type
+                }
+            }
+            Type::Intersection(intersection) => {
+                if intersection
+                    .positive(db)
+                    .iter()
+                    .copied()
+                    .filter_map(Type::as_typed_dict)
+                    .any(requires_key)
+                {
+                    Type::Never
+                } else {
+                    resolved_rhs_type
+                }
+            }
+            Type::Union(union) => {
+                // remove all members of the union that would require the key
+                union.filter(db, |ty| match ty {
+                    Type::TypedDict(td) => !requires_key(*td),
+                    Type::Intersection(intersection) => !intersection
+                        .positive(db)
+                        .iter()
+                        .copied()
+                        .filter_map(Type::as_typed_dict)
+                        .any(requires_key),
+                    _ => true,
+                })
+            }
+            _ => resolved_rhs_type,
+        };
+
+        (narrowed != resolved_rhs_type).then_some(narrowed)
+    }
+    pub(super) fn narrow_tuple_identity(
+        self,
+        db: &'db dyn Db,
+        index: i32,
+        rhs_ty: Type<'db>,
+        is_positive_check: bool,
+    ) -> Option<Type<'db>> {
+        let env = self.mapping.env;
+        let ty = self.ty;
+
+        let Type::Union(union) = ty else {
+            return None;
+        };
+        let filtered = union.filter(db, |elem| {
+            elem.tuple_instance_spec(db, env)
+                .and_then(|spec| spec.py_index(db, env, index).ok())
+                .is_none_or(|el_ty| {
+                    el_ty
+                        .identity_comparison_truthiness(db, env, rhs_ty)
+                        .negate_if(!is_positive_check)
+                        .may_be_true()
+                })
+        });
+        (filtered != Type::Union(union)).then_some(filtered)
+    }
+
+    pub(super) fn class_decorator_result(
+        self,
+        db: &'db dyn Db,
+        result: super::infer::ClassBindingUpdate<'_, 'db>,
+    ) -> Type<'db> {
+        result.apply(db, self.mapping.env, self.ty)
+    }
+    pub(super) fn check_class_method_variance(
+        self,
+        check: super::infer::ClassMethodVarianceCheck<'_, 'db, '_>,
+    ) {
+        check.check(self.ty);
+    }
+
+    pub(super) fn matches_string_membership(
+        self,
+        db: &'db dyn Db,
+        haystack: &str,
+        is_contained: bool,
+    ) -> bool {
+        let env = self.mapping.env;
+        let element = self.ty;
+
+        if let Some(needle) = element.as_string_literal() {
+            haystack.contains(needle.value(db)) == is_contained
+        } else {
+            !(is_contained
+                && element.is_disjoint_from(db, env, KnownClass::Str.to_instance(db, env)))
+        }
+    }
+
+    pub(super) fn containment_behavior(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+    ) -> super::narrow::ContainmentBehavior<'db> {
+        super::narrow::containment_behavior_resolved(db, inspector, self.ty)
+    }
+    pub(super) fn narrow_string_membership(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        haystack: &str,
+        contained: bool,
+    ) -> Option<Type<'db>> {
+        super::narrow::narrow_string_membership_resolved(
+            db, inspector, self.ty, haystack, contained,
+        )
+    }
+
+    pub(super) fn override_write_domain(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        receiver: Type<'db>,
+        storage: Type<'db>,
+    ) -> Option<Type<'db>> {
+        super::overrides::descriptor_write_domain_resolved(
+            db, inspector, self.ty, receiver, storage,
+        )
+    }
+
+    pub(super) fn unpack_annotation(
+        self,
+        builder: &mut super::infer::TypeInferenceBuilder<'db, '_>,
+        expression: ruff_python_ast::ExprRef<'_>,
+        syntax: &str,
+    ) -> Type<'db> {
+        builder.validate_unpack_annotation(expression, self.ty, syntax)
+    }
+    pub(super) fn subclass_argument(
+        self,
+        builder: &super::infer::TypeInferenceBuilder<'db, '_>,
+        expression: &ruff_python_ast::Expr,
+    ) -> Type<'db> {
+        builder.subclass_argument_resolved(expression, self.ty)
+    }
+    pub(super) fn has_singleton_intersection(self, db: &'db dyn Db) -> bool {
+        self.ty.as_intersection().is_some_and(|intersection| {
+            intersection
+                .positive(db)
+                .iter()
+                .any(|ty| ty.is_singleton(db, self.mapping.env))
+        })
+    }
+
+    pub(super) fn ambiguous_truthiness_condition(
+        self,
+        builder: &super::infer::TypeInferenceBuilder<'db, '_>,
+        expression: &ruff_python_ast::Expr,
+        original: Type<'db>,
+    ) -> Option<super::infer::ConditionKind<'db>> {
+        builder.ambiguous_truthiness_condition(expression, self.ty, original)
+    }
+
+    pub(super) fn truthiness_none_union(
+        self,
+        builder: &super::infer::TypeInferenceBuilder<'db, '_>,
+        expression: &ruff_python_ast::Expr,
+    ) -> Option<UnionType<'db>> {
+        builder.truthiness_none_union_resolved(expression, self.ty)
+    }
+
+    pub(super) fn requires_generic_instance_storage(
+        self,
+        db: &'db dyn Db,
+        generic_context: GenericContext<'db>,
+    ) -> bool {
+        let env = self.mapping.env;
+        let ty = self.ty;
+        let alternatives = match &ty {
+            Type::Union(union) => union.elements(db),
+            _ => std::slice::from_ref(&ty),
+        };
+        alternatives.iter().any(|ty| {
+            // Synthesized methods bind through `try_call_dunder_get` without necessarily
+            // exposing a `__get__` member on their meta-type.
+            if let Type::Callable(callable) = ty
+                && callable.is_method_like(db)
+            {
+                return false;
+            }
+
+            // Descriptors define their own class-access behavior, but do not exempt other
+            // alternatives in a union from the restriction on generic instance storage.
+            ty.class_member(db, env, "__get__").is_undefined()
+                // Variance accounts for aliases without expanding recursive specializations,
+                // and ignores alias arguments that do not affect the resulting type.
+                && generic_context.variables(db).any(|typevar| {
+                    ty.variance_of(db, env, typevar.identity(db)).evaluate(db)
+                        != TypeVarVariance::Bivariant
+                })
+        })
+    }
+
+    pub(super) fn class_pattern_contexts(
+        self,
+        db: &'db dyn Db,
+        analyzer: &super::narrow::PatternSuccessAnalyzer<'db, '_>,
+        kind: &ty_python_core::predicate::ClassPatternPredicateKind<'db>,
+    ) -> smallvec::SmallVec<[super::narrow::ClassPatternContext<'db>; 2]> {
+        match self.ty {
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .map(|ty| analyzer.class_pattern_context(kind, *ty))
+                .collect(),
+            ty => smallvec::smallvec![analyzer.class_pattern_context(kind, ty)],
+        }
+    }
+
+    pub(super) fn pattern_subject_arms(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+    ) -> smallvec::SmallVec<[(Type<'db>, Type<'db>); 2]> {
+        match self.ty {
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .flat_map(|original| {
+                    inspector.inspect(
+                        db,
+                        *original,
+                        |ty, _| pattern_filtering_arms(db, *original, ty),
+                        |inspector, ty| ty.pattern_filtering_arms(db, inspector, *original),
+                    )
+                })
+                .collect(),
+            Type::TypeVar(typevar)
+                if let Some(bound) = typevar.typevar(db).upper_bound(db, self.mapping.env) =>
+            {
+                inspector.inspect(
+                    db,
+                    bound,
+                    |ty, _| smallvec::smallvec![(self.ty, ty)],
+                    |_, ty| pattern_filtering_arms(db, self.ty, ty.ty),
+                )
+            }
+            ty => smallvec::smallvec![(ty, ty)],
+        }
+    }
+
+    fn pattern_filtering_arms(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        original: Type<'db>,
+    ) -> smallvec::SmallVec<[(Type<'db>, Type<'db>); 2]> {
+        if let Type::TypeVar(typevar) = self.ty
+            && let Some(bound) = typevar.typevar(db).upper_bound(db, self.mapping.env)
+        {
+            inspector.inspect(
+                db,
+                bound,
+                |ty, _| pattern_filtering_arms(db, original, ty),
+                |_, ty| pattern_filtering_arms(db, original, ty.ty),
+            )
+        } else {
+            pattern_filtering_arms(db, original, self.ty)
+        }
+    }
+
+    pub(super) fn narrow_membership(
+        self,
+        builder: &super::narrow::NarrowingConstraintsBuilder<'db, '_>,
+        inspector: &TypeInspector<'_, 'db>,
+        lhs: Type<'db>,
+    ) -> Option<Type<'db>> {
+        builder.narrow_membership_resolved(inspector, lhs, self.ty)
+    }
+    pub(super) fn narrow_non_membership(
+        self,
+        builder: &super::narrow::NarrowingConstraintsBuilder<'db, '_>,
+        lhs: Type<'db>,
+    ) -> Option<Type<'db>> {
+        builder.narrow_non_membership_resolved(lhs, self.ty)
+    }
+
+    pub(super) fn narrow_length(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        original: Type<'db>,
+        length: i64,
+        comparison: super::narrow::LengthComparison,
+    ) -> Type<'db> {
+        super::narrow::NarrowingConstraintsBuilder::narrow_type_by_len_comparison_impl(
+            db, inspector, original, self.ty, length, comparison,
+        )
+    }
+
+    pub(super) fn validate_subscript_assignment(
+        self,
+        inspector: &TypeInspector<'_, 'db>,
+        assignment: super::infer::SubscriptAssignment<'_, 'db, '_>,
+    ) -> bool {
+        assignment.check(inspector, self.ty)
+    }
+
+    pub(super) fn retained_function_binding(
+        self,
+        db: &'db dyn Db,
+        exposed_type: ExpandedType<'_, 'db>,
+        exposed: Type<'db>,
+        function: super::FunctionType<'db>,
+    ) -> Option<(super::FunctionType<'db>, Type<'db>)> {
+        let env = self.mapping.env;
+        let binding = self.ty;
+        let exposed_type = exposed_type.ty;
+
+        let exposed_union = match exposed_type {
+            Type::Union(union) => Some(union),
+            Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db).as_union(),
+            _ => None,
+        };
+        let exposed_alternatives =
+            exposed_union.map_or(std::slice::from_ref(&exposed), |union| union.elements(db));
+        let binding_union = match binding {
+            Type::Union(union) => Some(union),
+            Type::NewTypeInstance(newtype) => newtype.concrete_base_type(db).as_union(),
+            _ => None,
+        };
+        let binding_alternatives =
+            binding_union.map_or(std::slice::from_ref(&binding), |union| union.elements(db));
+        let retained = UnionType::from_elements(
+            db,
+            &env,
+            binding_alternatives
+                .iter()
+                .copied()
+                .filter(|ty| exposed_alternatives.contains(ty)),
+        );
+        (!retained.is_never()).then_some((function, retained))
+    }
+
+    pub(super) fn known_constructor_preserves_value_type(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        annotation: Type<'db>,
+    ) -> bool {
+        super::enums::known_constructor_preserves_value_type_resolved(
+            db, inspector, self.ty, annotation,
+        )
+    }
+
+    pub(super) fn value_has_exact_known_class(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        data_type: KnownClass,
+    ) -> bool {
+        super::enums::value_has_exact_known_class_resolved(db, inspector, self.ty, data_type)
+    }
+
+    pub(super) fn collect_implementation_roots(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        seen: &mut FxHashSet<ClassLiteral<'db>>,
+        roots: &mut Vec<ClassLiteral<'db>>,
+    ) {
+        super::ide_support::collect_implementation_roots_resolved(
+            db, inspector, self.ty, seen, roots,
+        );
+    }
+
+    pub(super) fn is_string_keyed_mapping(self, db: &'db dyn Db) -> bool {
+        let env = self.mapping.env;
+        let ty = self.ty;
+
+        let Type::NominalInstance(instance) = ty else {
+            return false;
+        };
+
+        matches!(
+                instance.class(db, env).known(db),
+                Some(
+                    KnownClass::Dict
+                        | KnownClass::Mapping
+                        | KnownClass::MutableMapping
+                        | KnownClass::DefaultDict
+                        | KnownClass::ChainMap
+                        | KnownClass::OrderedDict
+                )
+            ) && instance
+                .class(db, env)
+                .into_generic_alias()
+                .is_some_and(|alias| {
+                    matches!(
+                        alias.specialization(db).types(db),
+                        [key, _] if key.is_same_resolved_type(db, env, KnownClass::Str.to_instance(db, env))
+                    )
+                })
+    }
+
+    pub(super) fn type_form_context_fallback(self, db: &'db dyn Db) -> Option<Option<Type<'db>>> {
+        let env = self.mapping.env;
+        let target = self.ty;
+        match target {
+            Type::TypeForm(_) => Some(None),
+            Type::Union(union)
+                if union.elements(db).iter().any(|element| {
+                    element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
+                }) =>
+            {
+                Some(Some(target.filter_union(db, env, |element| {
+                    !element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
+                })))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn wrap_descriptor(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        kind: super::callable::CallableTypeKind,
+    ) -> Option<Type<'db>> {
+        let ty = self.ty;
+        match ty {
+            Type::Union(union) => union.try_map(db, inspector.environment(), |ty| {
+                inspector.inspect(
+                    db,
+                    *ty,
+                    |_, _| None,
+                    |inspector, ty| ty.wrap_descriptor(db, inspector, kind),
+                )
+            }),
+            Type::FunctionLiteral(function)
+                if function.callable_type_kind(db)
+                    == super::callable::CallableTypeKind::FunctionLike
+                    || function.callable_type_kind(db) == kind =>
+            {
+                Some(Type::FunctionLiteral(
+                    function.with_descriptor_kind(db, kind),
+                ))
+            }
+            Type::Callable(callable)
+                if matches!(
+                    callable.kind(db),
+                    super::callable::CallableTypeKind::Regular
+                        | super::callable::CallableTypeKind::FunctionLike
+                ) || callable.kind(db) == kind =>
+            {
+                Some(Type::Callable(callable.with_kind(db, kind)))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn accepts_literal_context(self, db: &'db dyn Db, ty: Type<'db>) -> bool {
+        let env = self.mapping.env;
+        let tcx = self.ty;
+
+        let literal_tcx = tcx.filter_union(db, env, |ty| ty.as_literal_value().is_some());
+        matches!(literal_tcx, Type::Union(_) | Type::LiteralValue(_))
+            && ty.is_assignable_to(db, env, literal_tcx)
+    }
+
+    pub(super) fn matching_generic_class(
+        self,
+        db: &'db dyn Db,
+        class: ClassLiteral<'db>,
+    ) -> Option<super::GenericAlias<'db>> {
+        let target = self.ty;
+
+        let generic_alias = match target {
+            Type::SubclassOf(subclass)
+                if let SubclassOfInner::Class(ClassType::Generic(alias)) =
+                    subclass.subclass_of() =>
+            {
+                alias
+            }
+            Type::GenericAlias(alias) => alias,
+            _ => return None,
+        };
+
+        if class.as_static()? == generic_alias.origin(db) {
+            Some(generic_alias)
+        } else {
+            None
+        }
+    }
+
+    pub(super) fn specialize_class_callable_context(
+        self,
+        builder: &super::infer::TypeInferenceBuilder<'db, '_>,
+        inspector: &TypeInspector<'_, 'db>,
+        class: ClassLiteral<'db>,
+    ) -> Option<Type<'db>> {
+        builder.specialize_class_callable_context_resolved(inspector, class, self.ty)
+    }
+    pub(super) fn specialize_class_context(
+        self,
+        builder: &super::infer::TypeInferenceBuilder<'db, '_>,
+        inspector: &TypeInspector<'_, 'db>,
+        class: ClassLiteral<'db>,
+    ) -> Type<'db> {
+        builder.specialize_class_context_resolved(inspector, class, self.ty)
+    }
+
+    pub(super) fn infer_dict_context(
+        self,
+        builder: &mut super::infer::TypeInferenceBuilder<'db, '_>,
+        inspector: &TypeInspector<'_, 'db>,
+        dict: &ruff_python_ast::ExprDict,
+        tcx: TypeContext<'db>,
+    ) -> Type<'db> {
+        builder.infer_dict_expression_inner(
+            inspector,
+            dict,
+            tcx.with_annotation(tcx.annotation.map(|_| self.ty)),
+        )
+    }
+    pub(super) fn accepts_dict_literal(
+        self,
+        builder: &super::infer::TypeInferenceBuilder<'db, '_>,
+        inspector: &TypeInspector<'_, 'db>,
+        dict: &ruff_python_ast::ExprDict,
+        tcx: TypeContext<'db>,
+    ) -> bool {
+        builder.accepts_dict_literal_resolved(inspector, dict, tcx, self.ty)
+    }
+
+    pub(super) fn descriptor_setter_domain(
+        self,
+        db: &'db dyn Db,
+        receiver: Type<'db>,
+    ) -> super::attribute_write::DescriptorSetterDomain<'db> {
+        super::attribute_write::descriptor_setter_domain_resolved(
+            db,
+            self.mapping.env,
+            self.ty,
+            receiver,
+        )
+    }
+
+    pub(super) fn protocol_descriptor_member(
+        self,
+        db: &'db dyn Db,
+        protocol: ClassType<'db>,
+        definition: Option<Definition<'db>>,
+    ) -> Option<super::protocol_class::ProtocolMemberData<'db>> {
+        super::protocol_class::protocol_descriptor_member_resolved(
+            db,
+            self.mapping.env,
+            self.ty,
+            protocol,
+            definition,
+        )
+    }
+
+    pub(super) fn matches_constructor_return_typevar(
+        self,
+        db: &'db dyn Db,
+        return_typevar: super::BoundTypeVarInstance<'db>,
+    ) -> bool {
+        let cls_parameter_ty = self.ty;
+
+        let Type::SubclassOf(subclass_of) = cls_parameter_ty else {
+            return false;
+        };
+        let Some(cls_typevar) = subclass_of.into_type_var() else {
+            return false;
+        };
+
+        cls_typevar.typevar(db).identity(db) == return_typevar.typevar(db).identity(db)
+    }
+
+    pub(super) fn constructor_returns_instance(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        class: ClassLiteral<'db>,
+    ) -> bool {
+        super::call::bind::constructor_returns_instance_resolved(db, inspector, class, self.ty)
+    }
+    pub(super) fn normalize_constructor_return(
+        self,
+        db: &'db dyn Db,
+        binding: &super::call::bind::Binding<'db>,
+    ) -> Option<Type<'db>> {
+        binding.normalized_constructor_return_resolved(db, self.mapping.env, self.ty)
+    }
+
+    pub(super) fn class_pattern_positional_result(
+        self,
+        db: &'db dyn Db,
+    ) -> Option<super::match_pattern::ClassPatternPositionalResult<'db>> {
+        let env = self.mapping.env;
+        let match_args = self.ty;
+
+        if let Some(limit) = match_args.exact_tuple_instance_spec(db).and_then(|tuple| {
+            tuple
+                .as_fixed_length()
+                .map(super::tuple::FixedLengthTuple::len)
+        }) {
+            Some(super::match_pattern::ClassPatternPositionalResult::Limit(
+                limit,
+            ))
+        } else {
+            match_args
+                .is_disjoint_from(db, env, Type::homogeneous_tuple(db, env, Type::unknown()))
+                .then_some(
+                    super::match_pattern::ClassPatternPositionalResult::InvalidType(match_args),
+                )
+        }
+    }
+
+    pub(super) fn mapping_pattern_value(
+        self,
+        analyzer: &super::narrow::PatternSuccessAnalyzer<'db, '_>,
+        inspector: &TypeInspector<'_, 'db>,
+        key: Type<'db>,
+    ) -> Option<Type<'db>> {
+        analyzer.mapping_pattern_value_resolved(inspector, self.ty, key)
+    }
+
+    pub(super) fn preserve_pattern_subject(
+        self,
+        analyzer: &super::narrow::PatternSuccessAnalyzer<'db, '_>,
+        original: Type<'db>,
+        filtered: Type<'db>,
+        preservation: super::narrow::OriginalSubjectPreservation,
+    ) -> Type<'db> {
+        analyzer.preserve_pattern_subject_resolved(self.ty, original, filtered, preservation)
+    }
+
+    pub(super) fn filter_tuple_subscript(
+        self,
+        builder: &super::narrow::NarrowingConstraintsBuilder<'db, '_>,
+        expression: &ruff_python_ast::Expr,
+        index: Type<'db>,
+        predicate: impl FnMut(Type<'db>) -> bool,
+    ) -> Option<(
+        ty_python_core::place::ScopedPlaceId,
+        super::narrow::NarrowingConstraint<'db>,
+    )> {
+        builder.filter_tuple_subscript_resolved(self.ty, expression, index, predicate)
+    }
+
+    pub(super) fn narrow_nominal_attribute(
+        self,
+        builder: &super::narrow::NarrowingConstraintsBuilder<'db, '_>,
+        expression: &ruff_python_ast::Expr,
+        name: &str,
+        rhs: Type<'db>,
+        operator: ruff_python_ast::CmpOp,
+        positive: bool,
+    ) -> Option<(
+        ty_python_core::place::ScopedPlaceId,
+        super::narrow::NarrowingConstraint<'db>,
+    )> {
+        builder
+            .narrow_nominal_attribute_resolved(self.ty, expression, name, rhs, operator, positive)
+    }
+
+    pub(super) fn narrow_nominal_attribute_by_truthiness(
+        self,
+        builder: &super::narrow::NarrowingConstraintsBuilder<'db, '_>,
+        expression: &ruff_python_ast::Expr,
+        name: &str,
+        positive: bool,
+    ) -> Option<(
+        ty_python_core::place::ScopedPlaceId,
+        super::narrow::NarrowingConstraint<'db>,
+    )> {
+        builder.narrow_nominal_attribute_by_truthiness_resolved(self.ty, expression, name, positive)
+    }
+
+    pub(super) fn nominal_class(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+    ) -> Option<ClassType<'db>> {
+        let env = self.mapping.env;
+        let ty = self.ty;
+        match ty {
+            Type::NominalInstance(instance) => Some(instance.class(db, env)),
+            Type::ProtocolInstance(instance) => instance.class_origin(db).map(|class| *class),
+            Type::NewTypeInstance(newtype) => newtype
+                .concrete_base_type(db)
+                .nominal_class_in(db, inspector),
+            Type::TypeVar(typevar) => {
+                let TypeVarBoundOrConstraints::UpperBound(bound) =
+                    typevar.typevar(db).bound_or_constraints(db, env)?
+                else {
+                    return None;
+                };
+                bound.nominal_class_in(db, inspector)
+            }
+            Type::LiteralValue(literal) => literal
+                .fallback_instance(db, env)
+                .nominal_class_in(db, inspector),
+            Type::PropertyInstance(property) => property
+                .instance_fallback(db, env)
+                .nominal_class_in(db, inspector),
+            Type::SlotDescriptor(_) => KnownClass::MemberDescriptorType
+                .to_instance(db, env)
+                .nominal_class_in(db, inspector),
+            _ => None,
+        }
+    }
+
+    pub(super) fn is_literal_or_union_of_literals(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+    ) -> bool {
+        let env = self.mapping.env;
+        let ty = self.ty;
+        match ty {
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .all(|ty| ty.is_literal_or_union_of_literals_in(db, inspector)),
+            Type::LiteralValue(literal) => match literal.kind() {
+                LiteralValueTypeKind::String(_)
+                | LiteralValueTypeKind::Bytes(_)
+                | LiteralValueTypeKind::Int(_)
+                | LiteralValueTypeKind::Bool(_)
+                | LiteralValueTypeKind::Enum(_) => true,
+                LiteralValueTypeKind::LiteralString => false,
+            },
+            Type::NominalInstance(_) => ty.is_none(db) || ty.is_bool(db) || ty.is_enum(db, env),
+            _ => false,
+        }
+    }
+
+    pub(super) fn as_callable(&self) -> Option<CallableType<'db>> {
+        self.ty.as_callable()
+    }
+    pub(super) fn as_typevar(&self) -> Option<super::BoundTypeVarInstance<'db>> {
+        self.ty.as_typevar()
+    }
+    pub(super) fn as_typed_dict(&self) -> Option<TypedDictType<'db>> {
+        self.ty.as_typed_dict()
+    }
+    pub(super) fn as_string_literal(&self) -> Option<super::StringLiteralType<'db>> {
+        self.ty.as_string_literal()
+    }
+    pub(super) fn as_int_like_literal(&self) -> Option<i64> {
+        self.ty.as_int_like_literal()
+    }
+    pub(super) fn subclass_type(self, db: &'db dyn Db) -> Option<Type<'db>> {
+        super::SubclassOfType::try_from_instance(db, self.mapping.env, self.ty).ok()
+    }
+
+    pub(super) fn unpacked_keyword_is_gradual(self, db: &'db dyn Db) -> bool {
+        let env = self.mapping.env;
+        let ty = self.ty;
+        match ty {
+            ty if ty.is_never() || ty.is_dynamic() => true,
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .any(|element| element.has_outer_type(db, env, |ty| ty.is_dynamic())),
+            _ => false,
+        }
+    }
+
+    pub(super) fn build_super(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        pivot: Type<'db>,
+    ) -> Result<Type<'db>, super::bound_super::BoundSuperError<'db>> {
+        super::bound_super::BoundSuperType::build_impl(db, inspector, pivot, self.ty)
+    }
+
+    pub(super) fn equality_exclusion(
+        self,
+        db: &'db dyn Db,
+        policy: super::equality::ComparisonSoundnessPolicy,
+    ) -> Option<Type<'db>> {
+        super::equality::equality_exclusion_resolved(db, self.mapping.env, self.ty, policy)
+    }
+
+    pub(super) fn equality_constraint(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        left: Type<'db>,
+        positive: bool,
+        operator: super::equality::ComparisonOperator,
+        policy: super::equality::ComparisonSoundnessPolicy,
+    ) -> Option<Type<'db>> {
+        super::equality::equality_constraint_resolved(
+            db, inspector, left, self.ty, positive, operator, policy,
+        )
+    }
+
+    pub(super) fn is_builtin_comparison_literal(self, db: &'db dyn Db) -> bool {
+        super::equality::is_builtin_comparison_literal_resolved(db, self.ty)
+    }
+    pub(super) fn all_builtin_comparison_literals(self, db: &'db dyn Db) -> bool {
+        match self.ty {
+            Type::Union(union) => union
+                .elements(db)
+                .iter()
+                .all(|ty| super::equality::is_builtin_literal_type(db, self.mapping.env, *ty)),
+            ty => super::equality::is_builtin_literal_type(db, self.mapping.env, ty),
+        }
+    }
+
+    pub(super) fn builtin_literal_constraint(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        left: Type<'db>,
+        operator: super::equality::ComparisonOperator,
+        expects_equality: bool,
+    ) -> Option<Type<'db>> {
+        super::equality::builtin_literal_constraint_resolved(
+            db,
+            inspector,
+            left,
+            self.ty,
+            operator,
+            expects_equality,
+        )
+    }
+
+    pub(super) fn add_equal_enum_literals(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+        right: super::LiteralValueTypeKind<'db>,
+        operator: super::equality::ComparisonOperator,
+        builder: &mut super::UnionBuilder<'db>,
+    ) {
+        super::equality::add_equal_enum_literals_resolved(
+            db, inspector, self.ty, right, operator, builder,
+        );
+    }
+
+    pub(super) fn enum_literal_constraint(
+        self,
+        db: &'db dyn Db,
+        left: Type<'db>,
+        operator: super::equality::ComparisonOperator,
+        expects_equality: bool,
+    ) -> Option<Type<'db>> {
+        super::equality::enum_literal_constraint_resolved(
+            db,
+            self.mapping.env,
+            left,
+            self.ty,
+            operator,
+            expects_equality,
+        )
+    }
+
+    pub(super) fn unsafe_narrowable_builtin_semantics(
+        self,
+        db: &'db dyn Db,
+    ) -> Option<super::equality::KnownComparisonSemantics> {
+        super::equality::unsafe_narrowable_builtin_semantics_resolved(db, self.ty)
+    }
+
+    pub(super) fn has_reflexive_equality_semantics(
+        self,
+        evaluator: &super::equality::ComparisonEvaluator<'_, 'db>,
+        inspector: &TypeInspector<'_, 'db>,
+    ) -> bool {
+        super::equality::has_reflexive_equality_semantics_resolved(evaluator, inspector, self.ty)
+    }
+
+    pub(super) fn exact_class_for_bound(self, db: &'db dyn Db) -> Option<Type<'db>> {
+        let bound = super::SubclassOfType::try_from_instance(db, self.mapping.env, self.ty).ok()?;
+        matches!(bound, Type::ClassLiteral(_) | Type::GenericAlias(_)).then_some(bound)
+    }
+
+    pub(super) fn paramspec_bound(self, db: &'db dyn Db) -> Option<Type<'db>> {
+        match self.ty {
+            Type::Callable(callable)
+                if !callable.has_generic_context(db)
+                    && let Some(paramspec) = callable
+                        .single_parameters(db)
+                        .and_then(Parameters::as_paramspec) =>
+            {
+                Some(Type::TypeVar(paramspec))
+            }
+            Type::Callable(callable) => Some(Type::Callable(callable.into_paramspec_value(db))),
+            Type::TypeVar(bound)
+                if bound.is_paramspec(db) && bound.paramspec_attr(db).is_none() =>
+            {
+                Some(Type::TypeVar(bound))
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn data_descriptor(self, db: &'db dyn Db) -> Option<Type<'db>> {
+        let env = self.mapping.env;
+        let descriptor_ty = self.ty;
+
+        let descriptor_ty = match descriptor_ty {
+            Type::TypeForm(typeform) => typeform.type_argument(db).to_meta_type(db, env),
+            descriptor_ty => descriptor_ty,
+        };
+
+        descriptor_ty
+            .is_data_descriptor(db, env)
+            .then_some(descriptor_ty)
+    }
+
+    pub(super) fn receiver_violates_typevar_domain(
+        self,
+        db: &'db dyn Db,
+        receiver: Type<'db>,
+    ) -> bool {
+        self.ty.as_typevar().is_some_and(|typevar| {
+            super::signatures::Signature::receiver_violates_typevar_domain(
+                db,
+                self.mapping.env,
+                receiver,
+                typevar,
+            )
+        })
+    }
+
+    pub(super) fn unpacked_typed_dict(self) -> Option<TypedDictType<'db>> {
+        self.ty.as_typed_dict()
+    }
+
+    pub(super) fn matches(&self, predicate: fn(Type<'db>) -> bool) -> bool {
+        predicate(self.ty)
+    }
+
+    pub(super) fn has_same_resolved_type(self, db: &'db dyn Db, other: Type<'db>) -> bool {
+        if !other.is_alias_like() {
+            return self.ty == other;
+        }
+        TypeInspector::inspect_root(
+            db,
+            self.mapping.env,
+            other,
+            |other, _| self.ty == other,
+            |_, other| self.ty == other.ty,
+        )
+    }
+
+    pub(super) fn has_same_type(&self, other: Type<'db>) -> bool {
+        self.ty == other
+    }
+
+    pub(super) fn constructor_for_bound(self, db: &'db dyn Db) -> Type<'db> {
+        if self.ty.is_object() {
+            super::KnownClass::Object.to_class_literal(db, self.mapping.env)
+        } else {
+            self.ty.to_meta_type(db, self.mapping.env)
+        }
+    }
+
+    pub(super) fn filter_union(
+        self,
+        db: &'db dyn Db,
+        original: Type<'db>,
+        was_union: bool,
+        mut predicate: impl FnMut(&Type<'db>) -> bool,
+    ) -> Type<'db> {
+        match self.ty {
+            Type::Union(union) => union.filter(db, predicate),
+            ty if was_union => {
+                if predicate(&ty) {
+                    ty
+                } else {
+                    Type::Never
+                }
+            }
+            _ => original,
+        }
+    }
+
     pub(super) fn enum_values(
         self,
         db: &'db dyn Db,
@@ -500,7 +1520,7 @@ impl<'db> TypeExpansionContext<'_, '_, 'db> {
 
     fn normalized_type(&self, db: &'db dyn Db, ty: Type<'db>) -> Type<'db> {
         TypeInspector::with_mapping_visitor(self.mapping, |inspector| {
-            inspector.inspect(db, ty, |ty, _| ty, |_, ty| ty)
+            inspector.inspect(db, ty, |ty, _| ty, |_, ty| ty.ty)
         })
     }
 }
@@ -1287,8 +2307,8 @@ enum TraversalMapping<'env, 'db> {
 struct InspectType;
 
 /// A normalized type together with the outer structure needed by union transformations.
-pub(super) struct NormalizedType<'db> {
-    pub(super) ty: Type<'db>,
+pub(super) struct NormalizedType<'scope, 'db> {
+    pub(super) ty: ExpandedType<'scope, 'db>,
     /// A union can normalize to a single type. That result is still an alternative to filter or
     /// use as an inference context, unlike an alias whose body was never a union.
     pub(super) was_union: bool,
@@ -1310,7 +2330,7 @@ impl<'a, 'env, 'db, R, C, F> TypeWalk<'db, Inspection<'a, 'env, 'db, C, F>, Stru
     for InspectType
 where
     C: FnOnce(Type<'db>, CycleKind) -> R,
-    F: FnOnce(&TypeInspector<'_, 'db>, NormalizedType<'db>) -> R,
+    F: FnOnce(&TypeInspector<'_, 'db>, NormalizedType<'_, 'db>) -> R,
 {
     type Output = R;
 
@@ -1339,7 +2359,10 @@ where
         (state.inspect)(
             state.inspector,
             NormalizedType {
-                ty,
+                ty: ExpandedType {
+                    ty,
+                    mapping: traversal.mapping(),
+                },
                 was_union: state.was_union,
             },
         )
@@ -1392,7 +2415,7 @@ impl<'env, 'db> TypeInspector<'env, 'db> {
         env: &'env TypeOperations<'db>,
         ty: Type<'db>,
         on_cycle: impl FnOnce(Type<'db>, CycleKind) -> R,
-        inspect: impl FnOnce(&TypeInspector<'_, 'db>, Type<'db>) -> R,
+        inspect: impl FnOnce(&TypeInspector<'_, 'db>, ExpandedType<'_, 'db>) -> R,
     ) -> R {
         Self::scope(env, |inspector| {
             inspector.inspect(db, ty, on_cycle, inspect)
@@ -1404,7 +2427,7 @@ impl<'env, 'db> TypeInspector<'env, 'db> {
         db: &'db dyn Db,
         ty: Type<'db>,
         on_cycle: impl FnOnce(Type<'db>, CycleKind) -> R,
-        inspect: impl FnOnce(&TypeInspector<'_, 'db>, Type<'db>) -> R,
+        inspect: impl FnOnce(&TypeInspector<'_, 'db>, ExpandedType<'_, 'db>) -> R,
     ) -> R {
         self.inspect_normalized(db, ty, on_cycle, |inspector, normalized| {
             inspect(inspector, normalized.ty)
@@ -1417,7 +2440,7 @@ impl<'env, 'db> TypeInspector<'env, 'db> {
         db: &'db dyn Db,
         ty: Type<'db>,
         on_cycle: impl FnOnce(Type<'db>, CycleKind) -> R,
-        inspect: impl FnOnce(&TypeInspector<'_, 'db>, NormalizedType<'db>) -> R,
+        inspect: impl FnOnce(&TypeInspector<'_, 'db>, NormalizedType<'_, 'db>) -> R,
     ) -> R {
         self.traversal.visit_with(
             db,
@@ -2307,13 +3330,17 @@ mod query_tests {
                     &db,
                     ty,
                     |_, _| None,
-                    |_, normalized| Some((normalized.ty, normalized.was_union)),
+                    |_, normalized| {
+                        Some((
+                            normalized
+                                .ty
+                                .has_same_type(KnownClass::Int.to_instance(&db, &env)),
+                            normalized.was_union,
+                        ))
+                    },
                 )
             });
-            assert_eq!(
-                normalized,
-                Some((KnownClass::Int.to_instance(&db, &env), was_union))
-            );
+            assert_eq!(normalized, Some((true, was_union)));
         }
         Ok(())
     }
@@ -2567,5 +3594,40 @@ mod query_tests {
             assert!(query.visit(&db, ty));
         });
         Ok(())
+    }
+}
+
+fn pattern_filtering_arms<'db>(
+    db: &'db dyn Db,
+    original: Type<'db>,
+    ty: Type<'db>,
+) -> smallvec::SmallVec<[(Type<'db>, Type<'db>); 2]> {
+    match ty {
+        Type::Union(union) => union
+            .elements(db)
+            .iter()
+            .map(|ty| (original, *ty))
+            .collect(),
+        ty => smallvec::smallvec![(original, ty)],
+    }
+}
+
+impl<'db> NormalizedType<'_, 'db> {
+    pub(super) fn narrow_targets(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+    ) -> Option<std::borrow::Cow<'db, [Type<'db>]>> {
+        match self.ty.ty {
+            Type::Union(union) => Some(std::borrow::Cow::Borrowed(union.elements(db))),
+            ty if self.was_union => Some(std::borrow::Cow::Owned(vec![ty])),
+            Type::NewTypeInstance(newtype) => inspector.inspect_normalized(
+                db,
+                newtype.concrete_base_type(db),
+                |_, _| None,
+                |inspector, normalized| normalized.narrow_targets(db, inspector),
+            ),
+            _ => None,
+        }
     }
 }

@@ -108,14 +108,7 @@ impl<'db> Type<'db> {
                     env,
                     ty,
                     |_, _| false,
-                    |_, ty| {
-                        ty.as_intersection().is_some_and(|intersection| {
-                            intersection
-                                .positive(db)
-                                .iter()
-                                .any(|ty| ty.is_singleton(db, env))
-                        })
-                    },
+                    |_, ty| ty.has_singleton_intersection(db),
                 )
         };
 
@@ -134,9 +127,14 @@ impl<'db> Type<'db> {
                     other,
                     |_, _| false,
                     |_, right| {
-                        matches!((left, right), (Type::TypeVar(left), Type::TypeVar(right))
-                    if left.is_same_typevar_as(db, right)
-                        && is_singleton_or_intersection_with_singleton(Type::TypeVar(left)))
+                        left.as_typevar()
+                            .zip(right.as_typevar())
+                            .is_some_and(|(left, right)| {
+                                left.is_same_typevar_as(db, right)
+                                    && is_singleton_or_intersection_with_singleton(Type::TypeVar(
+                                        left,
+                                    ))
+                            })
                     },
                 )
             },

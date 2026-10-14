@@ -3751,31 +3751,7 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
                 env,
                 ty,
                 |_, _| false,
-                |_, ty| {
-                    let Type::NominalInstance(instance) = ty else {
-                        return false;
-                    };
-
-                    matches!(
-                instance.class(db, env).known(db),
-                Some(
-                    KnownClass::Dict
-                        | KnownClass::Mapping
-                        | KnownClass::MutableMapping
-                        | KnownClass::DefaultDict
-                        | KnownClass::ChainMap
-                        | KnownClass::OrderedDict
-                )
-            ) && instance
-                .class(db, env)
-                .into_generic_alias()
-                .is_some_and(|alias| {
-                    matches!(
-                        alias.specialization(db).types(db),
-                        [key, _] if key.is_same_resolved_type(db, env, KnownClass::Str.to_instance(db, env))
-                    )
-                })
-                },
+                |_, ty| ty.is_string_keyed_mapping(db),
             )
         }
 

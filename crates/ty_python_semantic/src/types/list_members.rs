@@ -23,7 +23,7 @@ use crate::{
     reachability::ReachabilityConstraintsExtension,
     types::{
         ClassBase, ClassLiteral, KnownClass, ProgramEnvironment, StaticClassLiteral,
-        SubclassOfInner, Type, TypeVarBoundOrConstraints, UnionType, class::CodeGeneratorKind,
+        SubclassOfInner, Type, TypeVarBoundOrConstraints, class::CodeGeneratorKind,
         function::FunctionType, infer_definition_types, may_exist_at_runtime,
     },
 };
@@ -789,37 +789,12 @@ impl<'db> Member<'db> {
                             exposed,
                             |_, _| None,
                             |_, exposed_type| {
-                                let exposed_union = match exposed_type {
-                                    Type::Union(union) => Some(union),
-                                    Type::NewTypeInstance(newtype) => {
-                                        newtype.concrete_base_type(db).as_union()
-                                    }
-                                    _ => None,
-                                };
-                                let exposed_alternatives = exposed_union
-                                    .map_or(std::slice::from_ref(&exposed), |union| {
-                                        union.elements(db)
-                                    });
-                                let binding_union = match binding {
-                                    Type::Union(union) => Some(union),
-                                    Type::NewTypeInstance(newtype) => {
-                                        newtype.concrete_base_type(db).as_union()
-                                    }
-                                    _ => None,
-                                };
-                                let binding_alternatives = binding_union
-                                    .map_or(std::slice::from_ref(&binding), |union| {
-                                        union.elements(db)
-                                    });
-                                let retained = UnionType::from_elements(
+                                binding.retained_function_binding(
                                     db,
-                                    &env,
-                                    binding_alternatives
-                                        .iter()
-                                        .copied()
-                                        .filter(|ty| exposed_alternatives.contains(ty)),
-                                );
-                                (!retained.is_never()).then_some((function, retained))
+                                    exposed_type,
+                                    exposed,
+                                    function,
+                                )
                             },
                         )
                     },

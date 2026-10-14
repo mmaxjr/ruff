@@ -308,36 +308,12 @@ fn descriptor_write_domain_in<'db>(
     receiver: Type<'db>,
     storage_type: Type<'db>,
 ) -> Option<Type<'db>> {
-    let env = inspector.environment();
     inspector.inspect(
         db,
         descriptor,
         |_, _| Some(Type::unknown()),
         |inspector, descriptor| {
-            if let Type::Union(union) = descriptor {
-                let domains = union
-                    .elements(db)
-                    .iter()
-                    .map(|element| {
-                        descriptor_write_domain_in(db, inspector, *element, receiver, storage_type)
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                return Some(
-                    IntersectionType::bounded_from_elements(db, env, domains)
-                        .unwrap_or_else(Type::unknown),
-                );
-            }
-            match descriptor_setter_domain(db, env, descriptor, receiver) {
-                DescriptorSetterDomain::Known(ty) => Some(ty),
-                DescriptorSetterDomain::Deferred => Some(Type::unknown()),
-                DescriptorSetterDomain::Missing
-                    if descriptor.as_property_instance().is_some()
-                        || descriptor.is_data_descriptor(db, env) =>
-                {
-                    None
-                }
-                DescriptorSetterDomain::Missing => Some(storage_type),
-            }
+            descriptor.override_write_domain(db, inspector, receiver, storage_type)
         },
     )
 }
@@ -741,5 +717,39 @@ pub(super) fn check_instance_overrides<'db>(
                 }
             }
         }
+    }
+}
+
+pub(in crate::types) fn descriptor_write_domain_resolved<'db>(
+    db: &'db dyn Db,
+    inspector: &TypeInspector<'_, 'db>,
+    descriptor: Type<'db>,
+    receiver: Type<'db>,
+    storage_type: Type<'db>,
+) -> Option<Type<'db>> {
+    let env = inspector.environment();
+
+    if let Type::Union(union) = descriptor {
+        let domains = union
+            .elements(db)
+            .iter()
+            .map(|element| {
+                descriptor_write_domain_in(db, inspector, *element, receiver, storage_type)
+            })
+            .collect::<Option<Vec<_>>>()?;
+        return Some(
+            IntersectionType::bounded_from_elements(db, env, domains).unwrap_or_else(Type::unknown),
+        );
+    }
+    match descriptor_setter_domain(db, env, descriptor, receiver) {
+        DescriptorSetterDomain::Known(ty) => Some(ty),
+        DescriptorSetterDomain::Deferred => Some(Type::unknown()),
+        DescriptorSetterDomain::Missing
+            if descriptor.as_property_instance().is_some()
+                || descriptor.is_data_descriptor(db, env) =>
+        {
+            None
+        }
+        DescriptorSetterDomain::Missing => Some(storage_type),
     }
 }

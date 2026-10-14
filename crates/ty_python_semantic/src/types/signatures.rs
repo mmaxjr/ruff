@@ -1323,11 +1323,7 @@ impl<'db> Signature<'db> {
                     env,
                     annotation,
                     |_, _| false,
-                    |_, annotation| {
-                        annotation.as_typevar().is_some_and(|typevar| {
-                            Self::receiver_violates_typevar_domain(db, env, receiver, typevar)
-                        })
-                    },
+                    |_, annotation| annotation.receiver_violates_typevar_domain(db, receiver),
                 ) {
                     return std::borrow::Cow::Owned(OwnedConstraintSet::default());
                 }
@@ -1379,7 +1375,7 @@ impl<'db> Signature<'db> {
     /// class C:
     ///     def method[T: int](self: T) -> None: ...
     /// ```
-    fn receiver_violates_typevar_domain(
+    pub(super) fn receiver_violates_typevar_domain(
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
         receiver: Type<'db>,
@@ -6126,7 +6122,7 @@ impl<'db> Parameter<'db> {
                 env,
                 self.annotated_type,
                 |_, _| None,
-                |_, ty| ty.as_typed_dict(),
+                |_, ty| ty.unpacked_typed_dict(),
             )
         })
         .flatten()
