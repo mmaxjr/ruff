@@ -2578,7 +2578,7 @@ impl<'db> RecursiveType<'db> {
     pub(super) fn cycle_summary(self, db: &'db dyn Db) -> &'db AliasCycleSummary<'db> {
         #[salsa::tracked(
             returns(ref),
-            cycle_initial=|db, id, _, ()| AliasCycleSummary::from_type(db, Type::divergent_alias(id)),
+            cycle_initial=|_, id, _, ()| AliasCycleSummary::from_cycle(id),
             heap_size=ruff_memory_usage::heap_size
         )]
         fn cycle_summary_impl<'db>(
@@ -2592,7 +2592,11 @@ impl<'db> RecursiveType<'db> {
                     TypedDictType::new(class.identity_specialization(db)).unfold_value_type(db)
                 }
             };
-            let mut summary = AliasCycleSummary::from_type(db, body);
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_definition(recursive.definition(db)),
+            );
+            let mut summary = AliasCycleSummary::from_type(db, &env, body);
             // Nested bodies can refer to an enclosing binder. Close only the cycle marker,
             // so recovery never exposes an unbound variable as a standalone type.
             if let Some(Type::RecursiveVar(variable)) = summary.cycle {
@@ -2670,7 +2674,7 @@ impl<'db> RecursiveType<'db> {
             &ApplyTypeMappingVisitor::new(env),
         );
         // Alias arguments can expose a reference without introducing a container.
-        if body.has_unguarded_alias_cycle(db) {
+        if body.has_unguarded_alias_cycle(db, env) {
             Type::divergent_alias(self.cycle(db).id())
         } else if body == original {
             // Binding changes a closed type only by introducing references to this binder.

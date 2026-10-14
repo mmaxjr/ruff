@@ -206,7 +206,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let report_not_in_init = || {
             let is_dataclass_like = object_ty
                 .nominal_class(db, env)
-                .or_else(|| object_ty.to_class_type(db))
+                .or_else(|| object_ty.to_class_type(db, env))
                 .and_then(|cls| cls.static_class_literal(db))
                 .is_some_and(|(class_literal, _)| class_literal.is_dataclass_like(self.db()));
             let Some(builder) = self

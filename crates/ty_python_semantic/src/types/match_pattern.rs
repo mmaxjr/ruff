@@ -99,10 +99,10 @@ pub(crate) fn typed_dict_matches_class_pattern<'db>(
     else {
         return false;
     };
-    Type::instance(db, env, dict.top_materialization(db)).is_subtype_of(
+    Type::instance(db, env, dict.top_materialization(db, env)).is_subtype_of(
         db,
         env,
-        Type::instance(db, env, class.top_materialization(db)),
+        Type::instance(db, env, class.top_materialization(db, env)),
     )
 }
 
@@ -337,7 +337,7 @@ fn class_pattern_is_exhaustive<'pattern, 'db>(
     kind: &'pattern ClassPatternPredicateKind<'db>,
     cache: &mut PatternTypeCache<'pattern, 'db>,
 ) -> bool {
-    let class_instance_ty = Type::instance(db, env, class.top_materialization(db));
+    let class_instance_ty = Type::instance(db, env, class.top_materialization(db, env));
     let is_typed_dict_match = is_typed_dict_runtime_domain(db, env, subject_ty)
         && typed_dict_matches_class_pattern(db, env, class);
     if !is_typed_dict_match && !subject_ty.is_subtype_of(db, env, class_instance_ty) {

@@ -1758,7 +1758,7 @@ fn analyze_single_pattern_predicate_kind<'db>(
             let class_ty =
                 match infer_same_file_expression_type(db, kind.class, TypeContext::default()) {
                     Type::ClassLiteral(class) => {
-                        Type::instance(db, env, class.top_materialization(db))
+                        Type::instance(db, env, class.top_materialization(db, env))
                     }
                     Type::SpecialForm(SpecialFormType::CollectionsAbcCallable) => {
                         Type::Callable(CallableType::top(db))

@@ -364,7 +364,7 @@ impl<'db> TypeQuery<'db> for ResolveClassBase<'db> {
             Type::Dynamic(dynamic) => Some(ClassBase::Dynamic(dynamic)),
             Type::Divergent(divergent) => Some(ClassBase::Divergent(divergent)),
             Type::ClassLiteral(literal) => {
-                Some(ClassBase::Class(literal.default_specialization(db)))
+                Some(ClassBase::Class(literal.default_specialization(db, env)))
             }
             Type::GenericAlias(generic) => Some(ClassBase::Class(ClassType::Generic(generic))),
             Type::NominalInstance(instance)

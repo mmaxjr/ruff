@@ -3234,12 +3234,23 @@ impl<'db> Type<'db> {
         }
     }
 
+    /// Return the source class without instantiating its default type arguments.
+    fn class_literal_or_origin(self, db: &'db dyn Db) -> Option<ClassLiteral<'db>> {
+        match self {
+            Type::ClassLiteral(class) => Some(class),
+            Type::GenericAlias(alias) => Some(alias.origin(db).into()),
+            _ => None,
+        }
+    }
+
     /// Turn a class literal (`Type::ClassLiteral` or `Type::GenericAlias`) into a `ClassType`.
     /// Since a `ClassType` must be specialized, apply the default specialization to any
     /// unspecialized generic class literal.
-    fn to_class_type(self, db: &'db dyn Db) -> Option<ClassType<'db>> {
+    fn to_class_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Option<ClassType<'db>> {
         match self {
-            Type::ClassLiteral(class_literal) => Some(class_literal.default_specialization(db)),
+            Type::ClassLiteral(class_literal) => {
+                Some(class_literal.default_specialization(db, env))
+            }
             Type::GenericAlias(alias) => Some(ClassType::Generic(alias)),
             _ => None,
         }
@@ -4504,7 +4515,7 @@ impl<'db> Type<'db> {
                 }
                 subclass_of => subclass_of.into_class(db, env),
             },
-            _ => self.to_class_type(db),
+            _ => self.to_class_type(db, env),
         };
         let own_class_attr =
             own_class.map(|class| class.own_class_member(db, env, None, name).inner);
@@ -7965,7 +7976,7 @@ impl<'db> Type<'db> {
         // `MyEnum(1)` to make sure `1` is a valid value for `MyEnum`.
         if KnownClass::Enum
             .to_class_literal(db, env)
-            .to_class_type(db)
+            .to_class_type(db, env)
             .is_some_and(|enum_class| class.is_subclass_of(db, env, enum_class))
         {
             return fallback_bindings();
@@ -8900,7 +8911,11 @@ impl<'db> Type<'db> {
                 TypeMapping::Promote(PromotionMode::On, PromotionKind::ClassLiteralsOnly)
             )
         {
-            return SubclassOfType::from(db, visitor.env, class.default_specialization(db));
+            return SubclassOfType::from(
+                db,
+                visitor.env,
+                class.default_specialization(db, visitor.env),
+            );
         }
 
         // Expand union-valued `ParamSpec`s before specializing a given callable.
@@ -10046,7 +10061,11 @@ impl<'db> Type<'db> {
         let mut variables = FxOrderSet::default();
         self.find_legacy_typevars(db, env, None, &mut variables);
         let generic_context = GenericContext::from_typevar_instances(db, env, variables);
-        self.apply_specialization(db, env, generic_context.default_specialization(db, None))
+        self.apply_specialization(
+            db,
+            env,
+            generic_context.default_specialization(db, env, None),
+        )
     }
 
     fn from_truthiness(db: &'db dyn Db, env: &TypeOperations<'db>, truthiness: Truthiness) -> Self {
@@ -10122,7 +10141,7 @@ impl<'db> TypeQuery<'db> for ProjectInstance {
                 Some(InstanceProjection::Exact(ty))
             }
             Type::ClassLiteral(class) => {
-                let instance = Type::instance(db, env, class.default_specialization(db));
+                let instance = Type::instance(db, env, class.default_specialization(db, env));
                 Some(InstanceProjection::new(
                     instance,
                     instance.is_nominal_instance()
@@ -10154,7 +10173,7 @@ impl<'db> TypeQuery<'db> for ProjectInstance {
             // An instance of class `C` may itself have instances if `C` is a subclass of `type`.
             Type::NominalInstance(instance) => KnownClass::Type
                 .to_class_literal(db, env)
-                .to_class_type(db)
+                .to_class_type(db, env)
                 .is_some_and(|type_class| {
                     instance.class(db, env).is_subclass_of(db, env, type_class)
                 })
@@ -10239,7 +10258,7 @@ impl<'db> TypeQuery<'db> for TypeExpression<'db> {
                     {
                         KnownUnion::Float.to_type(db, env)
                     }
-                    _ => Type::instance(db, env, class.default_specialization(db)),
+                    _ => Type::instance(db, env, class.default_specialization(db, env)),
                 };
                 Ok(ty)
             }

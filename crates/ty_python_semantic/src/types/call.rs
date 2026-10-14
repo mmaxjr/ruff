@@ -88,7 +88,7 @@ fn operator_dispatch_class<'db>(
     ty: Type<'db>,
 ) -> Option<ClassType<'db>> {
     match ty {
-        Type::ClassLiteral(class) => class.metaclass(db).to_class_type(db),
+        Type::ClassLiteral(class) => class.metaclass(db).to_class_type(db, env),
         _ => ty.nominal_class(db, env),
     }
 }

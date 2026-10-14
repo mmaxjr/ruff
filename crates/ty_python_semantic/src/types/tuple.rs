@@ -302,7 +302,7 @@ impl<'db> TupleType<'db> {
                     let element_type = self.tuple(db).tuple_class_type(db, env);
                     generic_context.specialize_tuple(db, element_type, self)
                 } else {
-                    generic_context.default_specialization(db, Some(KnownClass::Tuple))
+                    generic_context.default_specialization(db, env, Some(KnownClass::Tuple))
                 }
             })
     }
@@ -914,13 +914,15 @@ fn to_class_type_cycle_initial<'db>(
     id: salsa::Id,
     self_: TupleType<'db>,
 ) -> ClassType<'db> {
+    let env =
+        TypeOperations::for_inference(db, ProgramEnvironment::from_program(self_.program(db)));
     self_
         .class_literal(db)
         .apply_specialization(db, |generic_context| {
             if generic_context.variables(db).len() == 1 {
                 generic_context.specialize_tuple(db, Type::divergent(id), self_)
             } else {
-                generic_context.default_specialization(db, Some(KnownClass::Tuple))
+                generic_context.default_specialization(db, &env, Some(KnownClass::Tuple))
             }
         })
 }

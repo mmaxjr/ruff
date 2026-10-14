@@ -1942,7 +1942,7 @@ impl KnownFunction {
                 };
                 let env = builder.program_environment();
                 let Some(protocol_class) = param_type
-                    .to_class_type(db)
+                    .to_class_type(db, env)
                     .and_then(|class| class.into_protocol_class(db))
                 else {
                     report_bad_argument_to_protocol_interface(

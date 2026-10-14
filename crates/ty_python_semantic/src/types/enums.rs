@@ -264,7 +264,7 @@ pub(super) fn class_defines_property<'db>(
     class: ClassLiteral<'db>,
     name: &str,
 ) -> bool {
-    let Some(class) = Type::ClassLiteral(class).to_class_type(db) else {
+    let Some(class) = Type::ClassLiteral(class).to_class_type(db, env) else {
         return false;
     };
 
@@ -1371,12 +1371,11 @@ fn enum_metaclass_may_transform_values<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> bool {
-    let Some(metaclass) = class.metaclass(db).to_class_type(db) else {
+    let Some(metaclass) = class.metaclass(db).class_literal_or_origin(db) else {
         return false;
     };
 
     metaclass
-        .class_literal(db)
         .iter_mro(db)
         .filter_map(ClassBase::into_class)
         .filter_map(|base| base.class_literal(db).as_static())
@@ -1469,7 +1468,7 @@ fn inherited_enum_data_type<'db>(
     let mut selected = InheritedEnumDataType::None;
 
     for explicit_base in class.explicit_bases(db) {
-        let Some(explicit_base) = explicit_base.to_class_type(db) else {
+        let Some(explicit_base) = explicit_base.to_class_type(db, env) else {
             return InheritedEnumDataType::Opaque;
         };
         let mut candidate = None;

@@ -554,7 +554,7 @@ impl<'db> GenericAlias<'db> {
             Err(Box::new(StaticMroError::cycle(
                 db,
                 &env,
-                origin.apply_optional_specialization(db, Some(alias.specialization(db))),
+                origin.apply_optional_specialization(db, &env, Some(alias.specialization(db))),
             )))
         },
         heap_size=ruff_memory_usage::heap_size
@@ -815,10 +815,14 @@ impl<'db> ClassLiteral<'db> {
     ///
     /// For static classes, this applies default type arguments.
     /// For dynamic classes, this returns a non-generic class type.
-    pub(crate) fn default_specialization(self, db: &'db dyn Db) -> ClassType<'db> {
+    pub(crate) fn default_specialization(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> ClassType<'db> {
         self.as_static().map_or_else(
             || ClassType::NonGeneric(self),
-            |class| class.default_specialization(db),
+            |class| class.default_specialization(db, env),
         )
     }
 
@@ -1102,9 +1106,13 @@ impl<'db> ClassLiteral<'db> {
     }
 
     /// Returns the top materialization for this class.
-    pub(crate) fn top_materialization(self, db: &'db dyn Db) -> ClassType<'db> {
+    pub(crate) fn top_materialization(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> ClassType<'db> {
         match self {
-            Self::Static(class) => class.top_materialization(db),
+            Self::Static(class) => class.top_materialization(db, env),
             Self::Dynamic(_)
             | Self::DynamicNamedTuple(_)
             | Self::DynamicTypedDict(_)
@@ -3578,11 +3586,11 @@ impl<'db> DisjointBase<'db> {
         self == other
             || self
                 .class
-                .default_specialization(db)
+                .identity_specialization(db)
                 .is_subtype_of_class_literal(db, other.class)
             || other
                 .class
-                .default_specialization(db)
+                .identity_specialization(db)
                 .is_subtype_of_class_literal(db, self.class)
     }
 }
@@ -3641,7 +3649,7 @@ impl<'db> ClassMetaclass<'db> {
     ) -> Self {
         if has_protocol_fallback
             && selected
-                .to_class_type(db)
+                .class_literal_or_origin(db)
                 .is_some_and(|class| class.is_known(db, KnownClass::Type))
         {
             Self::ProtocolFallback

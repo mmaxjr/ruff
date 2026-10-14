@@ -138,7 +138,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         self.context.inference_flags |= InferenceFlags::IN_TYPE_ALIAS;
         let ty = self.infer_type_expression(value);
         let db = self.db();
-        let ty = if ty.has_unguarded_alias_cycle(db) {
+        let ty = if ty.has_unguarded_alias_cycle(db, self.program_environment()) {
             let target = match definition.kind(db) {
                 DefinitionKind::Assignment(assignment) => Some(assignment.target(self.module())),
                 DefinitionKind::AnnotatedAssignment(assignment) => {
@@ -267,7 +267,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 Some(parameters) => alias.apply_specialization(
                     db,
                     self.program_environment(),
-                    parameters.default_specialization(db, None),
+                    parameters.default_specialization(db, env, None),
                 ),
                 None => alias,
             };
@@ -460,7 +460,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                                             class
                                                 .inferred_metaclass(db)
                                                 .for_inheritance(db, env)
-                                                .to_class_type(db)
+                                                .to_class_type(db, env)
                                                 .and_then(|metaclass| metaclass.known(db)),
                                             Some(
                                                 KnownClass::Type

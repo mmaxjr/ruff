@@ -664,11 +664,11 @@ fn model_config<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> ModelCo
             continue;
         }
 
-        let Some(base) = base.to_class_type(db) else {
+        let Some(base) = base.class_literal_or_origin(db) else {
             config = ModelConfig::unknown();
             continue;
         };
-        let base_literal = base.class_literal(db);
+        let base_literal = base;
         let Some(base) = base_literal.as_static() else {
             config.merge(ModelConfig::unknown());
             continue;

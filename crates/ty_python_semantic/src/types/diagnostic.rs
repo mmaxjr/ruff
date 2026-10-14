@@ -3559,7 +3559,7 @@ impl<'db> IncompatibleBases<'db> {
                         // base share the same layout.
                         !disjoint_base
                             .class
-                            .default_specialization(db)
+                            .identity_specialization(db)
                             .is_subtype_of_class_literal(db, other_base.class)
                     })
             })
@@ -3675,7 +3675,7 @@ pub(crate) fn report_bad_argument_to_protocol_interface(
         "Only protocol classes can be passed to `reveal_protocol_interface`",
     );
 
-    if let Some(class) = param_type.to_class_type(db) {
+    if let Some(class) = param_type.class_literal_or_origin(db) {
         let mut class_def_diagnostic = SubDiagnostic::new(
             SubDiagnosticSeverity::Info,
             format_args!(
@@ -3683,7 +3683,7 @@ pub(crate) fn report_bad_argument_to_protocol_interface(
                 class.name(db)
             ),
         );
-        if let Some((class_literal, _)) = class.static_class_literal(db) {
+        if let Some(class_literal) = class.as_static() {
             class_def_diagnostic.annotate(Annotation::primary(class_literal.header_span(db)));
         }
         diagnostic.sub(class_def_diagnostic);

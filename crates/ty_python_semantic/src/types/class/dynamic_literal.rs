@@ -341,11 +341,11 @@ impl<'db> DynamicClassLiteral<'db> {
                 return Ok(ClassMetaclass::Selected(base_metaclass));
             }
             // Get the ClassType for comparison.
-            let Some(candidate_class) = candidate.to_class_type(db) else {
+            let Some(candidate_class) = candidate.to_class_type(db, &env) else {
                 // If candidate isn't a class type, keep it as is.
                 continue;
             };
-            let Some(base_metaclass_class) = base_metaclass.to_class_type(db) else {
+            let Some(base_metaclass_class) = base_metaclass.to_class_type(db, &env) else {
                 continue;
             };
 

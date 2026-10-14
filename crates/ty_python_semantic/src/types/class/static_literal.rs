@@ -613,20 +613,24 @@ impl<'db> StaticClassLiteral<'db> {
     pub(crate) fn apply_optional_specialization(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> ClassType<'db> {
         self.apply_specialization(db, |generic_context| {
             specialization
-                .unwrap_or_else(|| generic_context.default_specialization(db, self.known(db)))
+                .unwrap_or_else(|| generic_context.default_specialization(db, env, self.known(db)))
         })
     }
 
-    pub(crate) fn top_materialization(self, db: &'db dyn Db) -> ClassType<'db> {
+    pub(crate) fn top_materialization(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> ClassType<'db> {
         self.apply_specialization(db, |generic_context| {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(generic_context.program(db)),
-            );
+            let env = env.in_environment(ProgramEnvironment::from_program(
+                generic_context.program(db),
+            ));
             generic_context
                 .unknown_specialization(db, self.known(db))
                 .materialize_impl(
@@ -640,9 +644,13 @@ impl<'db> StaticClassLiteral<'db> {
     /// Returns the default specialization of this class. For non-generic classes, the class is
     /// returned unchanged. For a non-specialized generic class, we return a generic alias that
     /// applies the default specialization to the class's typevars.
-    pub(crate) fn default_specialization(self, db: &'db dyn Db) -> ClassType<'db> {
+    pub(crate) fn default_specialization(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> ClassType<'db> {
         self.apply_specialization(db, |generic_context| {
-            generic_context.default_specialization(db, self.known(db))
+            generic_context.default_specialization(db, env, self.known(db))
         })
     }
 
@@ -868,7 +876,7 @@ impl<'db> StaticClassLiteral<'db> {
             let env = TypeOperations::for_inference(db, ProgramEnvironment::from_scope(self_.body_scope(db)));
             Err(Box::new(StaticMroError::cycle(
                 db, &env,
-                self_.apply_optional_specialization(db, None),
+                self_.apply_optional_specialization(db, &env, None),
             )))
         },
         heap_size=ruff_memory_usage::heap_size
@@ -945,22 +953,19 @@ impl<'db> StaticClassLiteral<'db> {
             return false;
         }
 
-        let Some(metaclass) = self.metaclass(db).to_class_type(db) else {
+        let Some(metaclass) = self.metaclass(db).class_literal_or_origin(db) else {
             return true;
         };
 
-        metaclass
-            .class_literal(db)
-            .iter_mro(db)
-            .any(|base| match base {
-                ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
-                ClassBase::Class(base) => base.static_class_literal(db).is_none_or(|(base, _)| {
-                    implicit_attribute_names(db, base.body_scope(db))
-                        .binary_search(&Name::new_static("__getattribute__"))
-                        .is_ok()
-                }),
-                ClassBase::Generic | ClassBase::Protocol | ClassBase::TypedDict(_) => false,
-            })
+        metaclass.iter_mro(db).any(|base| match base {
+            ClassBase::Any | ClassBase::Dynamic(_) | ClassBase::Divergent(_) => true,
+            ClassBase::Class(base) => base.static_class_literal(db).is_none_or(|(base, _)| {
+                implicit_attribute_names(db, base.body_scope(db))
+                    .binary_search(&Name::new_static("__getattribute__"))
+                    .is_ok()
+            }),
+            ClassBase::Generic | ClassBase::Protocol | ClassBase::TypedDict(_) => false,
+        })
     }
 
     /// Return the properties shared by all instances of this class.
@@ -1297,7 +1302,7 @@ impl<'db> StaticClassLiteral<'db> {
                 (KnownClass::Type.to_class_literal(db, &env), None)
             };
 
-            let mut candidate = if let Some(metaclass_ty) = metaclass.to_class_type(db) {
+            let mut candidate = if let Some(metaclass_ty) = metaclass.to_class_type(db, &env) {
                 MetaclassCandidate {
                     metaclass: metaclass_ty,
                     base,
@@ -1345,14 +1350,14 @@ impl<'db> StaticClassLiteral<'db> {
                 if metaclass == SubclassOfType::subclass_of_unknown() {
                     return Ok((ClassMetaclass::Selected(metaclass), None));
                 }
-                let Some(metaclass) = metaclass.to_class_type(db) else {
+                let Some(metaclass) = metaclass.to_class_type(db, &env) else {
                     continue;
                 };
                 if let Some(selected) = candidate
                     .metaclass
                     .most_derived_metaclass(db, &env, metaclass)
                 {
-                    let Some(metaclass) = selected.to_class_type(db) else {
+                    let Some(metaclass) = selected.to_class_type(db, &env) else {
                         return Ok((ClassMetaclass::Selected(selected), None));
                     };
                     if metaclass == candidate.metaclass {
@@ -1370,7 +1375,7 @@ impl<'db> StaticClassLiteral<'db> {
                         base_metaclass: metaclass,
                         base: base_class,
                         explicit_metaclass: explicit_metaclass
-                            .and_then(|metaclass| metaclass.to_class_type(db)),
+                            .and_then(|metaclass| metaclass.to_class_type(db, &env)),
                     },
                 });
             }
@@ -1459,7 +1464,8 @@ impl<'db> StaticClassLiteral<'db> {
                 _ => {
                     let member =
                         self.class_member_from_mro(db, env, name, policy, self.iter_mro(db));
-                    let specialization = generic_context.default_specialization(db, self.known(db));
+                    let specialization =
+                        generic_context.default_specialization(db, env, self.known(db));
                     // An inherited method's `Self` bound can still contain this class's type
                     // variables, so the default arguments must also specialize that bound.
                     member.map_type(|ty| {
@@ -1792,7 +1798,7 @@ impl<'db> StaticClassLiteral<'db> {
         let instance_ty = Type::instance(
             db,
             env,
-            self.apply_optional_specialization(db, specialization),
+            self.apply_optional_specialization(db, env, specialization),
         );
 
         let signature_from_fields = |mut parameters: Vec<_>, return_ty: Type<'db>| {
@@ -2157,7 +2163,7 @@ impl<'db> StaticClassLiteral<'db> {
                                 new_upper_bound: determine_upper_bound(
                                     db,
                                     env,
-                                    self.apply_optional_specialization(db, specialization),
+                                    self.apply_optional_specialization(db, env, specialization),
                                     |base| {
                                         base.into_class()
                                             .is_some_and(|c| c.is_known(db, KnownClass::Tuple))
@@ -2263,7 +2269,7 @@ impl<'db> StaticClassLiteral<'db> {
         let instance_ty = Type::instance(
             db,
             env,
-            self.apply_optional_specialization(db, specialization),
+            self.apply_optional_specialization(db, env, specialization),
         );
         let method_signature = |name_ty, return_ty| {
             let self_parameter = Parameter::positional_or_keyword(Name::new_static("self"))
@@ -2433,7 +2439,7 @@ impl<'db> StaticClassLiteral<'db> {
         if let Some(member) = self.own_synthesized_member(db, env, specialization, None, name) {
             Place::bound(member).into()
         } else {
-            let class = self.apply_optional_specialization(db, specialization);
+            let class = self.apply_optional_specialization(db, env, specialization);
             let Some(module) = self.typed_dict_module(db) else {
                 return Place::Undefined.into();
             };

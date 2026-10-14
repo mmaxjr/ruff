@@ -2106,7 +2106,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (Type::ClassLiteral(source_class), Type::TypeForm(target_typeform)) => self
                 .check_type_pair(
                     db,
-                    Type::instance(db, env, source_class.default_specialization(db)),
+                    Type::instance(db, env, source_class.default_specialization(db, env)),
                     target_typeform.type_argument(db),
                 ),
 
@@ -3051,7 +3051,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
                         .map(|target_cls| {
                             self.check_class_pair(
                                 db,
-                                source_cls.default_specialization(db),
+                                source_cls.default_specialization(db, env),
                                 target_cls,
                             )
                         })
@@ -3071,7 +3071,7 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
             (Type::ClassLiteral(source_cls), Type::GenericAlias(target_alias)) => self
                 .check_class_pair(
                     db,
-                    source_cls.default_specialization(db),
+                    source_cls.default_specialization(db, env),
                     ClassType::Generic(target_alias),
                 ),
 
@@ -4206,7 +4206,7 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
             | (Type::GenericAlias(alias_b), Type::ClassLiteral(class)) => {
                 nontrivial_check(self, || {
                     class
-                        .default_specialization(db)
+                        .default_specialization(db, env)
                         .into_generic_alias()
                         .when_none_or(db, self.constraints, |alias| {
                             self.check_type_pair(

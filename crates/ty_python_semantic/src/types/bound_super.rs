@@ -480,7 +480,7 @@ impl<'db> BoundSuperType<'db> {
             ),
             owner_class
                 .metaclass(db, env)
-                .to_class_type(db)
+                .to_class_type(db, env)
                 .map(|metaclass| {
                     ResolvedSuperOwner::new(
                         owner_display_type,
@@ -638,7 +638,7 @@ impl<'db> BoundSuperType<'db> {
             for constraint in constraints.elements(db) {
                 let class = match constraint {
                     Type::NominalInstance(instance) => Some(instance.class(db, env)),
-                    _ => constraint.to_class_type(db),
+                    _ => constraint.to_class_type(db, env),
                 };
                 match class {
                     Some(class) => {

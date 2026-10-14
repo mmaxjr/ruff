@@ -188,7 +188,7 @@ fn base_top_intersection<'db>(
     let specialized = Type::instance(
         db,
         env,
-        subclass_class.apply_optional_specialization(db, Some(specialization)),
+        subclass_class.apply_optional_specialization(db, env, Some(specialization)),
     );
     Some(GenericIntersection::Simplified(
         if subclass_specialization.materialization_kind(db) == Some(MaterializationKind::Top) {
@@ -346,6 +346,6 @@ fn dynamic_generalization_intersection<'db>(
     Some(Type::instance(
         db,
         env,
-        general_class.apply_optional_specialization(db, Some(specialization)),
+        general_class.apply_optional_specialization(db, env, Some(specialization)),
     ))
 }

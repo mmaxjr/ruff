@@ -30,8 +30,12 @@ impl<'db> Type<'db> {
     /// Returns whether expanding aliases, unions, and intersections can return to the same alias
     /// without entering another type. For example, `type A = int | A` is invalid, but
     /// `type A = int | list[A]` is a valid recursive alias.
-    pub(super) fn has_unguarded_alias_cycle(self, db: &'db dyn Db) -> bool {
-        AliasCycleSummary::from_type(db, self).cycle.is_some()
+    pub(super) fn has_unguarded_alias_cycle(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> bool {
+        AliasCycleSummary::from_type(db, env, self).cycle.is_some()
     }
 }
 
@@ -45,9 +49,16 @@ pub(super) struct AliasCycleSummary<'db> {
 }
 
 impl<'db> AliasCycleSummary<'db> {
-    pub(super) fn from_type(db: &'db dyn Db, ty: Type<'db>) -> Self {
+    pub(super) fn from_cycle(id: salsa::Id) -> Self {
+        Self {
+            cycle: Some(Type::divergent_alias(id)),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn from_type(db: &'db dyn Db, env: &TypeOperations<'db>, ty: Type<'db>) -> Self {
         let mut typevars = FxOrderSet::default();
-        let cycle = Self::collect(db, ty, &mut typevars);
+        let cycle = Self::collect(db, env, ty, &mut typevars);
         Self {
             cycle,
             typevars: typevars.into_iter().collect(),
@@ -56,6 +67,7 @@ impl<'db> AliasCycleSummary<'db> {
 
     fn collect(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
     ) -> Option<Type<'db>> {
@@ -73,17 +85,17 @@ impl<'db> AliasCycleSummary<'db> {
                 let specialization = alias.specialization(db).or_else(|| {
                     alias
                         .generic_context(db)
-                        .map(|context| context.default_specialization(db, None))
+                        .map(|context| context.default_specialization(db, env, None))
                 });
 
-                summary.collect_exposed_arguments(db, specialization, typevars)
+                summary.collect_exposed_arguments(db, env, specialization, typevars)
             }
             Type::Recursive(recursive) => {
                 let summary = recursive.cycle_summary(db);
                 if summary.cycle.is_some() {
                     return summary.cycle;
                 }
-                summary.collect_exposed_arguments(db, recursive.arguments(db), typevars)
+                summary.collect_exposed_arguments(db, env, recursive.arguments(db), typevars)
             }
             Type::TypeVar(typevar) => {
                 typevars.insert(typevar);
@@ -92,12 +104,12 @@ impl<'db> AliasCycleSummary<'db> {
             Type::Union(union) => union
                 .elements(db)
                 .iter()
-                .find_map(|&element| Self::collect(db, element, typevars)),
+                .find_map(|&element| Self::collect(db, env, element, typevars)),
             Type::Intersection(intersection) => intersection
                 .positive(db)
                 .iter()
                 .chain(intersection.negative(db))
-                .find_map(|&element| Self::collect(db, element, typevars)),
+                .find_map(|&element| Self::collect(db, env, element, typevars)),
             Type::Divergent(divergent)
                 if divergent.flags.contains(DivergentFlags::FROM_TYPE_ALIAS) =>
             {
@@ -111,6 +123,7 @@ impl<'db> AliasCycleSummary<'db> {
     fn collect_exposed_arguments(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
         typevars: &mut FxOrderSet<BoundTypeVarInstance<'db>>,
     ) -> Option<Type<'db>> {
@@ -119,7 +132,7 @@ impl<'db> AliasCycleSummary<'db> {
                 specialization.and_then(|specialization| specialization.get(db, typevar))
                 && argument != Type::TypeVar(typevar)
             {
-                Self::collect(db, argument, typevars)
+                Self::collect(db, env, argument, typevars)
             } else {
                 typevars.insert(typevar);
                 None
@@ -401,7 +414,7 @@ fn apply_type_alias_specialization<'db>(
         generic_context.program(db),
     ));
     let specialization =
-        specialization.unwrap_or_else(|| generic_context.default_specialization(db, None));
+        specialization.unwrap_or_else(|| generic_context.default_specialization(db, &env, None));
     let type_mapping = match specialization.materialization_kind(db) {
         None => TypeMapping::ApplySpecialization(ApplySpecialization::TypeAlias(specialization)),
         Some(materialization_kind) => TypeMapping::ApplySpecializationWithMaterialization {
@@ -453,7 +466,11 @@ impl<'db> TypeAliasType<'db> {
             alias: TypeAliasType<'db>,
             (): (),
         ) -> AliasCycleSummary<'db> {
-            AliasCycleSummary::from_type(db, alias.raw_value_type(db))
+            let env = TypeOperations::for_inference(
+                db,
+                ProgramEnvironment::from_definition(alias.definition(db)),
+            );
+            AliasCycleSummary::from_type(db, &env, alias.raw_value_type(db))
         }
 
         cycle_summary(db, self.unspecialized(db), ())
@@ -503,7 +520,7 @@ impl<'db> TypeAliasType<'db> {
 
     /// Resolve this specialization while preserving the marker of an unguarded cycle.
     fn specialized_value_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
-        if let Some(cycle) = AliasCycleSummary::from_type(db, Type::TypeAlias(self)).cycle {
+        if let Some(cycle) = AliasCycleSummary::from_type(db, env, Type::TypeAlias(self)).cycle {
             return AliasCycleRecovery {
                 env,
                 mapping: env.mapping(),
@@ -651,7 +668,9 @@ impl<'db> TypeAliasType<'db> {
                 }
                 Type::TypeAlias(self.apply_specialization(db, |generic_context| {
                     self.specialization(db)
-                        .unwrap_or_else(|| generic_context.default_specialization(db, None))
+                        .unwrap_or_else(|| {
+                            generic_context.default_specialization(db, visitor.env, None)
+                        })
                         .apply_specialization_impl(
                             db,
                             current_specialization,
@@ -777,7 +796,7 @@ impl<'db> TypeAliasType<'db> {
         let raw_value_type = self.raw_value_type(db);
         let specialization = self
             .specialization(db)
-            .unwrap_or_else(|| generic_context.default_specialization(db, None));
+            .unwrap_or_else(|| generic_context.default_specialization(db, &env, None));
 
         // For external typevars, variance flows through the specialization arguments. Expanding
         // the specialized alias body here can create ever-larger recursive alias applications.

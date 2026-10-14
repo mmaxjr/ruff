@@ -201,7 +201,7 @@ impl<'db> Type<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
     ) -> Self {
-        let constructor_ty = self.to_class_type(db).map_or(self, Type::from);
+        let constructor_ty = self.to_class_type(db, env).map_or(self, Type::from);
         constructor_ty.bindings(db, env).return_type(db, env)
     }
 }
@@ -1677,7 +1677,7 @@ fn sys_version_info_class<'db>(
 ) -> Option<ClassType<'db>> {
     KnownClass::VersionInfo
         .try_to_class_literal(db, env)
-        .map(|class| class.default_specialization(db))
+        .map(|class| class.default_specialization(db, env))
 }
 
 pub(crate) struct SliceLiteral {

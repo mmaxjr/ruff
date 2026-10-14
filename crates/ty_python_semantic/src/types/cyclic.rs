@@ -337,13 +337,6 @@ impl<'db> RecursiveDefinition<'db> {
             _ => return None,
         };
 
-        let specialization = match target.generic_context(db) {
-            Some(generic_context) => Some(
-                specialization
-                    .unwrap_or_else(|| target.default_specialization(db, generic_context)),
-            ),
-            None => specialization,
-        };
         Some(DefinitionUse::Specialized(target, specialization))
     }
 
@@ -379,13 +372,14 @@ impl<'db> RecursiveDefinition<'db> {
     fn default_specialization(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         generic_context: GenericContext<'db>,
     ) -> Specialization<'db> {
         let known_class = match self {
             Self::TypeAlias(_) | Self::Structural(_) | Self::Lambda(_) => None,
             Self::Protocol(origin) | Self::TypedDict(origin) => origin.known(db),
         };
-        generic_context.default_specialization(db, known_class)
+        generic_context.default_specialization(db, env, known_class)
     }
 
     fn parameter_identity(
@@ -485,7 +479,8 @@ impl<'db> DefinitionUse<'db> {
         let Some(context) = target.generic_context(db) else {
             return specialization.is_none().then(Vec::new);
         };
-        let specialization = specialization?;
+        let specialization =
+            specialization.unwrap_or_else(|| target.default_specialization(db, env, context));
         if specialization.generic_context(db) != context {
             return None;
         }
@@ -501,12 +496,18 @@ impl<'db> DefinitionUse<'db> {
 
     fn walk_arguments(self, db: &'db dyn Db, visitor: &impl TypeVisitor<'db>) {
         match self {
-            Self::Specialized(_, Some(specialization)) => {
-                for argument in specialization.types(db) {
-                    visitor.visit_type(db, *argument);
+            Self::Specialized(target, specialization) => {
+                let specialization = specialization.or_else(|| {
+                    target.generic_context(db).map(|context| {
+                        target.default_specialization(db, visitor.program_environment(), context)
+                    })
+                });
+                if let Some(specialization) = specialization {
+                    for argument in specialization.types(db) {
+                        visitor.visit_type(db, *argument);
+                    }
                 }
             }
-            Self::Specialized(_, None) => {}
             Self::Lambda(lambda) => {
                 for (_, arguments) in lambda.captured_arguments(db, visitor.program_environment()) {
                     for argument in arguments {

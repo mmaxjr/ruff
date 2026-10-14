@@ -641,7 +641,7 @@ impl<'db> OverloadLiteral<'db> {
             // then `self`/`cls` are only implicitly positional-only if
             // it is a protocol class.
             original_class_type(db, class_definition)
-                .map(|class_literal| class_literal.default_specialization(db))
+                .map(|class_literal| class_literal.identity_specialization(db))
                 .is_some_and(|class| class.is_protocol(db))
         }
 

@@ -91,7 +91,7 @@ impl<'db> Mro<'db> {
         }
 
         let env = &env.in_environment(ProgramEnvironment::from_scope(class_literal.body_scope(db)));
-        let class = class_literal.apply_optional_specialization(db, specialization);
+        let class = class_literal.apply_optional_specialization(db, env, specialization);
 
         let original_bases = class_literal.explicit_bases(db);
 
@@ -641,9 +641,9 @@ impl<'db> MroIterator<'db> {
     fn first_element(&self) -> ClassBase<'db> {
         let db = self.db;
         match self.class {
-            ClassLiteral::Static(literal) => {
-                ClassBase::Class(literal.apply_optional_specialization(db, self.specialization))
-            }
+            ClassLiteral::Static(literal) => ClassBase::Class(
+                literal.apply_optional_specialization(db, &self.operations, self.specialization),
+            ),
             ClassLiteral::Dynamic(literal) => {
                 ClassBase::Class(ClassType::NonGeneric(literal.into()))
             }

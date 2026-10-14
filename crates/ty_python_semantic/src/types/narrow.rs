@@ -580,7 +580,7 @@ impl<'db> ClassInfoConstraint<'_, 'db> {
             let specialization = if use_generic_filtering {
                 class.unknown_specialization(db)
             } else {
-                class.top_materialization(db)
+                class.top_materialization(db, env)
             };
             let constraint = match self.function {
                 ClassInfoConstraintFunction::IsInstance => Type::instance(db, env, specialization),
@@ -4292,8 +4292,12 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
                     constraints.insert(
                         place,
                         NarrowingConstraint::intersection(
-                            Type::instance(db, &self.env, other_class.top_materialization(db))
-                                .negate_if(db, &self.env, !is_positive),
+                            Type::instance(
+                                db,
+                                &self.env,
+                                other_class.top_materialization(db, &self.env),
+                            )
+                            .negate_if(db, &self.env, !is_positive),
                         ),
                     );
                 }

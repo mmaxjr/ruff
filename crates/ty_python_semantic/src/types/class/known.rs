@@ -1227,7 +1227,7 @@ impl KnownClass {
             argument
                 .class(db)
                 .to_class_literal(db, env)
-                .to_class_type(db)
+                .to_class_type(db, env)
                 .map(|class| Type::instance(db, env, class))
                 .unwrap_or_else(Type::unknown)
         }
@@ -1288,7 +1288,7 @@ impl KnownClass {
                         class.display(env.python_version(db))
                     );
                 }
-                return class_literal.default_specialization(db);
+                return class_literal.default_specialization(db, env);
             }
 
             class_literal
@@ -1442,7 +1442,7 @@ impl KnownClass {
     /// If the class cannot be found, a debug-level log message will be emitted stating this.
     pub fn to_subclass_of<'db>(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         self.to_class_literal(db, env)
-            .to_class_type(db)
+            .to_class_type(db, env)
             .map(|class| SubclassOfType::from(db, env, class))
             .unwrap_or_else(SubclassOfType::subclass_of_unknown)
     }

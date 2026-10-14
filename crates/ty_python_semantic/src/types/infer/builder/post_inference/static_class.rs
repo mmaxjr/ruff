@@ -1242,7 +1242,7 @@ fn check_class_namespace_against_metaclass_members<'db>(
     let table = index.place_table(scope);
     let use_def = index.use_def_map(scope);
 
-    let Some(metaclass) = metaclass.to_class_type(db) else {
+    let Some(metaclass) = metaclass.to_class_type(db, env) else {
         return;
     };
 

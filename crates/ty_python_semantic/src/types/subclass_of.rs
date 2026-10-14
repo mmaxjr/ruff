@@ -80,7 +80,7 @@ impl<'db> SubclassOfType<'db> {
         let subclass_of = match ty {
             Type::Dynamic(dynamic) => SubclassOfInner::Dynamic(dynamic),
             Type::ClassLiteral(literal) => {
-                SubclassOfInner::Class(literal.default_specialization(db))
+                SubclassOfInner::Class(literal.default_specialization(db, env))
             }
             Type::GenericAlias(generic) => SubclassOfInner::Class(ClassType::Generic(generic)),
             Type::SpecialForm(SpecialFormType::Any) => SubclassOfInner::Dynamic(DynamicType::Any),

@@ -537,10 +537,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 return (None, false);
             }
 
-            let Some(mixin_class) = ty.to_class_type(db) else {
+            let Some(mixin_class) = ty.to_class_type(db, env) else {
                 return (Some(ty), true);
             };
-            let Some(enum_base) = base_class.to_class_literal(db, env).to_class_type(db) else {
+            let Some(enum_base) = base_class.to_class_literal(db, env).to_class_type(db, env)
+            else {
                 return (Some(ty), true);
             };
             let constraints = ConstraintSetBuilder::new();

@@ -2151,7 +2151,7 @@ impl<'db> Bindings<'db> {
                                     .map(|(_, specialization)| {
                                         specialization
                                             .generic_context(db)
-                                            .default_specialization(db, None)
+                                            .default_specialization(db, env, None)
                                     });
                                 for overload in binding {
                                     let params = overload.signature.parameters();
@@ -2161,7 +2161,8 @@ impl<'db> Bindings<'db> {
                                         .or_else(|| {
                                             overload.signature.generic_context.map(
                                                 |generic_context| {
-                                                    generic_context.default_specialization(db, None)
+                                                    generic_context
+                                                        .default_specialization(db, env, None)
                                                 },
                                             )
                                         });

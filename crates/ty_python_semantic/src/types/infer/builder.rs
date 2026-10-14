@@ -2383,7 +2383,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         let db = self.db();
         let value_ty = self.expression_type(value);
         let expanded = value_ty.expand_eagerly(db, self.program_environment());
-        if (expanded.is_recursive_divergent() || value_ty.has_unguarded_alias_cycle(db))
+        if (expanded.is_recursive_divergent()
+            || value_ty.has_unguarded_alias_cycle(db, self.program_environment()))
             && let Some(builder) = self
                 .context
                 .report_lint(&CYCLIC_TYPE_ALIAS_DEFINITION, value)
@@ -2412,8 +2413,9 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     fn class_context_of_current_method(&self) -> Option<ClassType<'db>> {
         let current_scope_id = self.scope().file_scope_id(self.db());
         let class_definition = self.index.class_definition_of_method(current_scope_id)?;
-        original_class_type(self.db(), class_definition)
-            .map(|class_literal| class_literal.default_specialization(self.db()))
+        original_class_type(self.db(), class_definition).map(|class_literal| {
+            class_literal.default_specialization(self.db(), self.program_environment())
+        })
     }
 
     /// Report an undeclared protocol attribute written through a method receiver.
@@ -2432,7 +2434,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             .index
             .class_definition_of_method(method_scope_id)
             .and_then(|definition| original_class_type(db, definition))
-            .map(|class| class.default_specialization(db))
+            .map(|class| class.default_specialization(db, self.program_environment()))
             .and_then(|class| class.into_protocol_class(db))
         else {
             return;
@@ -9708,7 +9710,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         match callable_type {
             Type::BoundMethod(bound_method) => {
                 if let Some(function) = bound_method.function(self.db())
-                    && let Some(class) = bound_method.self_instance(self.db()).to_class_type(db)
+                    && let Some(class) =
+                        bound_method.self_instance(self.db()).to_class_type(db, env)
                     && bound_method.class_method(self.db())
                     && function.as_abstract_method(self.db(), class).is_some()
                     && function.has_trivial_body(self.db())
@@ -9724,7 +9727,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             Type::FunctionLiteral(function) if function.has_staticmethod_declaration(self.db()) => {
                 if let ast::Expr::Attribute(ast::ExprAttribute { value, .. }) = func.as_ref() {
                     let value_type = self.expression_type(value);
-                    if let Some(class) = value_type.to_class_type(db) {
+                    if let Some(class) = value_type.to_class_type(db, env) {
                         if function.as_abstract_method(self.db(), class).is_some()
                             && function.has_trivial_body(self.db())
                         {

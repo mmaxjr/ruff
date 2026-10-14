@@ -318,7 +318,7 @@ impl Ty {
                     .place
                     .expect_type()
                     .expect_class_literal()
-                    .default_specialization(db),
+                    .default_specialization(db, env),
             ),
             Ty::SubclassOfAbcClass(s) => SubclassOfType::from(
                 db,
@@ -327,7 +327,7 @@ impl Ty {
                     .place
                     .expect_type()
                     .expect_class_literal()
-                    .default_specialization(db),
+                    .default_specialization(db, env),
             ),
             Ty::AlwaysTruthy => Type::AlwaysTruthy,
             Ty::AlwaysFalsy => Type::AlwaysFalsy,

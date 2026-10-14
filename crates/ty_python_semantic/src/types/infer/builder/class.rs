@@ -592,7 +592,7 @@ impl<'db> TypeQuery<'db> for ClassBinding<'db> {
             Type::SubclassOf(subclass) => subclass
                 .subclass_of()
                 .into_class(db, env)
-                .is_some_and(|class| class == original.default_specialization(db)),
+                .is_some_and(|class| class == original.default_specialization(db, env)),
             // A provisional decorator result cannot establish that the class is preserved.
             Type::Divergent(_) => false,
             Type::Union(union) => union

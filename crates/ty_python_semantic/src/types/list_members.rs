@@ -607,7 +607,7 @@ impl<'db> AllMembers<'_, '_, 'db> {
         ty: Type<'db>,
         metaclass: Type<'db>,
     ) {
-        let Some(metaclass) = metaclass.to_class_type(db) else {
+        let Some(metaclass) = metaclass.to_class_type(db, env) else {
             return;
         };
 

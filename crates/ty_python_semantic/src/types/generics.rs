@@ -891,10 +891,10 @@ impl<'db> GenericContext<'db> {
     pub(crate) fn default_specialization(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         known_class: Option<KnownClass>,
     ) -> Specialization<'db> {
-        let env =
-            TypeOperations::for_inference(db, ProgramEnvironment::from_program(self.program(db)));
+        let env = env.in_environment(ProgramEnvironment::from_program(self.program(db)));
         let partial = self.specialize_partial(db, &env, std::iter::repeat_n(None, self.len(db)));
         if known_class == Some(KnownClass::Tuple) {
             let env = ProgramEnvironment::from_program(self.program(db));

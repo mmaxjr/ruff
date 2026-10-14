@@ -433,7 +433,10 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
 
         let mut call_arguments = self.prepare_call_arguments(arguments);
         let binding_callable = if is_generic && !can_infer {
-            class.class_literal(db).default_specialization(db).into()
+            class
+                .class_literal(db)
+                .default_specialization(db, env)
+                .into()
         } else {
             callable_type
         };

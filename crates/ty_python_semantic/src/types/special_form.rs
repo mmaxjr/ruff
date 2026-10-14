@@ -880,10 +880,10 @@ impl SpecialFormType {
 
                 let is_in_metaclass = KnownClass::Type
                     .to_class_literal(db, env)
-                    .to_class_type(db)
+                    .to_class_type(db, env)
                     .is_some_and(|type_class| {
                         class
-                            .default_specialization(db)
+                            .default_specialization(db, env)
                             .is_subclass_of(db, env, type_class)
                     });
                 if is_in_metaclass {
