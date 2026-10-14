@@ -178,7 +178,7 @@ impl<'db> ClassBase<'db> {
         subclass: ClassLiteral<'db>,
     ) -> ClassMetaclass<'db> {
         let metaclass = match self {
-            Self::Class(class) => return class.inferred_metaclass(db),
+            Self::Class(class) => return class.inferred_metaclass(db, env),
             Self::Protocol => {
                 if subclass.file(db).is_stub(db)
                     && file_to_module(db, subclass.program_file(db).resolver_file(db))

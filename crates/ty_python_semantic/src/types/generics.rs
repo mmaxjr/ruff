@@ -4116,8 +4116,11 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         // If no elements survive, keep the original union: inferring from `Never` would discard
         // its type variables and skip the bound checks that reject the argument.
         let actual = if expansion.normalize(db, actual).is_union() {
-            let formal = formal
-                .apply_specialization(db, self.generic_context.unknown_specialization(db, None));
+            let formal = formal.apply_specialization(
+                db,
+                self.env,
+                self.generic_context.unknown_specialization(db, None),
+            );
             actual
                 .discard_disjoint_union_elements(db, self.env, formal, self.inferable)
                 .unless_all_disjoint(actual)
@@ -4131,7 +4134,11 @@ impl<'db, 'c> SpecializationBuilder<'db, 'c> {
         let disjoint_constraints = ConstraintSetBuilder::new();
         let formal = formal.filter_union(db, self.env, |element| {
             !element
-                .apply_specialization(db, self.generic_context.unknown_specialization(db, None))
+                .apply_specialization(
+                    db,
+                    self.env,
+                    self.generic_context.unknown_specialization(db, None),
+                )
                 .when_disjoint_from(db, self.env, actual, &disjoint_constraints, self.inferable)
                 .is_always_satisfied(db, self.env, self.inferable)
         });

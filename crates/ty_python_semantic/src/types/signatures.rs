@@ -1545,7 +1545,7 @@ impl<'db> Signature<'db> {
         // A specialized receiver can make generic receiver annotations concrete enough to compare.
         if let Some((_, self_specialization)) = self_type.class_specialization(db, env) {
             expected_self_ty =
-                expected_self_ty.apply_optional_specialization(db, Some(self_specialization));
+                expected_self_ty.apply_optional_specialization(db, env, Some(self_specialization));
 
             // Specialization can also make the receiver annotation trivially compatible.
             if accepts_any_or_exact_self(expected_self_ty) {
@@ -1865,7 +1865,7 @@ impl<'db> Signature<'db> {
 
         let return_ty = signature_specialization.map_or_else(
             || unspecialized_return_ty,
-            |specialization| unspecialized_return_ty.apply_specialization(db, specialization),
+            |specialization| unspecialized_return_ty.apply_specialization(db, env, specialization),
         );
 
         signature.with_return_type(return_ty)

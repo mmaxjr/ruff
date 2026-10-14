@@ -9,7 +9,7 @@ use crate::types::type_alias::TypeAliasType;
 use crate::types::typevar::TypeVarSet;
 use crate::types::{CallableType, ErrorContext, Type, TypeOperations};
 
-use super::{DisjointnessChecker, TypeRelationChecker};
+use super::{ComparisonKind, ComparisonPolicy, DisjointnessChecker, TypeRelationChecker};
 
 /// A relation whose pair guard has already been installed.
 ///
@@ -250,16 +250,37 @@ impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
         source: CallableType<'db>,
         target: CallableType<'db>,
     ) -> ConstraintSet<'db, 'c> {
-        self.disjointness_visitor
-            .callable_returns
-            .visit_active_with_expansion(
+        self.env
+            .context()
+            .state()
+            .comparisons
+            .get_or_init(Box::default)
+            .visit(
                 db,
+                self.env,
                 (Type::Callable(source), Type::Callable(target)),
-                self.materialization_visitor,
-                |expansion| match expansion {
-                    Ok(expansion) => GuardedDisjointness::new(self, expansion)
-                        .compare_callable_returns(db, source, target),
-                    Err(_) => self.never(),
+                ComparisonPolicy {
+                    kind: ComparisonKind::CallableReturns,
+                    inferable: self.inferable,
+                    provenance: self.provenance,
+                    perform_expensive_checks: self.perform_expensive_checks,
+                },
+                |cycle| {
+                    if cycle.is_some() {
+                        return self.never();
+                    }
+                    self.disjointness_visitor
+                        .callable_returns
+                        .visit_active_with_expansion(
+                            db,
+                            (Type::Callable(source), Type::Callable(target)),
+                            self.materialization_visitor,
+                            |expansion| match expansion {
+                                Ok(expansion) => GuardedDisjointness::new(self, expansion)
+                                    .compare_callable_returns(db, source, target),
+                                Err(_) => self.never(),
+                            },
+                        )
                 },
             )
     }

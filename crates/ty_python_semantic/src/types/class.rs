@@ -1643,16 +1643,19 @@ impl<'db> ClassType<'db> {
     }
 
     /// Return the metaclass of this class, or `type[Unknown]` if the metaclass cannot be inferred.
-    pub(super) fn metaclass(self, db: &'db dyn Db) -> Type<'db> {
-        let env = ProgramEnvironment::from_file(self.class_literal(db).program_file(db));
-        self.inferred_metaclass(db).to_type(db, &env)
+    pub(super) fn metaclass(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
+        self.inferred_metaclass(db, env).to_type(db, env)
     }
 
-    pub(super) fn inferred_metaclass(self, db: &'db dyn Db) -> ClassMetaclass<'db> {
+    pub(super) fn inferred_metaclass(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+    ) -> ClassMetaclass<'db> {
         let (class, specialization) = self.class_literal_and_specialization(db);
         match class.inferred_metaclass(db) {
             ClassMetaclass::Selected(metaclass) => ClassMetaclass::Selected(
-                metaclass.apply_optional_specialization(db, specialization),
+                metaclass.apply_optional_specialization(db, env, specialization),
             ),
             ClassMetaclass::ProtocolFallback => ClassMetaclass::ProtocolFallback,
         }
@@ -1887,11 +1890,11 @@ impl<'db> ClassType<'db> {
         // that `type` is its own metaclass (and we know that `type` can coexist in an MRO
         // with any other arbitrary class, anyway).
         let type_class = KnownClass::Type.to_class_literal(db, env);
-        let self_metaclass = self.inferred_metaclass(db).for_inheritance(db, env);
+        let self_metaclass = self.inferred_metaclass(db, env).for_inheritance(db, env);
         if self_metaclass == type_class {
             return true;
         }
-        let other_metaclass = other.inferred_metaclass(db).for_inheritance(db, env);
+        let other_metaclass = other.inferred_metaclass(db, env).for_inheritance(db, env);
         if other_metaclass == type_class {
             return true;
         }
@@ -1916,7 +1919,7 @@ impl<'db> ClassType<'db> {
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
     ) -> Type<'db> {
-        metaclass_instance_type(db, env, self.metaclass(db))
+        metaclass_instance_type(db, env, self.metaclass(db, env))
     }
 
     /// Returns the class member of this class named `name`.
@@ -1994,7 +1997,9 @@ impl<'db> ClassType<'db> {
                 .map(|specialization| specialization.tuple_runtime_element_specialization(db, env));
             class_literal
                 .own_class_member(db, env, inherited_generic_context, specialization, name)
-                .map_type(|ty| ty.apply_optional_owner_specialization_to_member(db, specialization))
+                .map_type(|ty| {
+                    ty.apply_optional_owner_specialization_to_member(db, env, specialization)
+                })
         };
 
         match name {
@@ -2320,6 +2325,7 @@ impl<'db> ClassType<'db> {
     pub(super) fn converter_input_type_for_field(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         name: &str,
     ) -> Option<Type<'db>> {
         match self {
@@ -2329,7 +2335,9 @@ impl<'db> ClassType<'db> {
             Self::Generic(generic) => generic
                 .origin(db)
                 .converter_input_type_for_field(db, name)
-                .map(|ty| ty.apply_optional_specialization(db, Some(generic.specialization(db)))),
+                .map(|ty| {
+                    ty.apply_optional_specialization(db, env, Some(generic.specialization(db)))
+                }),
             Self::NonGeneric(
                 ClassLiteral::Dynamic(_)
                 | ClassLiteral::DynamicNamedTuple(_)
@@ -2374,7 +2382,11 @@ impl<'db> ClassType<'db> {
                     .origin(db)
                     .own_instance_member(db, env, name)
                     .map_type(|ty| {
-                        ty.apply_optional_owner_specialization_to_member(db, Some(specialization))
+                        ty.apply_optional_owner_specialization_to_member(
+                            db,
+                            env,
+                            Some(specialization),
+                        )
                     })
             }
         }
@@ -3054,7 +3066,8 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
                 .then_some(declared)
             };
             return declaration.map(|declaration| {
-                declaration.map_type(|ty| ty.apply_optional_specialization(db, specialization))
+                declaration
+                    .map_type(|ty| ty.apply_optional_specialization(db, &self.env, specialization))
             });
         }
         None
@@ -3090,7 +3103,7 @@ impl<'db, I: Iterator<Item = ClassBase<'db>>> MroLookup<'db, I> {
             for definition in bindings.definitions(db) {
                 let inferred_ty = infer_definition_types(db, *definition)
                     .binding_type(*definition)
-                    .apply_optional_specialization(db, specialization);
+                    .apply_optional_specialization(db, env, specialization);
                 union = union.add(inferred_ty);
                 provenance = provenance.or(Provenance::SingleDefinition(*definition));
             }

@@ -1,10 +1,10 @@
-use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
 use std::borrow::Cow;
 use std::cell::RefCell;
 
 use itertools::Itertools;
 use rustc_hash::{FxHashMap, FxHashSet};
+use ty_python_core::Program;
 
 use crate::place::{DefinedPlace, Place};
 use crate::types::callable::{CallableTypeKind, LambdaSignatureKey};
@@ -30,14 +30,72 @@ use crate::types::{
 use crate::{
     Db,
     types::{
-        ErrorContext, ErrorContextTree, Type, TypePair, constraints::ConstraintSet,
-        typevar::TypeVarSet,
+        ErrorContext, ErrorContextTree, Type, constraints::ConstraintSet, typevar::TypeVarSet,
     },
 };
 
 mod expansion;
 
 use expansion::{GuardedDisjointness, GuardedRelation};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum ComparisonKind {
+    Relation(TypeRelation, TypeVarEvaluation),
+    Disjointness,
+    CallableReturns,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ComparisonPolicy<'db> {
+    kind: ComparisonKind,
+    inferable: TypeVarSet<'db>,
+    provenance: ConstraintProvenance,
+    perform_expensive_checks: bool,
+}
+
+type ComparisonKey<'db> = (Type<'db>, (Program<'db>, ComparisonPolicy<'db>), Type<'db>);
+
+/// Active comparisons shared by every helper in the consuming operation.
+///
+/// A nested constraint builder has different result storage, but must still see the comparison
+/// that caused it to be created. Different relations retain distinct recursive assumptions.
+pub(super) struct ComparisonRecursion<'db> {
+    active: CycleDetector<'db, ComparisonKind, ComparisonKey<'db>, (), 1>,
+}
+
+impl Default for ComparisonRecursion<'_> {
+    fn default() -> Self {
+        Self {
+            active: CycleDetector::new(()),
+        }
+    }
+}
+
+impl<'db> ComparisonRecursion<'db> {
+    pub(super) fn revision(&self) -> u64 {
+        self.active.revision()
+    }
+
+    pub(super) fn is_active(&self) -> bool {
+        self.active.is_active()
+    }
+
+    fn visit<R>(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        operands: (Type<'db>, Type<'db>),
+        policy: ComparisonPolicy<'db>,
+        compute: impl FnOnce(Option<(Type<'db>, Type<'db>)>) -> R,
+    ) -> R {
+        self.active.visit_active_pair(
+            db,
+            env,
+            (operands.0, (env.program(db), policy), operands.1),
+            |cycle| compute(cycle.map(|(_, previous)| (previous.0, previous.2))),
+        )
+    }
+}
 
 /// A non-exhaustive enumeration of relations that can exist between types.
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -478,29 +536,18 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> bool {
-        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| false, heap_size=ruff_memory_usage::heap_size)]
-        fn is_constraint_set_subtype_of_impl<'db>(db: &'db dyn Db, types: TypePair<'db>) -> bool {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(types.program(db)),
-            );
-            let constraints = ConstraintSetBuilder::new();
-            types
-                .first(db)
-                .has_relation_to_with_typevar_evaluation(
-                    db,
-                    &env,
-                    types.second(db),
-                    &constraints,
-                    TypeVarSet::None,
-                    TypeRelation::Subtyping,
-                    TypeVarEvaluation::Lazy,
-                    ConstraintProvenance::Evidence,
-                )
-                .is_always_satisfied(db, &env, TypeVarSet::None)
-        }
-
-        is_constraint_set_subtype_of_impl(db, TypePair::new(db, env.program(db), self, target))
+        let constraints = ConstraintSetBuilder::new();
+        self.has_relation_to_with_typevar_evaluation(
+            db,
+            env,
+            target,
+            &constraints,
+            TypeVarSet::None,
+            TypeRelation::Subtyping,
+            TypeVarEvaluation::Lazy,
+            ConstraintProvenance::Evidence,
+        )
+        .is_always_satisfied(db, env, TypeVarSet::None)
     }
 
     pub(super) fn when_assignable_to<'c>(
@@ -528,46 +575,22 @@ impl<'db> Type<'db> {
         target: Type<'db>,
         inferable: TypeVarSet<'db>,
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
-        #[salsa::tracked(
-            returns(ref),
-            cycle_initial=|_, _, _, _| OwnedConstraintSet::always(),
-            heap_size=ruff_memory_usage::heap_size,
-        )]
-        fn when_assignable_to_owned_impl<'db>(
-            db: &'db dyn Db,
-            types: TypePair<'db>,
-            inferable: TypeVarSet<'db>,
-        ) -> OwnedConstraintSet<'db> {
-            let program = types.program(db);
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            let constraints = ConstraintSetBuilder::new();
-            constraints.into_owned(|constraints| {
-                let source = types.first(db);
-                let target = types.second(db);
-
-                source.has_relation_to(
-                    db,
-                    &env,
-                    target,
-                    constraints,
-                    inferable,
-                    TypeRelation::Assignability,
-                )
-            })
-        }
-
         self.assert_not_recursive_var();
         target.assert_not_recursive_var();
         if self.is_trivially_constraint_set_assignable_to(db, target) {
             return Cow::Owned(OwnedConstraintSet::always());
         }
-
-        let program = env.program(db);
-        Cow::Borrowed(when_assignable_to_owned_impl(
-            db,
-            TypePair::new(db, program, self, target),
-            inferable,
-        ))
+        let constraints = ConstraintSetBuilder::new();
+        Cow::Owned(constraints.into_owned(|constraints| {
+            self.has_relation_to(
+                db,
+                env,
+                target,
+                constraints,
+                inferable,
+                TypeRelation::Assignability,
+            )
+        }))
     }
 
     /// Returns whether constraint-set assignability is known to be unconditionally satisfied
@@ -598,7 +621,7 @@ impl<'db> Type<'db> {
         }
     }
 
-    /// Returns an _owned_ (i.e. salsa-cached) constraint set that describes when `self` is
+    /// Returns an owned constraint set that describes when `self` is
     /// constraint-set assignable to `target`.
     ///
     /// Recursive relations are evaluated coinductively: a cycle is provisionally satisfied until
@@ -609,44 +632,22 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         target: Type<'db>,
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
-        #[salsa::tracked(
-            returns(ref),
-            cycle_initial=|_, _, _| OwnedConstraintSet::always(),
-            heap_size=ruff_memory_usage::heap_size,
-        )]
-        fn when_constraint_set_assignable_to_owned_impl<'db>(
-            db: &'db dyn Db,
-            types: TypePair<'db>,
-        ) -> OwnedConstraintSet<'db> {
-            let program = types.program(db);
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            let constraints = ConstraintSetBuilder::new();
-            constraints.into_owned(|constraints| {
-                let source = types.first(db);
-                let target = types.second(db);
-
-                source.has_relation_to_with_typevar_evaluation(
-                    db,
-                    &env,
-                    target,
-                    constraints,
-                    TypeVarSet::None,
-                    TypeRelation::Assignability,
-                    TypeVarEvaluation::Lazy,
-                    ConstraintProvenance::Evidence,
-                )
-            })
-        }
-
         if self.is_trivially_constraint_set_assignable_to(db, target) {
             return Cow::Owned(OwnedConstraintSet::always());
         }
-
-        let program = env.program(db);
-        Cow::Borrowed(when_constraint_set_assignable_to_owned_impl(
-            db,
-            TypePair::new(db, program, self, target),
-        ))
+        let constraints = ConstraintSetBuilder::new();
+        Cow::Owned(constraints.into_owned(|constraints| {
+            self.has_relation_to_with_typevar_evaluation(
+                db,
+                env,
+                target,
+                constraints,
+                TypeVarSet::None,
+                TypeRelation::Assignability,
+                TypeVarEvaluation::Lazy,
+                ConstraintProvenance::Evidence,
+            )
+        }))
     }
 
     pub(super) fn when_constraint_set_assignable_to<'c>(
@@ -694,29 +695,7 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> bool {
-        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| true, heap_size=ruff_memory_usage::heap_size)]
-        fn is_redundant_with_impl<'db>(db: &'db dyn Db, types: TypePair<'db>) -> bool {
-            let program = types.program(db);
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            types
-                .first(db)
-                .has_relation_to(
-                    db,
-                    &env,
-                    types.second(db),
-                    &ConstraintSetBuilder::new(),
-                    TypeVarSet::None,
-                    TypeRelation::Redundancy { pure: false },
-                )
-                .is_always_satisfied(db, &env, TypeVarSet::None)
-        }
-
-        if self == other {
-            return true;
-        }
-
-        let program = env.program(db);
-        is_redundant_with_impl(db, TypePair::new(db, program, self, other))
+        self.is_redundant_with_recursion(db, env, other, env.context())
     }
 
     /// Preserve active comparisons across normalization and signature expansion. Results from
@@ -912,42 +891,20 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         other: Type<'db>,
     ) -> Cow<'db, OwnedConstraintSet<'db>> {
-        #[salsa::tracked(
-            returns(ref),
-            cycle_initial=|_, _, _| OwnedConstraintSet::always(),
-            heap_size=ruff_memory_usage::heap_size,
-        )]
-        fn when_constraint_set_equivalent_to_impl<'db>(
-            db: &'db dyn Db,
-            types: TypePair<'db>,
-        ) -> OwnedConstraintSet<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(types.program(db)),
-            );
-            let constraints = ConstraintSetBuilder::new();
-            let materialization_visitor = ApplyTypeMappingVisitor::new(&env);
-            constraints.into_owned(|constraints| {
-                types
-                    .first(db)
-                    .when_equivalent_to_with_materialization_visitor(
-                        db,
-                        types.second(db),
-                        constraints,
-                        &materialization_visitor,
-                        TypeVarEvaluation::Lazy,
-                    )
-            })
-        }
-
         if self == other {
             return Cow::Owned(OwnedConstraintSet::always());
         }
-
-        Cow::Borrowed(when_constraint_set_equivalent_to_impl(
-            db,
-            TypePair::new(db, env.program(db), self, other),
-        ))
+        let constraints = ConstraintSetBuilder::new();
+        let mapping = env.mapping();
+        Cow::Owned(constraints.into_owned(|constraints| {
+            self.when_equivalent_to_with_materialization_visitor(
+                db,
+                other,
+                constraints,
+                &mapping,
+                TypeVarEvaluation::Lazy,
+            )
+        }))
     }
 
     pub(super) fn is_constraint_set_equivalent_to(
@@ -1781,6 +1738,41 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
     }
 
     fn with_recursion_guard(
+        &self,
+        db: &'db dyn Db,
+        source: Type<'db>,
+        target: Type<'db>,
+        work: impl FnOnce(&GuardedRelation<'_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
+    ) -> ConstraintSet<'db, 'c> {
+        self.env
+            .context()
+            .state()
+            .comparisons
+            .get_or_init(Box::default)
+            .visit(
+                db,
+                self.env,
+                (source, target),
+                ComparisonPolicy {
+                    kind: ComparisonKind::Relation(self.relation, self.typevar_evaluation),
+                    inferable: self.inferable,
+                    provenance: self.provenance,
+                    perform_expensive_checks: self.perform_expensive_checks,
+                },
+                |cycle| match cycle {
+                    Some((previous_source, previous_target)) => self.recursive_type_pair_fallback(
+                        db,
+                        source,
+                        target,
+                        previous_source,
+                        previous_target,
+                    ),
+                    None => self.with_local_recursion_guard(db, source, target, work),
+                },
+            )
+    }
+
+    fn with_local_recursion_guard(
         &self,
         db: &'db dyn Db,
         source: Type<'db>,
@@ -3500,12 +3492,33 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
         target: Type<'db>,
         work: impl FnOnce(&GuardedDisjointness<'_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c> {
-        self.disjointness_visitor.types.visit_with_expansion(
-            db,
-            (source, target),
-            self.materialization_visitor,
-            |expansion| work(&GuardedDisjointness::new(self, expansion)),
-        )
+        self.env
+            .context()
+            .state()
+            .comparisons
+            .get_or_init(Box::default)
+            .visit(
+                db,
+                self.env,
+                (source, target),
+                ComparisonPolicy {
+                    kind: ComparisonKind::Disjointness,
+                    inferable: self.inferable,
+                    provenance: self.provenance,
+                    perform_expensive_checks: self.perform_expensive_checks,
+                },
+                |cycle| {
+                    if cycle.is_some() {
+                        return self.never();
+                    }
+                    self.disjointness_visitor.types.visit_with_expansion(
+                        db,
+                        (source, target),
+                        self.materialization_visitor,
+                        |expansion| work(&GuardedDisjointness::new(self, expansion)),
+                    )
+                },
+            )
     }
 
     fn any_protocol_members_absent_or_disjoint(

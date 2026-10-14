@@ -1240,6 +1240,22 @@ impl<'db, Tag, T, const INLINE_CAPACITY: usize> CycleDetector<'db, Tag, T, (), I
 where
     T: Hash + Eq + Clone + HasIdentity<'db>,
 {
+    /// Keep a comparison active and report the earlier operands when it recurs.
+    /// Completed answers belong to the consuming operation, not this shared guard.
+    pub(super) fn visit_active_pair<R>(
+        &self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        item: T,
+        compute: impl FnOnce(Option<(T, T)>) -> R,
+    ) -> R {
+        match self.begin_active_visit(db, env, item.clone()) {
+            CycleDetectorVisit::Ready(()) => compute(Some((item.clone(), item))),
+            CycleDetectorVisit::Cycle(item, previous) => compute(Some((item, previous))),
+            CycleDetectorVisit::Pending(_guard) => compute(None),
+        }
+    }
+
     /// Run an operation that cannot provide a value when it recurses. Exact and growing cycles
     /// both return `None`; completed results are not cached.
     pub(crate) fn try_visit_active<U>(

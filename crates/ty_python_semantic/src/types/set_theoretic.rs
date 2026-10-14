@@ -1,4 +1,3 @@
-use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
 use itertools::Either;
 use rustc_hash::FxHashSet;
@@ -14,8 +13,7 @@ use crate::types::enums::EnumComplement;
 use crate::types::recursive::{StructuralTraversal, StructuralTypeTraversal};
 use crate::types::{
     ApplyTypeMappingVisitor, CycleKind, InstanceProjection, ProjectInstance, PromotionKind,
-    PromotionMode, Type, TypeContext, TypeMapping, TypePair, TypeQualifiers, TypeQueryContext,
-    TypeWalk,
+    PromotionMode, Type, TypeContext, TypeMapping, TypeQualifiers, TypeQueryContext, TypeWalk,
 };
 use crate::types::{TypeVarBoundOrConstraints, visitor};
 use crate::{Db, FxOrderSet};
@@ -249,26 +247,7 @@ impl<'db> UnionType<'db> {
         a: Type<'db>,
         b: Type<'db>,
     ) -> Type<'db> {
-        #[salsa::tracked(
-            returns(copy),
-            cycle_initial=|_, id, _| Type::divergent(id),
-            cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, types: TypePair<'db>| {
-                result.cycle_normalized(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(types.program(db))), *previous, cycle)
-            },
-            heap_size=ruff_memory_usage::heap_size
-        )]
-        fn union_from_two_elements<'db>(db: &'db dyn Db, types: TypePair<'db>) -> Type<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(types.program(db)),
-            );
-            UnionBuilder::new(db, &env)
-                .add(types.first(db))
-                .add(types.second(db))
-                .build()
-        }
-
-        union_from_two_elements(db, TypePair::new(db, env.program(db), a, b))
+        UnionBuilder::new(db, env).add(a).add(b).build()
     }
 
     /// Create a union from a list of elements without unpacking type aliases.
@@ -1204,25 +1183,9 @@ impl<'db> IntersectionType<'db> {
         a: Type<'db>,
         b: Type<'db>,
     ) -> Type<'db> {
-        #[salsa::tracked(
-            returns(copy),
-            cycle_initial=|_, id, _| Type::divergent(id),
-            cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, types: TypePair<'db>| {
-                result.cycle_normalized(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(types.program(db))), *previous, cycle)
-            },
-            heap_size=ruff_memory_usage::heap_size
-        )]
-        fn intersection_from_two_elements<'db>(db: &'db dyn Db, types: TypePair<'db>) -> Type<'db> {
-            let env = TypeOperations::for_inference(
-                db,
-                ProgramEnvironment::from_program(types.program(db)),
-            );
-            IntersectionBuilder::new(db, &env)
-                .positive_elements([types.first(db), types.second(db)])
-                .build()
-        }
-
-        intersection_from_two_elements(db, TypePair::new(db, env.program(db), a, b))
+        IntersectionBuilder::new(db, env)
+            .positive_elements([a, b])
+            .build()
     }
 
     pub(crate) fn recursive_type_normalized_impl(

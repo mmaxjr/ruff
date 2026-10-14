@@ -2181,23 +2181,35 @@ impl<'db> Bindings<'db> {
                                     if let Some(first_param) = params.get_positional(first_index) {
                                         let mut input_ty = first_param.annotated_type();
                                         if let Some(specialization) = default_specialization {
-                                            input_ty =
-                                                input_ty.apply_specialization(db, specialization);
+                                            input_ty = input_ty.apply_specialization(
+                                                db,
+                                                env,
+                                                specialization,
+                                            );
                                         }
                                         input_types = input_types.add(input_ty);
                                         if let Some(specialization) = default_specialization {
-                                            return_ty =
-                                                return_ty.apply_specialization(db, specialization);
+                                            return_ty = return_ty.apply_specialization(
+                                                db,
+                                                env,
+                                                specialization,
+                                            );
                                         }
                                         output_types = output_types.add(return_ty);
                                         found_any = true;
                                     } else if let Some((_, variadic)) = params.variadic() {
                                         let mut input_ty = variadic.annotated_type();
                                         if let Some(specialization) = default_specialization {
-                                            input_ty =
-                                                input_ty.apply_specialization(db, specialization);
-                                            return_ty =
-                                                return_ty.apply_specialization(db, specialization);
+                                            input_ty = input_ty.apply_specialization(
+                                                db,
+                                                env,
+                                                specialization,
+                                            );
+                                            return_ty = return_ty.apply_specialization(
+                                                db,
+                                                env,
+                                                specialization,
+                                            );
                                         }
                                         input_types = input_types.add(input_ty);
                                         output_types = output_types.add(return_ty);
@@ -2205,8 +2217,11 @@ impl<'db> Bindings<'db> {
                                     } else if params.is_gradual() {
                                         input_types = input_types.add(Type::unknown());
                                         if let Some(specialization) = default_specialization {
-                                            return_ty =
-                                                return_ty.apply_specialization(db, specialization);
+                                            return_ty = return_ty.apply_specialization(
+                                                db,
+                                                env,
+                                                specialization,
+                                            );
                                         }
                                         output_types = output_types.add(return_ty);
                                         found_any = true;
@@ -4323,6 +4338,7 @@ impl<'db> CallableBinding<'db> {
                                 .annotated_type();
                             let parameter_type = raw_parameter_type.apply_optional_specialization(
                                 db,
+                                env,
                                 overload.merged_specialization(db, env),
                             );
                             OverloadFilterSlot {
@@ -6005,6 +6021,7 @@ impl<'db> ArgumentTypeChecker<'_, 'db> {
                                         let specialized_candidate = candidate
                                             .apply_optional_specialization(
                                                 db,
+                                                self.env,
                                                 self.merged_specialization(),
                                             );
                                         argument_type
@@ -6435,7 +6452,7 @@ impl<'db> CallInference<'_, 'db> {
                 // `_VT` is still unsolved. Variables without a preference retain their identity.
                 if preferred_ty.is_none_or(|ty| {
                     !lower
-                        .apply_optional_specialization(db, preferred_specialization)
+                        .apply_optional_specialization(db, self.env, preferred_specialization)
                         .is_assignable_to(db, self.env, ty)
                 }) {
                     return maybe_promote(typevar, bounds);
@@ -6580,7 +6597,7 @@ impl<'db> CallInference<'_, 'db> {
 
         if self.signature.generic_context.is_some() {
             let specialization = builder.build_merged_with(|_, _| None);
-            let expected_ty = formal.apply_specialization(db, specialization);
+            let expected_ty = formal.apply_specialization(db, self.env, specialization);
 
             // The legacy solver keeps the first pack when another occurrence has a different length.
             if let (Some(expected_tuple), Some(actual_tuple)) = (
@@ -6607,7 +6624,7 @@ impl<'db> CallInference<'_, 'db> {
             return !check_type_context
                 || self.is_partial_application
                 || actual
-                    .apply_specialization(db, specialization)
+                    .apply_specialization(db, self.env, specialization)
                     .is_assignable_to(db, self.env, expected_ty);
         }
 
@@ -6883,9 +6900,9 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
         let mut expected_ty = declared_type;
         if let Some(specialization) = self.merged_specialization() {
             if !constructor_receiver {
-                argument_type = argument_type.apply_specialization(db, specialization);
+                argument_type = argument_type.apply_specialization(db, self.env, specialization);
             }
-            expected_ty = expected_ty.apply_specialization(db, specialization);
+            expected_ty = expected_ty.apply_specialization(db, self.env, specialization);
         }
 
         // Some typing special forms are valid class-info arguments at runtime but are not
@@ -7423,6 +7440,7 @@ impl<'a, 'db> ArgumentTypeChecker<'a, 'db> {
 
         let return_ty = self.return_ty.apply_optional_specialization(
             self.db,
+            self.env,
             self.inference
                 .map(|inference| inference.merged_specialization(self.db, self.env)),
         );
@@ -7945,6 +7963,7 @@ impl<'db> Binding<'db> {
         // type variables in the same way as for arguments to an ordinary generic call.
         Some(parameter_type.apply_optional_specialization(
             db,
+            env,
             specialized_overload.argument_type_context_specialization(
                 db,
                 env,
@@ -8138,7 +8157,7 @@ impl<'db> Binding<'db> {
                     }),
                 )
             });
-            parameter_type = parameter_type.apply_optional_specialization(db, specialization);
+            parameter_type = parameter_type.apply_optional_specialization(db, env, specialization);
             if let Some(expected_return_ty) = call_expression_tcx.annotation
                 && let Some(expected) = self.typevartuple_argument_context(
                     db,

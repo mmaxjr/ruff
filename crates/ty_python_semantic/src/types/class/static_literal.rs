@@ -339,7 +339,11 @@ impl<'db> StaticClassLiteral<'db> {
                             let base_specialization = base_class
                                 .static_class_literal(db)
                                 .and_then(|(_, spec)| spec);
-                            return Some(ty.apply_optional_specialization(db, base_specialization));
+                            return Some(ty.apply_optional_specialization(
+                                db,
+                                env,
+                                base_specialization,
+                            ));
                         }
                     }
                     ClassLiteral::Dynamic(dynamic) => {
@@ -1459,7 +1463,11 @@ impl<'db> StaticClassLiteral<'db> {
                     // An inherited method's `Self` bound can still contain this class's type
                     // variables, so the default arguments must also specialize that bound.
                     member.map_type(|ty| {
-                        ty.apply_optional_owner_specialization_to_member(db, Some(specialization))
+                        ty.apply_optional_owner_specialization_to_member(
+                            db,
+                            env,
+                            Some(specialization),
+                        )
                     })
                 }
             }
@@ -2778,7 +2786,7 @@ impl<'db> StaticClassLiteral<'db> {
                 };
 
                 default_ty =
-                    default_ty.map(|ty| ty.apply_optional_specialization(db, specialization));
+                    default_ty.map(|ty| ty.apply_optional_specialization(db, &env, specialization));
 
                 let mut init = true;
                 let mut kw_only = None;
@@ -2844,7 +2852,7 @@ impl<'db> StaticClassLiteral<'db> {
                 };
 
                 let mut field = Field {
-                    declared_ty: attr_ty.apply_optional_specialization(db, specialization),
+                    declared_ty: attr_ty.apply_optional_specialization(db, &env, specialization),
                     kind,
                     first_declaration,
                 };

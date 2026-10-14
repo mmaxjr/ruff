@@ -117,12 +117,17 @@ impl<'db> FieldMetadata<'db> {
     /// ```py
     /// field: int = Field(default=0, alias="field_alias")
     /// ```
-    fn collect_from_rhs_type(&mut self, db: &'db dyn Db, rhs_type: Option<Type<'db>>) {
+    fn collect_from_rhs_type(
+        &mut self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        rhs_type: Option<Type<'db>>,
+    ) {
         match rhs_type {
             Some(Type::KnownInstance(KnownInstanceType::Field(field))) => {
                 // `own_fields_inner` has already specialized the right-hand side, including
                 // the default value inside a field specifier.
-                self.merge_field(db, field, None);
+                self.merge_field(db, env, field, None);
             }
             Some(rhs_type) => self.default_ty = Some(rhs_type),
             None => {}
@@ -254,7 +259,7 @@ impl<'db> FieldMetadata<'db> {
             ) {
                 let field_type = definition_expression_type(db, definition, metadata);
                 if let Type::KnownInstance(KnownInstanceType::Field(field)) = field_type {
-                    self.merge_field(db, field, specialization);
+                    self.merge_field(db, env, field, specialization);
                 } else {
                     self.merge_field_call(db, env, definition, call, field_type, specialization);
                 }
@@ -271,11 +276,13 @@ impl<'db> FieldMetadata<'db> {
     fn merge_field(
         &mut self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         field: FieldInstance<'db>,
         specialization: Option<Specialization<'db>>,
     ) {
         if let Some(default_type) = field.default_type(db) {
-            self.default_ty = Some(default_type.apply_optional_specialization(db, specialization));
+            self.default_ty =
+                Some(default_type.apply_optional_specialization(db, env, specialization));
         }
         self.init &= field.init(db);
         if let Some(alias) = field.alias(db) {
@@ -299,10 +306,11 @@ impl<'db> FieldMetadata<'db> {
             let default_type = definition_expression_type(db, definition, default);
             if !default_type.is_instance_of(db, KnownClass::EllipsisType) {
                 self.default_ty =
-                    Some(default_type.apply_optional_specialization(db, specialization));
+                    Some(default_type.apply_optional_specialization(db, env, specialization));
             }
         } else if call.arguments.find_keyword("default_factory").is_some() {
-            self.default_ty = Some(call_type.apply_optional_specialization(db, specialization));
+            self.default_ty =
+                Some(call_type.apply_optional_specialization(db, env, specialization));
         }
 
         if let Some(init) = call.arguments.find_keyword("init") {
@@ -342,7 +350,7 @@ pub(in crate::types) fn field_metadata<'db>(
     if let Some(definition) = definition {
         metadata.collect_from_annotation(db, env, definition, specialization);
     }
-    metadata.collect_from_rhs_type(db, rhs_type);
+    metadata.collect_from_rhs_type(db, env, rhs_type);
     metadata
 }
 

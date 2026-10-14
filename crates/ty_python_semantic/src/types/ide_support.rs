@@ -1011,7 +1011,13 @@ impl<'db> CallSignatureDetails<'db> {
         let signature = binding.signature.clone();
         let display_details = signature.display(db, env).to_string_parts();
         let (parameters, parameter_to_displayed_parameter_mapping) =
-            displayed_parameters_for_signature(db, &signature, &display_details, specialization);
+            displayed_parameters_for_signature(
+                db,
+                env,
+                &signature,
+                &display_details,
+                specialization,
+            );
         let argument_to_displayed_parameter_mapping = argument_to_parameter_mapping
             .iter()
             .map(|mapping| {
@@ -1044,6 +1050,7 @@ impl<'db> CallSignatureDetails<'db> {
 /// displayed parameter types.
 fn displayed_parameters_for_signature<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     signature: &Signature<'db>,
     display_details: &crate::types::display::SignatureDisplayDetails,
     specialization: Option<crate::types::generics::Specialization<'db>>,
@@ -1052,7 +1059,7 @@ fn displayed_parameters_for_signature<'db>(
     // call-site substitutions are reflected in the rendered signature. For
     // example, if `_KT` was inferred as `str`, display `str` instead of `_KT`.
     let apply_specialization =
-        |ty: Type<'db>| specialization.map_or(ty, |spec| ty.apply_specialization(db, spec));
+        |ty: Type<'db>| specialization.map_or(ty, |spec| ty.apply_specialization(db, env, spec));
     let parameters = signature.parameters();
 
     match parameters.kind() {

@@ -250,7 +250,7 @@ fn member_contract<'db>(
         let write = if is_slot {
             Some(
                 owner
-                    .converter_input_type_for_field(db, name)
+                    .converter_input_type_for_field(db, env, name)
                     .unwrap_or(read),
             )
         } else {
@@ -265,7 +265,7 @@ fn member_contract<'db>(
             read,
             Some(
                 owner
-                    .converter_input_type_for_field(db, name)
+                    .converter_input_type_for_field(db, env, name)
                     .unwrap_or(read),
             ),
         )

@@ -460,6 +460,7 @@ impl<'db> BoundSuperType<'db> {
 
     fn resolve_class_super_owner(
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         pivot_class: ClassBase<'db>,
         pivot_class_type: Type<'db>,
         owner_for_error: Type<'db>,
@@ -478,7 +479,7 @@ impl<'db> BoundSuperType<'db> {
                 DescriptorReceiverKind::Class,
             ),
             owner_class
-                .metaclass(db)
+                .metaclass(db, env)
                 .to_class_type(db)
                 .map(|metaclass| {
                     ResolvedSuperOwner::new(
@@ -655,6 +656,7 @@ impl<'db> BoundSuperType<'db> {
                             TypeVarOwnerContext::SubclassOf(_) => {
                                 SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                                     db,
+                                    env,
                                     pivot_class,
                                     pivot_class_type,
                                     owner_type,
@@ -692,6 +694,7 @@ impl<'db> BoundSuperType<'db> {
             }
             Type::ClassLiteral(class) => SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                 db,
+                env,
                 pivot_class,
                 pivot_class_type,
                 owner_type,
@@ -703,6 +706,7 @@ impl<'db> BoundSuperType<'db> {
                 SubclassOfInner::Class(class) => {
                     SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                         db,
+                        env,
                         pivot_class,
                         pivot_class_type,
                         owner_type,
@@ -728,6 +732,7 @@ impl<'db> BoundSuperType<'db> {
                             if let Some(class) = class {
                                 SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                                     db,
+                                    env,
                                     pivot_class,
                                     pivot_class_type,
                                     owner_type,

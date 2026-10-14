@@ -492,6 +492,7 @@ impl<'db> TypeRecursionContext<'db> {
             intersections,
             materialization_equivalence,
             alias_materialization,
+            comparisons,
         } = self.state();
         meta_type.is_active()
             || !normalization.is_empty()
@@ -502,6 +503,7 @@ impl<'db> TypeRecursionContext<'db> {
                 .get()
                 .is_some_and(|guard| guard.is_active())
             || !alias_materialization.is_empty()
+            || comparisons.get().is_some_and(|guard| guard.is_active())
     }
 
     /// Compare two types for simplification. Nested builders retain their members until this
@@ -564,7 +566,7 @@ impl<'db> TypeRecursionContext<'db> {
     }
 }
 
-type TypeRecursionRevision = [u64; 9];
+type TypeRecursionRevision = [u64; 10];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
@@ -583,6 +585,7 @@ impl TypeRecursionContext<'_> {
             intersections,
             materialization_equivalence,
             alias_materialization,
+            comparisons,
         } = self.state();
         [
             aliases.revision(),
@@ -596,6 +599,7 @@ impl TypeRecursionContext<'_> {
                 .get()
                 .map_or(0, |guard| guard.revision()),
             alias_materialization.revision(),
+            comparisons.get().map_or(0, |guard| guard.revision()),
         ]
     }
 }
@@ -609,6 +613,7 @@ struct TypeRecursionState<'db> {
     intersections: OnceCell<Box<IntersectionSimplificationRecursion<'db>>>,
     materialization_equivalence: OnceCell<Box<MaterializationEquivalenceVisitor<'db>>>,
     alias_materialization: ActiveRecursionDetector<TypeAliasType<'db>>,
+    comparisons: OnceCell<Box<relation::ComparisonRecursion<'db>>>,
 }
 
 struct SignatureExpansionTag;
@@ -4649,7 +4654,7 @@ impl<'db> Type<'db> {
             .find_name_in_mro_with_policy(db, env, name, policy)
             .expect("The meta-type of an instance-like type should always have an MRO");
         let Some(metaclass) = class
-            .inferred_metaclass(db)
+            .inferred_metaclass(db, env)
             .for_inheritance(db, env)
             .to_instance_approximation(db, env)
             .and_then(|metaclass| metaclass.nominal_class(db, env))
@@ -8870,10 +8875,11 @@ impl<'db> Type<'db> {
     fn apply_optional_specialization(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Type<'db> {
         if let Some(specialization) = specialization {
-            self.apply_specialization(db, specialization)
+            self.apply_specialization(db, env, specialization)
         } else {
             self
         }
@@ -8887,10 +8893,11 @@ impl<'db> Type<'db> {
     fn apply_optional_owner_specialization_to_member(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Option<Specialization<'db>>,
     ) -> Type<'db> {
         if let Some(specialization) = specialization {
-            self.apply_specialization_impl(db, specialization, true)
+            self.apply_specialization_impl(db, env, specialization, true)
         } else {
             self
         }
@@ -8905,9 +8912,10 @@ impl<'db> Type<'db> {
     fn apply_specialization(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Specialization<'db>,
     ) -> Type<'db> {
-        self.apply_specialization_impl(db, specialization, false)
+        self.apply_specialization_impl(db, env, specialization, false)
     }
 
     /// Applies either an ordinary specialization or an enclosing-owner specialization.
@@ -8917,6 +8925,7 @@ impl<'db> Type<'db> {
     fn apply_specialization_impl(
         self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         specialization: Specialization<'db>,
         specialize_self_domain: bool,
     ) -> Type<'db> {
@@ -8987,33 +8996,8 @@ impl<'db> Type<'db> {
             return self;
         }
 
-        self.apply_specialization_inner(db, specialization, specialize_self_domain)
-    }
-
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, id, _, _, _| Type::divergent(id),
-        cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, specialization: Specialization<'db>, _| {
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(
-                specialization.generic_context(db).program(db),
-            ));
-            value.cycle_normalized_impl(db, &env, *previous, cycle)
-        },
-        heap_size=ruff_memory_usage::heap_size
-    )]
-    fn apply_specialization_inner(
-        self,
-        db: &'db dyn Db,
-        specialization: Specialization<'db>,
-        specialize_self_domain: bool,
-    ) -> Type<'db> {
-        let env = &TypeOperations::for_inference(
-            db,
-            ProgramEnvironment::from_program(specialization.generic_context(db).program(db)),
-        );
         let type_mapping =
             TypeMapping::from_specialization(db, specialization, specialize_self_domain);
-
         self.apply_type_mapping(db, env, &type_mapping, TypeContext::default())
     }
 
@@ -10211,7 +10195,7 @@ impl<'db> Type<'db> {
         let mut variables = FxOrderSet::default();
         self.find_legacy_typevars(db, env, None, &mut variables);
         let generic_context = GenericContext::from_typevar_instances(db, env, variables);
-        self.apply_specialization(db, generic_context.default_specialization(db, None))
+        self.apply_specialization(db, env, generic_context.default_specialization(db, None))
     }
 
     fn from_truthiness(db: &'db dyn Db, env: &TypeOperations<'db>, truthiness: Truthiness) -> Self {
@@ -10824,7 +10808,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
                 SubclassOfType::from(db, env, SubclassOfInner::TypeVar(bound_typevar))
             }
             Type::ClassLiteral(class) => class.metaclass(db),
-            Type::GenericAlias(alias) => ClassType::from(alias).metaclass(db),
+            Type::GenericAlias(alias) => ClassType::from(alias).metaclass(db, env),
             Type::SubclassOf(subclass_of_ty)
                 if let SubclassOfInner::TypeVar(typevar) = subclass_of_ty.subclass_of() =>
             {

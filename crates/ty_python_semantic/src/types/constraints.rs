@@ -100,7 +100,6 @@ use itertools::Itertools;
 use ruff_index::{Idx, IndexVec, newtype_index};
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
-use ty_python_core::Program;
 use ty_python_core::rank::RankBitBox;
 use ty_static::EnvVars;
 
@@ -116,9 +115,9 @@ use crate::types::visitor::{
 };
 use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarInstance, DynamicType, IntersectionType, Type,
-    TypeContext, TypeMapping, TypePair, TypeVarBoundOrConstraints, TypeVarVariance, UnionType,
+    TypeContext, TypeMapping, TypeVarBoundOrConstraints, TypeVarVariance, UnionType,
 };
-use crate::{Db, FxIndexMap, FxIndexSet, FxOrderSet, ProgramEnvironment};
+use crate::{Db, FxIndexMap, FxIndexSet, FxOrderSet};
 
 pub(crate) mod paths;
 pub(crate) mod projection;
@@ -390,7 +389,7 @@ impl OwnedConstraintSetInner<'_> {
 ///
 /// [POPL2015]: https://doi.org/10.1145/2676726.2676991
 #[derive(Clone, Copy)]
-pub struct ConstraintSet<'db, 'c> {
+pub(crate) struct ConstraintSet<'db, 'c> {
     /// The BDD representing this constraint set
     node: NodeId,
 
@@ -3382,51 +3381,20 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         target: Type<'db>,
         inferable: TypeVarSet<'db>,
-    ) -> &'db CandidateSolutions<'db> {
-        #[salsa::tracked(
-            returns(ref),
-            cycle_initial=|_, _, _, _, _, _| CandidateSolutions::Unsatisfiable,
-            heap_size=ruff_memory_usage::heap_size,
-        )]
-        fn assignable_solutions_impl<'db>(
-            db: &'db dyn Db,
-            program: Program<'db>,
-            source: Type<'db>,
-            target: Type<'db>,
-            inferable: TypeVarSet<'db>,
-        ) -> CandidateSolutions<'db> {
-            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            let when = source.when_constraint_set_assignable_to_owned(db, env, target);
-            when.query(|builder, when| {
-                let mut storage = builder.storage.borrow_mut();
-                CandidateSolutions::compute(
-                    db,
-                    env,
-                    &mut storage,
-                    when.node,
-                    inferable,
-                    when.source_order,
-                )
-            })
-        }
-
-        let program = env.program(db);
-        assignable_solutions_impl(db, program, self, target, inferable)
+    ) -> CandidateSolutions<'db> {
+        let when = self.when_constraint_set_assignable_to_owned(db, env, target);
+        when.query(|builder, when| {
+            let mut storage = builder.storage.borrow_mut();
+            CandidateSolutions::compute(
+                db,
+                env,
+                &mut storage,
+                when.node,
+                inferable,
+                when.source_order,
+            )
+        })
     }
-}
-
-#[salsa::tracked(
-    returns(copy),
-    cycle_initial = |_, _, _| true,
-    heap_size = get_size2::GetSize::get_heap_size
-)]
-fn is_possibly_constraint_set_assignable<'db>(db: &'db dyn Db, types: TypePair<'db>) -> bool {
-    let program = types.program(db);
-    let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-    types
-        .first(db)
-        .when_constraint_set_assignable_to_owned(db, env, types.second(db))
-        .query(|_storage, when| !when.is_never_satisfied(db, env, TypeVarSet::None))
 }
 
 /// Candidate solutions for a constraint set

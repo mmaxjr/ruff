@@ -1145,7 +1145,7 @@ pub(crate) fn enum_metadata<'db>(
     // through the MRO or falling back to the data-type constructor.
     let user_defined_new = custom_enum_method(db, scope_id, "__new__")
         .or_else(|| inherited_user_defined_enum_new(db, &env, class))
-        .or_else(|| inherited_user_defined_mixin_new(db, class));
+        .or_else(|| inherited_user_defined_mixin_new(db, &env, class));
     let new = resolve_enum_method(user_defined_new, || {
         inherited_known_enum_method(db, &env, class, "__new__")
     });
@@ -1600,6 +1600,7 @@ fn inherited_user_defined_enum_new<'db>(
 /// scalar payload stored by the enum member.
 fn inherited_user_defined_mixin_new<'db>(
     db: &'db dyn Db,
+    env: &TypeOperations<'db>,
     class: StaticClassLiteral<'db>,
 ) -> Option<EnumMethodBinding<'db>> {
     class
@@ -1619,9 +1620,11 @@ fn inherited_user_defined_mixin_new<'db>(
                 return Some(EnumMethodBinding::Opaque);
             };
             Some(
-                match Type::FunctionLiteral(function)
-                    .apply_optional_owner_specialization_to_member(db, specialization)
-                {
+                match Type::FunctionLiteral(function).apply_optional_owner_specialization_to_member(
+                    db,
+                    env,
+                    specialization,
+                ) {
                     Type::FunctionLiteral(function) => EnumMethodBinding::Function(function),
                     _ => EnumMethodBinding::Opaque,
                 },

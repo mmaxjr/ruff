@@ -264,9 +264,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let env = self.program_environment();
         if let Some((alias, parameters)) = self.recursive_implicit_alias_reference(ty, definition) {
             return match parameters {
-                Some(parameters) => {
-                    alias.apply_specialization(db, parameters.default_specialization(db, None))
-                }
+                Some(parameters) => alias.apply_specialization(
+                    db,
+                    self.program_environment(),
+                    parameters.default_specialization(db, None),
+                ),
                 None => alias,
             };
         }
@@ -1334,6 +1336,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                 &|arguments| {
                     alias.apply_specialization(
                         db,
+                        env,
                         parameters.specialize_partial(db, env, arguments.iter().copied()),
                     )
                 },
@@ -1795,6 +1798,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         let specialize = &|types: &[Option<Type<'db>>]| {
             let specialized = value_ty.apply_specialization(
                 db,
+                env,
                 generic_context.specialize_partial(db, env, types.iter().copied()),
             );
 

@@ -9452,7 +9452,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
     ) -> Option<Type<'db>> {
         let db = self.db();
         let env = self.program_environment();
-        let constraint = identity_instance.apply_specialization(db, call_specialization);
+        let constraint = identity_instance.apply_specialization(db, env, call_specialization);
         let Some(receiver_generic_context) = receiver_generic_context else {
             return Some(constraint);
         };

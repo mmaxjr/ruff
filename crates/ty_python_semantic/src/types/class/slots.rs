@@ -567,7 +567,7 @@ impl<'db> StaticClassLiteral<'db> {
         let value_ty = self
             .own_instance_member(db, env, name)
             .ignore_possibly_undefined()
-            .map(|ty| ty.apply_optional_specialization(db, specialization))
+            .map(|ty| ty.apply_optional_specialization(db, env, specialization))
             .unwrap_or_else(Type::unknown);
 
         Type::SlotDescriptor(SlotDescriptorType::new(db, value_ty))

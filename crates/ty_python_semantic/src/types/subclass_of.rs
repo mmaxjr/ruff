@@ -375,7 +375,7 @@ impl<'db> SubclassOfType<'db> {
             // rather than being a class literal. Projecting to instances preserves this
             // constraint when computing its possible subclasses.
             SubclassOfInner::Class(class) => class
-                .inferred_metaclass(db)
+                .inferred_metaclass(db, env)
                 .for_inheritance(db, env)
                 .to_instance_approximation(db, env)
                 .map(|instance| instance.to_meta_type_with_recursion(db, env, context))

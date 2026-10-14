@@ -847,7 +847,7 @@ fn effective_write_type<'db>(
     if let Type::NominalInstance(instance) = object_ty
         && let Some(converter_ty) = instance
             .class(db, env)
-            .converter_input_type_for_field(db, attribute)
+            .converter_input_type_for_field(db, env, attribute)
     {
         converter_ty
     } else {
