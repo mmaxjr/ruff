@@ -1956,18 +1956,17 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
                                     type_alias.name(self.db())
                                 ));
                                 let secondary = self.context.secondary(&*subscript.value);
-                                let value_type = type_alias.raw_value_type(self.db());
-                                if value_type.is_specialized_generic(self.db()) {
+                                type_alias.inspect_definition(db, env, |body| {
+                                    let reason = if body.is_specialized_generic(db) {
+                                        "already specialized"
+                                    } else {
+                                        "not generic"
+                                    };
                                     diagnostic.annotate(secondary.message(format_args!(
-                                        "Alias to `{}`, which is already specialized",
-                                        value_type.display(db, env)
+                                        "Alias to `{}`, which is {reason}",
+                                        body.display_string(db)
                                     )));
-                                } else {
-                                    diagnostic.annotate(secondary.message(format_args!(
-                                        "Alias to `{}`, which is not generic",
-                                        value_type.display(db, env)
-                                    )));
-                                }
+                                });
                             }
 
                             Type::unknown()

@@ -763,7 +763,12 @@ impl<'db> SpecializationFlowVisitor<'db> {
                 });
             }
             RecursiveDefinition::TypeAlias(alias) => {
-                traversal.visit_type(db, alias.raw_value_type(db));
+                if alias
+                    .inspect_definition(db, env, |body| body.visit(db, &traversal))
+                    .is_none()
+                {
+                    return false;
+                }
             }
             RecursiveDefinition::Protocol(origin) => {
                 let Some(protocol) = origin.identity_specialization(db).into_protocol_class(db)

@@ -227,7 +227,7 @@ impl<'db> PEP695TypeAliasType<'db> {
         },
         heap_size=ruff_memory_usage::heap_size
     )]
-    pub(super) fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
+    fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
         let scope = self.rhs_scope(db);
         let program_file = scope.program_file(db);
         let python_file = program_file.python_file(db);
@@ -324,7 +324,7 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
         },
         heap_size=ruff_memory_usage::heap_size
     )]
-    pub(crate) fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
+    fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
         let definition = self.definition(db);
         let module = parsed_module(db, definition.python_file(db)).load(db);
         let DefinitionKind::Assignment(assignment) = definition.kind(db) else {
@@ -532,6 +532,15 @@ impl<'db> TypeAliasType<'db> {
         }
     }
 
+    /// Read the source body only while its consuming operation holds a guard.
+    pub(super) fn resolve_definition(
+        self,
+        db: &'db dyn Db,
+        _access: &super::recursive::BodyAccess<'_, 'db>,
+    ) -> Type<'db> {
+        self.raw_value_type(db)
+    }
+
     /// Resolve the alias body in the current operation. Only the unspecialized source body is
     /// shared across operations; specialization and materialization can depend on active guards.
     pub(super) fn resolve_body(
@@ -572,7 +581,7 @@ impl<'db> TypeAliasType<'db> {
         )
     }
 
-    pub(crate) fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
+    fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
         match self {
             TypeAliasType::PEP695(type_alias) => type_alias.raw_value_type(db),
             TypeAliasType::ManualPEP695(type_alias) => type_alias.raw_value_type(db),

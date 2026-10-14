@@ -1274,6 +1274,38 @@ impl<'db> ExpandedType<'_, 'db> {
         recovery.recover(db, self.ty)
     }
 
+    pub(super) fn is_specialized_generic(&self, db: &'db dyn Db) -> bool {
+        self.ty.is_specialized_generic(db)
+    }
+
+    pub(super) fn display_string(&self, db: &'db dyn Db) -> String {
+        self.ty.display(db, self.mapping.env).to_string()
+    }
+
+    pub(super) fn variance_of(
+        self,
+        db: &'db dyn Db,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        self.ty.variance_of(db, self.mapping.env, typevar)
+    }
+
+    pub(super) fn display_type_alias_declaration(
+        self,
+        db: &'db dyn Db,
+        alias: super::TypeAliasType<'db>,
+    ) -> String {
+        super::display::render_alias_declaration(
+            db,
+            self.mapping.env,
+            Type::TypeAlias(alias),
+            alias.definition(db),
+            alias.name(db),
+            alias.generic_context(db),
+            self.ty,
+        )
+    }
+
     pub(super) fn display_alias_declaration(
         self,
         db: &'db dyn Db,
@@ -1924,6 +1956,29 @@ impl<'db, V: super::visitor::TypeVisitor<'db> + ?Sized> TypeWalk<'db, &V, Struct
 }
 
 impl<'db> super::TypeAliasType<'db> {
+    /// Inspect the declaration without applying arguments or defaults. The body cannot escape
+    /// the callback, and nested reads share the operation's declaration guard.
+    pub(super) fn inspect_definition<R>(
+        self,
+        db: &'db dyn Db,
+        env: &TypeOperations<'db>,
+        inspect: impl FnOnce(ExpandedType<'_, 'db>) -> R,
+    ) -> Option<R> {
+        env.context().state().alias_definitions.visit(
+            env,
+            &self.definition(db),
+            || None,
+            || {
+                let mapping = env.mapping();
+                let access = BodyAccess { env };
+                Some(inspect(ExpandedType {
+                    ty: self.resolve_definition(db, &access),
+                    mapping: &mapping,
+                }))
+            },
+        )
+    }
+
     /// Walk an alias within the visitor's operation, retaining the guard through the walk.
     pub(super) fn walk_body<V: super::visitor::TypeVisitor<'db> + ?Sized>(
         self,

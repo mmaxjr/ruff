@@ -556,7 +556,7 @@ impl<'db> TypeRecursionContext<'db> {
     }
 }
 
-type TypeRecursionRevision = [u64; 19];
+type TypeRecursionRevision = [u64; 20];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
@@ -585,6 +585,7 @@ impl TypeRecursionContext<'_> {
             intersections,
             materialization_equivalence,
             alias_materialization,
+            alias_definitions,
             comparisons,
         } = self.state();
         [
@@ -610,6 +611,7 @@ impl TypeRecursionContext<'_> {
                 .get()
                 .map_or(0, |guard| guard.revision()),
             alias_materialization.revision(),
+            alias_definitions.revision(),
             comparisons.get().map_or(0, |guard| guard.revision()),
         ]
     }
@@ -634,6 +636,7 @@ struct TypeRecursionState<'db> {
     intersections: OnceCell<Box<IntersectionSimplificationRecursion<'db>>>,
     materialization_equivalence: OnceCell<Box<MaterializationEquivalenceVisitor<'db>>>,
     alias_materialization: ActiveRecursionDetector<TypeAliasType<'db>>,
+    alias_definitions: ActiveRecursionDetector<Definition<'db>>,
     comparisons: OnceCell<Box<relation::ComparisonRecursion<'db>>>,
 }
 

@@ -2507,7 +2507,9 @@ impl<'db> TypeVarDefaultSearch<'db, '_> {
                         .references_typevar_default(self)
                 })
         } else {
-            self.visit(alias.raw_value_type(db))
+            alias
+                .inspect_definition(db, self.env, |body| body.references_typevar_default(self))
+                .unwrap_or(false)
         }
     }
 

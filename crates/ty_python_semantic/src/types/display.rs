@@ -1143,15 +1143,9 @@ impl<'db> Type<'db> {
     ) -> Option<String> {
         match self {
             Type::KnownInstance(KnownInstanceType::TypeAliasType(alias))
-            | Type::TypeAlias(alias) => Some(render_alias_declaration(
-                db,
-                env,
-                Type::TypeAlias(alias),
-                alias.definition(db),
-                alias.name(db),
-                alias.generic_context(db),
-                alias.raw_value_type(db),
-            )),
+            | Type::TypeAlias(alias) => alias.inspect_definition(db, env, |body| {
+                body.display_type_alias_declaration(db, alias)
+            }),
             Type::Recursive(recursive) => {
                 recursive.alias(db)?;
                 let constructor = recursive.constructor(db);
