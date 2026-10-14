@@ -28,7 +28,7 @@ use ty_project::watch::{ChangeEvent, ChangedKind, DeletedKind};
 use ty_project::{CheckMode, ProjectMetadata};
 use ty_project::{Db, ProjectDatabase, SemanticDb as _};
 use ty_python_core::program::FallibleStrategy;
-use ty_python_semantic::ProgramEnvironment;
+use ty_python_semantic::TypeOperations;
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -529,7 +529,7 @@ impl Workspace {
 
         let settings = ty_ide::CompletionSettings::default();
         let program_file = self.db.program_file(file_id.file);
-        let env = ProgramEnvironment::from_file(program_file);
+        let env = TypeOperations::for_file(&self.db, program_file);
         let completions = ty_ide::completion(
             &self.db,
             &settings,

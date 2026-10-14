@@ -1,10 +1,13 @@
 //! Consume deferred bodies while the comparison that opened them remains active.
 
 use crate::Db;
-use crate::types::constraints::ConstraintSet;
+use crate::types::callable::{CallableTypes, SignatureSource};
+use crate::types::constraints::{ConstraintSet, IteratorConstraintsExtension};
 use crate::types::recursive::{RecursiveType, TypeExpansionContext};
+use crate::types::signatures::CallableSignature;
 use crate::types::type_alias::TypeAliasType;
-use crate::types::{CallableType, Type};
+use crate::types::typevar::TypeVarSet;
+use crate::types::{CallableType, ErrorContext, Type, TypeOperations};
 
 use super::{DisjointnessChecker, TypeRelationChecker};
 
@@ -12,20 +15,20 @@ use super::{DisjointnessChecker, TypeRelationChecker};
 ///
 /// Expansion returns a comparison result, never an alias body or signature. This keeps the
 /// expanded values inside the comparison that owns their recursion state.
-pub(in crate::types) struct GuardedRelation<'op, 'guard, 'env, 'c, 'db> {
-    checker: &'op TypeRelationChecker<'env, 'c, 'db>,
-    expansion: &'op TypeExpansionContext<'guard, 'env, 'db>,
+pub(super) struct GuardedRelation<'a, 'c, 'db> {
+    checker: &'a TypeRelationChecker<'a, 'c, 'db>,
+    expansion: &'a TypeExpansionContext<'a, 'a, 'db>,
 }
 
-impl<'op, 'guard, 'env, 'c, 'db> GuardedRelation<'op, 'guard, 'env, 'c, 'db> {
+impl<'a, 'c, 'db> GuardedRelation<'a, 'c, 'db> {
     pub(super) fn new(
-        checker: &'op TypeRelationChecker<'env, 'c, 'db>,
-        expansion: &'op TypeExpansionContext<'guard, 'env, 'db>,
+        checker: &'a TypeRelationChecker<'a, 'c, 'db>,
+        expansion: &'a TypeExpansionContext<'a, 'a, 'db>,
     ) -> Self {
         Self { checker, expansion }
     }
 
-    pub(in crate::types) fn compare_source_alias(
+    pub(super) fn compare_source_alias(
         &self,
         db: &'db dyn Db,
         source: TypeAliasType<'db>,
@@ -35,7 +38,7 @@ impl<'op, 'guard, 'env, 'c, 'db> GuardedRelation<'op, 'guard, 'env, 'c, 'db> {
             .check_type_pair(db, source.value_type(db, self.checker.env), target)
     }
 
-    pub(in crate::types) fn compare_target_alias(
+    pub(super) fn compare_target_alias(
         &self,
         db: &'db dyn Db,
         source: Type<'db>,
@@ -45,7 +48,7 @@ impl<'op, 'guard, 'env, 'c, 'db> GuardedRelation<'op, 'guard, 'env, 'c, 'db> {
             .check_type_pair(db, source, target.value_type(db, self.checker.env))
     }
 
-    pub(in crate::types) fn compare_source_recursive(
+    pub(super) fn compare_source_recursive(
         &self,
         db: &'db dyn Db,
         source: RecursiveType<'db>,
@@ -68,7 +71,7 @@ impl<'op, 'guard, 'env, 'c, 'db> GuardedRelation<'op, 'guard, 'env, 'c, 'db> {
         })
     }
 
-    pub(in crate::types) fn compare_target_recursive(
+    pub(super) fn compare_target_recursive(
         &self,
         db: &'db dyn Db,
         source: Type<'db>,
@@ -83,7 +86,7 @@ impl<'op, 'guard, 'env, 'c, 'db> GuardedRelation<'op, 'guard, 'env, 'c, 'db> {
             ))
     }
 
-    pub(in crate::types) fn compare_signatures(
+    pub(super) fn compare_signatures(
         &self,
         db: &'db dyn Db,
         source: CallableType<'db>,
@@ -103,15 +106,15 @@ impl<'op, 'guard, 'env, 'c, 'db> GuardedRelation<'op, 'guard, 'env, 'c, 'db> {
 }
 
 /// Disjointness has a different cycle policy from subtyping, but the same expansion boundary.
-pub(super) struct GuardedDisjointness<'op, 'guard, 'env, 'c, 'db> {
-    checker: &'op DisjointnessChecker<'env, 'c, 'db>,
-    expansion: &'op TypeExpansionContext<'guard, 'env, 'db>,
+pub(super) struct GuardedDisjointness<'a, 'c, 'db> {
+    checker: &'a DisjointnessChecker<'a, 'c, 'db>,
+    expansion: &'a TypeExpansionContext<'a, 'a, 'db>,
 }
 
-impl<'op, 'guard, 'env, 'c, 'db> GuardedDisjointness<'op, 'guard, 'env, 'c, 'db> {
+impl<'a, 'c, 'db> GuardedDisjointness<'a, 'c, 'db> {
     pub(super) fn new(
-        checker: &'op DisjointnessChecker<'env, 'c, 'db>,
-        expansion: &'op TypeExpansionContext<'guard, 'env, 'db>,
+        checker: &'a DisjointnessChecker<'a, 'c, 'db>,
+        expansion: &'a TypeExpansionContext<'a, 'a, 'db>,
     ) -> Self {
         Self { checker, expansion }
     }
@@ -159,4 +162,171 @@ impl<'op, 'guard, 'env, 'c, 'db> GuardedDisjointness<'op, 'guard, 'env, 'c, 'db>
             .map(|target| self.checker.check_type_pair(db, source, target))
             .unwrap_or(self.checker.never())
     }
+}
+
+impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
+    /// Compare saved inputs before expanding two views of the same lambda.
+    pub(super) fn equivalent_lambda_inputs(
+        &self,
+        db: &'db dyn Db,
+        source_callable: CallableType<'db>,
+        target_callable: CallableType<'db>,
+    ) -> bool {
+        if self.relation.is_subtyping()
+            || source_callable.runtime_class(db) != target_callable.runtime_class(db)
+        {
+            return false;
+        }
+        let (SignatureSource::Lambda(source), SignatureSource::Lambda(target)) = (
+            source_callable.signature_source(db),
+            target_callable.signature_source(db),
+        ) else {
+            return false;
+        };
+        self.materialization_visitor
+            .recursion_context()
+            .expand_signature(db, self.env, source_callable, || {
+                source.has_equivalent_signature(db, self.env, *target, |left, right| {
+                    self.as_equivalence_checker()
+                        .check_type_pair(db, left, right)
+                        .is_always_satisfied(db, self.env, TypeVarSet::None)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    /// Check whether one callable type has the given relation to another callable type.
+    ///
+    /// See [`Type::is_subtype_of`] and [`Type::is_assignable_to`] for more details.
+    pub(in crate::types) fn check_callable_pair(
+        &self,
+        db: &'db dyn Db,
+        source: CallableType<'db>,
+        target: CallableType<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        self.with_recursion_guard(
+            db,
+            Type::Callable(source),
+            Type::Callable(target),
+            |expansion| self.check_callable_pair_inner(db, source, target, expansion),
+        )
+    }
+
+    fn check_callable_pair_inner(
+        &self,
+        db: &'db dyn Db,
+        source: CallableType<'db>,
+        target: CallableType<'db>,
+        comparison: &GuardedRelation<'_, 'c, 'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        if target.runtime_class(db).is_some()
+            && target.runtime_class(db) != source.runtime_class(db)
+        {
+            return self.never();
+        }
+        if self.equivalent_lambda_inputs(db, source, target) {
+            return self.always();
+        }
+        comparison.compare_signatures(db, source, target)
+    }
+
+    pub(in crate::types) fn check_callables_vs_callable(
+        &self,
+        db: &'db dyn Db,
+        source: &CallableTypes<'db>,
+        target: CallableType<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        source.iter().when_all(db, self.constraints, |element| {
+            self.check_callable_pair(db, *element, target)
+        })
+    }
+}
+
+impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
+    /// Compare method return types without exposing either expanded signature to the caller.
+    pub(in crate::types) fn check_callable_return_pair(
+        &self,
+        db: &'db dyn Db,
+        source: CallableType<'db>,
+        target: CallableType<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        self.disjointness_visitor
+            .callable_returns
+            .visit_active_with_expansion(
+                db,
+                (Type::Callable(source), Type::Callable(target)),
+                self.materialization_visitor,
+                |expansion| match expansion {
+                    Ok(expansion) => GuardedDisjointness::new(self, expansion)
+                        .compare_callable_returns(db, source, target),
+                    Err(_) => self.never(),
+                },
+            )
+    }
+}
+
+impl<'c, 'db> GuardedDisjointness<'_, 'c, 'db> {
+    fn compare_callable_returns(
+        &self,
+        db: &'db dyn Db,
+        source: CallableType<'db>,
+        target: CallableType<'db>,
+    ) -> ConstraintSet<'db, 'c> {
+        let checker = self.checker;
+        let env = checker.env;
+        // Keep signature substitution active while checking the returns. The pair guard above
+        // belongs to disjointness; the signature guards also cover nested single-type queries.
+        source
+            .inspect_signatures(db, env, |source| {
+                if !signatures_have_only_non_never_returns(db, env, source) {
+                    return checker.never();
+                }
+                target
+                    .inspect_signatures(db, env, |target| {
+                        if !signatures_have_only_non_never_returns(db, env, target) {
+                            return checker.never();
+                        }
+                        // Disjointness distributes over unions. Comparing the overload arms directly
+                        // avoids building and normalizing a union of recursive return types.
+                        source.iter().when_all(db, checker.constraints, |source| {
+                            target.iter().when_all(db, checker.constraints, |target| {
+                                let result =
+                                    checker.check_type_pair(db, source.return_ty, target.return_ty);
+                                if let Some(context) = checker.report_context()
+                                    && result.is_always_satisfied(db, env, checker.inferable)
+                                {
+                                    context.push(ErrorContext::DisjointReturnTypes {
+                                        left: source.return_ty,
+                                        right: target.return_ty,
+                                    });
+                                }
+                                result
+                            })
+                        })
+                    })
+                    .unwrap_or_else(|| checker.never())
+            })
+            .unwrap_or_else(|| checker.never())
+    }
+}
+
+/// Return `true` if a callable has at least one overload and none return `Never`.
+///
+/// Return-type disjointness is a pragmatic approximation for method members: a callable returning
+/// `Never` could satisfy otherwise-incompatible signatures, so it must not establish disjointness.
+fn signatures_have_only_non_never_returns<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    signatures: &CallableSignature<'db>,
+) -> bool {
+    let mut signatures = signatures.iter();
+    let Some(first) = signatures.next() else {
+        return false;
+    };
+    !first.return_ty.has_outer_type(db, env, |ty| ty.is_never())
+        && signatures.all(|signature| {
+            !signature
+                .return_ty
+                .has_outer_type(db, env, |ty| ty.is_never())
+        })
 }

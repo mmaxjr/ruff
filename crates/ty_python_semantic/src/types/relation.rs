@@ -17,7 +17,7 @@ use crate::types::enums::is_single_member_enum;
 use crate::types::function::FunctionDecorators;
 use crate::types::relation_error::ErrorRelation;
 use crate::types::set_theoretic::RecursivelyDefined;
-use crate::types::signatures::{CallableSignature, ParametersKind, SignatureRelationVisitor};
+use crate::types::signatures::{ParametersKind, SignatureRelationVisitor};
 use crate::types::tuple::TupleType;
 use crate::types::typevar::TypeVarDomain;
 use crate::types::{
@@ -37,8 +37,7 @@ use crate::{
 
 mod expansion;
 
-use expansion::GuardedDisjointness;
-pub(super) use expansion::GuardedRelation;
+use expansion::{GuardedDisjointness, GuardedRelation};
 
 /// A non-exhaustive enumeration of relations that can exist between types.
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
@@ -1192,15 +1191,26 @@ impl<'db> HasIdentity<'db> for (Type<'db>, Type<'db>, TypeRelation, TypeVarEvalu
     }
 }
 
-/// A [`PairVisitor`] that is used in `is_disjoint_from` methods.
-pub(crate) type IsDisjointVisitor<'db, 'c> = PairVisitor<'db, IsDisjoint, ConstraintSet<'db, 'c>>;
+/// State for disjointness proofs, with separate guards for callable return types.
+///
+/// Two return types can be disjoint even though the callables themselves overlap. Their
+/// comparisons must not share cached answers or recursive assumptions.
+pub(crate) struct IsDisjointVisitor<'db, 'c> {
+    types: PairVisitor<'db, IsDisjoint, ConstraintSet<'db, 'c>>,
+    callable_returns: PairVisitor<'db, CallableReturnsDisjoint, ()>,
+}
 
 #[derive(Debug)]
 pub(crate) struct IsDisjoint;
 
+struct CallableReturnsDisjoint;
+
 impl<'db, 'c> IsDisjointVisitor<'db, 'c> {
     pub(crate) fn default(constraints: &'c ConstraintSetBuilder<'db>) -> Self {
-        IsDisjointVisitor::new(ConstraintSet::from_bool(constraints, false))
+        Self {
+            types: PairVisitor::new(ConstraintSet::from_bool(constraints, false)),
+            callable_returns: PairVisitor::new(()),
+        }
     }
 }
 
@@ -1770,12 +1780,12 @@ impl<'a, 'c, 'db> TypeRelationChecker<'a, 'c, 'db> {
         })
     }
 
-    pub(super) fn with_recursion_guard(
+    fn with_recursion_guard(
         &self,
         db: &'db dyn Db,
         source: Type<'db>,
         target: Type<'db>,
-        work: impl FnOnce(&GuardedRelation<'_, '_, '_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
+        work: impl FnOnce(&GuardedRelation<'_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c> {
         let collect_context = self.is_context_collection_enabled();
         self.relation_visitor
@@ -3391,15 +3401,6 @@ pub(super) struct DisjointnessChecker<'a, 'c, 'db> {
 }
 
 impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
-    pub(super) fn inspect_signatures<R>(
-        &self,
-        db: &'db dyn Db,
-        callable: CallableType<'db>,
-        inspect: impl FnOnce(&CallableSignature<'db>) -> R,
-    ) -> Option<R> {
-        callable.inspect_signatures(db, self.env, inspect)
-    }
-
     /// Keep tuple element normalization inside this comparison's recursion context.
     pub(super) fn project_nominal_class(
         &self,
@@ -3497,9 +3498,9 @@ impl<'a, 'c, 'db> DisjointnessChecker<'a, 'c, 'db> {
         db: &'db dyn Db,
         source: Type<'db>,
         target: Type<'db>,
-        work: impl FnOnce(&GuardedDisjointness<'_, '_, '_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
+        work: impl FnOnce(&GuardedDisjointness<'_, 'c, 'db>) -> ConstraintSet<'db, 'c>,
     ) -> ConstraintSet<'db, 'c> {
-        self.disjointness_visitor.visit_with_expansion(
+        self.disjointness_visitor.types.visit_with_expansion(
             db,
             (source, target),
             self.materialization_visitor,

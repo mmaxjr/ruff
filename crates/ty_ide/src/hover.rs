@@ -140,7 +140,7 @@ pub fn hover<'db>(
                     .and_then(|def| def.docstring(db))
                     .or_else(|| match ty {
                         Type::KnownInstance(KnownInstanceType::TypeAliasType(alias)) => {
-                            Definitions::from_ty(db, &env, alias.value_type(db, &env))
+                            Definitions::from_ty(db, &env, Type::TypeAlias(alias))
                                 .and_then(|def| def.docstring(db))
                         }
                         _ => None,

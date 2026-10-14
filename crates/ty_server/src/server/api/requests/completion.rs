@@ -13,7 +13,7 @@ use ty_ide::{
     completion,
 };
 use ty_project::{ProjectDatabase, SemanticDb as _};
-use ty_python_semantic::ProgramEnvironment;
+use ty_python_semantic::TypeOperations;
 
 use crate::capabilities::ResolvedClientCapabilities;
 use crate::document::{PositionExt, ToRangeExt};
@@ -63,7 +63,7 @@ impl BackgroundDocumentRequestHandler for CompletionRequestHandler {
         };
         let client_capabilities = snapshot.resolved_client_capabilities();
         let program_file = db.program_file(file);
-        let env = ProgramEnvironment::from_file(program_file);
+        let env = TypeOperations::for_file(db, program_file);
         let completions = completion(
             db,
             snapshot.workspace_settings().completions(),

@@ -234,7 +234,7 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
             // Revisiting a recursive structural type adds no new dependencies. Binding cycles
             // are handled separately by Resolver, where their fallback is unresolved.
             self.visited.visit(db, self.env, ty, || {
-                walk_non_atomic_type(db, non_atomic, self)
+                walk_non_atomic_type(db, non_atomic, self);
             });
         }
     }

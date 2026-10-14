@@ -481,7 +481,7 @@ impl<'db> TypeAliasType<'db> {
 
     /// Resolve the alias body in the current operation. Only the unspecialized source body is
     /// shared across operations; specialization and materialization can depend on active guards.
-    pub fn value_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
+    pub(crate) fn value_type(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> Type<'db> {
         let env = env.in_environment(ProgramEnvironment::from_definition(self.definition(db)));
         match self.materialization_kind(db) {
             None => self.specialized_value_type(db, &env),

@@ -14,14 +14,12 @@ use crate::{
         KnownInstanceType, LiteralValueTypeKind, MemberLookupPolicy, Parameter, Parameters,
         Signature, SubclassOfInner, Type, TypeContext, TypeMapping, TypeVarBoundOrConstraints,
         UnionType,
-        constraints::{ConstraintSet, IteratorConstraintsExtension},
         function::OverloadLiteral,
         infer::{InferenceEnvironment, ScopeInference},
         known_instance::{FunctoolsPartialInstance, MethodWrapperKind},
         recursive::TypeExpansionContext,
-        relation::{TypeRelation, TypeRelationChecker},
+        relation::TypeRelation,
         signatures::{CallableSignature, PartialSignatureApplication},
-        typevar::TypeVarSet,
         variance::{VarianceInferable, VarianceTerm},
         visitor, walk_signature,
     },
@@ -1527,84 +1525,6 @@ impl<'a, 'db> IntoIterator for &'a CallableTypes<'db> {
 
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
-    }
-}
-
-impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
-    /// Compare saved inputs before expanding two views of the same lambda.
-    pub(super) fn equivalent_lambda_inputs(
-        &self,
-        db: &'db dyn Db,
-        source_callable: CallableType<'db>,
-        target_callable: CallableType<'db>,
-    ) -> bool {
-        if self.relation.is_subtyping()
-            || source_callable.runtime_class(db) != target_callable.runtime_class(db)
-        {
-            return false;
-        }
-        let (SignatureSource::Lambda(source), SignatureSource::Lambda(target)) = (
-            source_callable.signature_source(db),
-            target_callable.signature_source(db),
-        ) else {
-            return false;
-        };
-        self.materialization_visitor
-            .recursion_context()
-            .expand_signature(db, self.env, source_callable, || {
-                source.has_equivalent_signature(db, self.env, *target, |left, right| {
-                    self.as_equivalence_checker()
-                        .check_type_pair(db, left, right)
-                        .is_always_satisfied(db, self.env, TypeVarSet::None)
-                })
-            })
-            .unwrap_or(false)
-    }
-
-    /// Check whether one callable type has the given relation to another callable type.
-    ///
-    /// See [`Type::is_subtype_of`] and [`Type::is_assignable_to`] for more details.
-    pub(super) fn check_callable_pair(
-        &self,
-        db: &'db dyn Db,
-        source: CallableType<'db>,
-        target: CallableType<'db>,
-    ) -> ConstraintSet<'db, 'c> {
-        self.with_recursion_guard(
-            db,
-            Type::Callable(source),
-            Type::Callable(target),
-            |expansion| self.check_callable_pair_inner(db, source, target, expansion),
-        )
-    }
-
-    fn check_callable_pair_inner(
-        &self,
-        db: &'db dyn Db,
-        source: CallableType<'db>,
-        target: CallableType<'db>,
-        comparison: &super::relation::GuardedRelation<'_, '_, '_, 'c, 'db>,
-    ) -> ConstraintSet<'db, 'c> {
-        if target.runtime_class(db).is_some()
-            && target.runtime_class(db) != source.runtime_class(db)
-        {
-            return self.never();
-        }
-        if self.equivalent_lambda_inputs(db, source, target) {
-            return self.always();
-        }
-        comparison.compare_signatures(db, source, target)
-    }
-
-    pub(super) fn check_callables_vs_callable(
-        &self,
-        db: &'db dyn Db,
-        source: &CallableTypes<'db>,
-        target: CallableType<'db>,
-    ) -> ConstraintSet<'db, 'c> {
-        source.iter().when_all(db, self.constraints, |element| {
-            self.check_callable_pair(db, *element, target)
-        })
     }
 }
 
