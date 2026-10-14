@@ -791,7 +791,7 @@ impl<'db> Member<'db> {
                             |_, exposed_type| {
                                 binding.retained_function_binding(
                                     db,
-                                    exposed_type,
+                                    &exposed_type,
                                     exposed,
                                     function,
                                 )

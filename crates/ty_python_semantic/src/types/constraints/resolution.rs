@@ -1,6 +1,7 @@
 //! Resolve dependencies between the selected bindings of one solution alternative.
 
 use crate::types::TypeOperations;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::{Cell, RefCell};
 
 use rustc_hash::FxHashMap;
@@ -13,7 +14,7 @@ use crate::types::generics::{ApplySpecialization, GenericContext};
 use crate::types::known_instance::walk_known_instance_type;
 use crate::types::signatures::{Signature, walk_signature};
 use crate::types::typevar::{BoundTypeVarIdentity, TypeVarSet};
-use crate::types::visitor::{TypeKind, TypeVisitor, walk_non_atomic_type};
+use crate::types::visitor::{TypeKind, TypeVisitor};
 use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarInstance, CallableType, KnownInstanceType, RecursiveType,
     Type, TypeAliasType, TypeContext, TypeMapping,
@@ -154,7 +155,7 @@ pub(in crate::types) fn type_dependencies<'db>(
         visited: CycleDetector::new(()),
     };
     for ty in types {
-        visitor.visit_type(db, ty);
+        TypeVisitorContext::new(&visitor).visit_type(db, ty);
     }
     TypeVarSet::from_typevars(db, variables.into_inner().into_values())
 }
@@ -182,21 +183,21 @@ impl<'db> Dependencies<'_, 'db> {
             satisfied: Cell::new(true),
             visited: CycleDetector::new(()),
         };
-        visitor.visit_type(db, ty);
+        TypeVisitorContext::new(&visitor).visit_type(db, ty);
         visitor.satisfied.get()
     }
 
-    fn signature(&self, db: &'db dyn Db, signature: &Signature<'db>) {
-        walk_signature(db, signature, self);
+    fn signature(db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, signature: &Signature<'db>) {
+        walk_signature(db, signature, visit);
         for parameter in signature.parameters() {
             if let Some(default) = parameter.eager_default_type() {
-                self.visit_type(db, default);
+                visit.visit_type(db, default);
             }
         }
     }
 }
 
-impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
+impl<'db> TypeVisitorHooks<'db> for Dependencies<'_, 'db> {
     fn program_environment(&self) -> &TypeOperations<'db> {
         self.env
     }
@@ -205,7 +206,7 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
         false
     }
 
-    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+    fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
         if !self.satisfied.get() {
             return;
         }
@@ -218,7 +219,7 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
         };
         if let Some(specialization) = specialization {
             for argument in specialization.types(db) {
-                self.visit_type(db, *argument);
+                visit.visit_type(db, *argument);
             }
         }
         if let Type::TypeVar(typevar) = ty {
@@ -227,76 +228,107 @@ impl<'db> TypeVisitor<'db> for Dependencies<'_, 'db> {
             self.visited
                 .visit_structure(db, ty, &self.mapping, |expansion| {
                     if let Some(body) = expansion.recursive_body(db, recursive).into_unfolded() {
-                        body.visit(db, self);
+                        body.visit(db, visit);
                     }
                 });
-        } else if let TypeKind::NonAtomic(non_atomic) = TypeKind::from(ty) {
+        } else if let TypeKind::NonAtomic(_non_atomic) = TypeKind::from(ty) {
             // Revisiting a recursive structural type adds no new dependencies. Binding cycles
             // are handled separately by Resolver, where their fallback is unresolved.
             self.visited.visit(db, self.env, ty, || {
-                walk_non_atomic_type(db, non_atomic, self);
+                visit.walk_children(db);
             });
         }
     }
 
     // Generic declarations are not dependencies of their specialized arguments. Actual typevar
     // occurrences enter through `visit_type`, and their bounds and defaults remain untouched.
-    fn visit_bound_type_var_type(&self, _db: &'db dyn Db, _typevar: BoundTypeVarInstance<'db>) {}
-
-    fn visit_type_alias_type(&self, db: &'db dyn Db, alias: TypeAliasType<'db>) {
-        alias.walk_body(db, self);
+    fn visit_bound_type_var_type(
+        &self,
+        _db: &'db dyn Db,
+        _visit: &TypeVisit<'_, 'db, Self>,
+        _typevar: BoundTypeVarInstance<'db>,
+    ) {
     }
 
-    fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
-        self.visit_type(db, Type::Recursive(recursive));
+    fn visit_type_alias_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        alias: TypeAliasType<'db>,
+    ) {
+        alias.walk_body(db, visit);
     }
 
-    fn visit_function_type(&self, db: &'db dyn Db, function: FunctionType<'db>) {
+    fn visit_recursive_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        recursive: RecursiveType<'db>,
+    ) {
+        visit.visit_type(db, Type::Recursive(recursive));
+    }
+
+    fn visit_function_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        function: FunctionType<'db>,
+    ) {
         for signature in &function.signature(db).overloads {
-            self.signature(db, signature);
+            Self::signature(db, visit, signature);
         }
         if function.literal(db).has_separate_implementation(db) {
             for callable in function.implementation_callables(db).iter() {
-                self.visit_callable_type(db, *callable);
+                visit.visit_type_contents(db, Type::Callable(*callable));
             }
         }
     }
 
-    fn visit_callable_type(&self, db: &'db dyn Db, callable: CallableType<'db>) {
+    fn visit_callable_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        callable: CallableType<'db>,
+    ) {
         match callable.signature_source(db) {
             SignatureSource::Explicit(signatures) => {
                 for signature in &signatures.overloads {
-                    self.signature(db, signature);
+                    Self::signature(db, visit, signature);
                 }
             }
             SignatureSource::Lambda(lambda) => {
                 for parameter in lambda.parameters(db) {
-                    self.visit_type(db, parameter.annotated_type());
+                    visit.visit_type(db, parameter.annotated_type());
                     if let Some(default) = parameter.eager_default_type() {
-                        self.visit_type(db, default);
+                        visit.visit_type(db, default);
                     }
                 }
                 if !self.satisfied.get() {
                     return;
                 }
                 for variable in lambda.return_type_dependencies(db).iter(db) {
-                    self.visit_type(db, Type::TypeVar(variable));
+                    visit.visit_type(db, Type::TypeVar(variable));
                 }
             }
         }
     }
 
-    fn visit_known_instance_type(&self, db: &'db dyn Db, known: KnownInstanceType<'db>) {
+    fn visit_known_instance_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        known: KnownInstanceType<'db>,
+    ) {
         match known {
             KnownInstanceType::TypeAliasType(alias) => {
-                self.visit_type(db, Type::TypeAlias(alias));
+                visit.visit_type(db, Type::TypeAlias(alias));
             }
             KnownInstanceType::FunctoolsPartial(partial)
             | KnownInstanceType::FunctoolsPartialCall(partial) => {
-                self.visit_type(db, partial.wrapped(db).inner(db));
-                self.visit_callable_type(db, partial.partial(db));
+                visit.visit_type(db, partial.wrapped(db).inner(db));
+                visit.visit_type_contents(db, Type::Callable(partial.partial(db)));
             }
-            _ => walk_known_instance_type(db, known, self),
+            _ => walk_known_instance_type(db, known, visit),
         }
     }
 }

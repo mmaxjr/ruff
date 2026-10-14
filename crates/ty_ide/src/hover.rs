@@ -147,7 +147,7 @@ pub fn hover<'db>(
                     });
 
                 HoverContent::TypeAlias {
-                    declaration: declaration.to_string(),
+                    declaration,
                     qualifiers,
                 }
             }

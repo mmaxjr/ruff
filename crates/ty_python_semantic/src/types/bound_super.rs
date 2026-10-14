@@ -461,8 +461,7 @@ impl<'db> BoundSuperType<'db> {
     fn resolve_class_super_owner(
         db: &'db dyn Db,
         env: &TypeOperations<'db>,
-        pivot_class: ClassBase<'db>,
-        pivot_class_type: Type<'db>,
+        (pivot_class, pivot_class_type): (ClassBase<'db>, Type<'db>),
         owner_for_error: Type<'db>,
         owner_display_type: Type<'db>,
         owner_class: ClassType<'db>,
@@ -657,8 +656,7 @@ impl<'db> BoundSuperType<'db> {
                                 SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                                     db,
                                     env,
-                                    pivot_class,
-                                    pivot_class_type,
+                                    (pivot_class, pivot_class_type),
                                     owner_type,
                                     owner_type,
                                     class,
@@ -695,8 +693,7 @@ impl<'db> BoundSuperType<'db> {
             Type::ClassLiteral(class) => SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                 db,
                 env,
-                pivot_class,
-                pivot_class_type,
+                (pivot_class, pivot_class_type),
                 owner_type,
                 Type::from(ClassType::NonGeneric(class)),
                 ClassType::NonGeneric(class),
@@ -707,8 +704,7 @@ impl<'db> BoundSuperType<'db> {
                     SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                         db,
                         env,
-                        pivot_class,
-                        pivot_class_type,
+                        (pivot_class, pivot_class_type),
                         owner_type,
                         Type::from(class),
                         class,
@@ -733,8 +729,7 @@ impl<'db> BoundSuperType<'db> {
                                 SuperOwnerKind::Resolved(Self::resolve_class_super_owner(
                                     db,
                                     env,
-                                    pivot_class,
-                                    pivot_class_type,
+                                    (pivot_class, pivot_class_type),
                                     owner_type,
                                     owner_type,
                                     class,

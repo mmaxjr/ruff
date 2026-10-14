@@ -97,7 +97,7 @@ impl<'a, 'c, 'db> GuardedRelation<'a, 'c, 'db> {
             .inspect_signatures(db, source, |source| {
                 self.expansion
                     .inspect_signatures(db, target, |target| {
-                        source.compare(db, target, self.checker)
+                        source.compare(db, &target, self.checker)
                     })
                     .unwrap_or_else(|| self.checker.never())
             })
@@ -309,7 +309,7 @@ impl<'c, 'db> GuardedDisjointness<'_, 'c, 'db> {
                         if !target.has_only_non_never_returns(db) {
                             return checker.never();
                         }
-                        source.compare_return_disjointness(db, target, checker)
+                        source.compare_return_disjointness(db, &target, checker)
                     })
                     .unwrap_or_else(|| checker.never())
             })

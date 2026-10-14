@@ -4,7 +4,7 @@ use ruff_python_ast::{self as ast};
 
 use super::TypeInferenceBuilder;
 use crate::types::diagnostic::INVALID_TYPE_FORM;
-use crate::types::recursive::TypeInspector;
+use crate::types::recursive::{TypeFormContext, TypeInspector};
 use crate::types::{KnownClass, Type, TypeContext, TypeFormType};
 
 impl<'db> TypeInferenceBuilder<'db, '_> {
@@ -38,8 +38,8 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             .infer_maybe_standalone_expression(expression, TypeContext::default());
         if value_ty.has_outer_type(db, env, |ty| ty.is_never())
             || self.contains_type_form_value(expression, value_ty)
-            || non_type_form_fallback
-                .is_some_and(|alternative| value_ty.is_assignable_to(db, env, alternative))
+            || matches!(non_type_form_fallback, TypeFormContext::WithValueAlternative(alternative)
+                if value_ty.is_assignable_to(db, env, alternative))
         {
             return None;
         }

@@ -1,6 +1,7 @@
 use super::signatures::CallableSignature;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use crate::{Program, ProgramEnvironment};
 use std::borrow::Cow;
 use std::cell::{Cell, LazyCell, RefCell};
@@ -38,7 +39,6 @@ use crate::types::typevar::{
 use crate::types::variance::VarianceInferable;
 use crate::types::visitor::{
     TypeCollector, TypeVisitor, any_over_type, any_over_type_expanding_aliases,
-    walk_type_with_recursion_guard,
 };
 use crate::types::{
     ApplyTypeMappingVisitor, BindingContext, BoundTypeVarInstance, CallableType, CallableTypes,
@@ -364,7 +364,7 @@ pub(super) fn walk_generic_context<'db, V: TypeVisitor<'db> + ?Sized>(
     visitor: &V,
 ) {
     for bound_typevar in context.variables(db) {
-        visitor.visit_bound_type_var_type(db, bound_typevar);
+        visitor.visit_type_contents(db, Type::TypeVar(bound_typevar));
     }
 }
 
@@ -757,7 +757,7 @@ impl<'db> GenericContext<'db> {
             in_callable_type: Cell<Option<CallableType<'db>>>,
         }
 
-        impl<'db> TypeVisitor<'db> for FindTypeVarLocations<'_, 'db> {
+        impl<'db> TypeVisitorHooks<'db> for FindTypeVarLocations<'_, 'db> {
             fn program_environment(&self) -> &TypeOperations<'db> {
                 self.env
             }
@@ -769,6 +769,7 @@ impl<'db> GenericContext<'db> {
             fn visit_bound_type_var_type(
                 &self,
                 db: &'db dyn Db,
+                _visit: &TypeVisit<'_, 'db, Self>,
                 bound_typevar: BoundTypeVarInstance<'db>,
             ) {
                 let bound_typevar = if bound_typevar.is_paramspec(db) {
@@ -793,29 +794,44 @@ impl<'db> GenericContext<'db> {
                 }
             }
 
-            fn visit_callable_type(&self, db: &'db dyn Db, callable: CallableType<'db>) {
+            fn visit_callable_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                callable: CallableType<'db>,
+            ) {
                 // Note: We only consider the outermost Callables in the return type.
                 if self.in_return_type && self.in_callable_type.get().is_none() {
                     self.in_callable_type.set(Some(callable));
-                    walk_callable_type(db, callable, self);
+                    walk_callable_type(db, callable, visit);
                     self.in_callable_type.set(None);
                 } else {
-                    walk_callable_type(db, callable, self);
+                    walk_callable_type(db, callable, visit);
                 }
             }
 
-            fn visit_type_alias_type(&self, db: &'db dyn Db, type_alias: TypeAliasType<'db>) {
+            fn visit_type_alias_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                type_alias: TypeAliasType<'db>,
+            ) {
                 // The default implementation would do this for us if we returned `true` from
                 // `should_visit_lazy_type_attributes`. However, this is the _only_ lazy type
                 // attribute that we want to recurse into, so we do it by hand.
                 self.active_aliases.visit(
                     &Type::TypeAlias(type_alias).to_type_identity(db),
                     || (),
-                    || type_alias.walk_body(db, self),
+                    || type_alias.walk_body(db, visit),
                 );
             }
 
-            fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
+            fn visit_recursive_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                recursive: RecursiveType<'db>,
+            ) {
                 self.active_aliases.visit_structure(
                     &Type::Recursive(recursive).to_type_identity(db),
                     &self.mapping,
@@ -824,13 +840,18 @@ impl<'db> GenericContext<'db> {
                         expansion
                             .recursive_body(db, recursive)
                             .body_or_reference()
-                            .visit(db, self);
+                            .visit(db, visit);
                     },
                 );
             }
 
-            fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
-                walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+            fn visit_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                _ty: Type<'db>,
+            ) {
+                visit.walk_children_once(db, &self.recursion_guard);
             }
         }
 
@@ -852,10 +873,10 @@ impl<'db> GenericContext<'db> {
             in_callable_type: Cell::default(),
         };
         for param in parameters {
-            find_typevar_locations.visit_type(db, param.annotated_type());
+            TypeVisitorContext::new(&find_typevar_locations).visit_type(db, param.annotated_type());
         }
         find_typevar_locations.in_return_type = true;
-        find_typevar_locations.visit_type(db, return_type);
+        TypeVisitorContext::new(&find_typevar_locations).visit_type(db, return_type);
 
         // Then update those return type Callables to be generic, with their generic context
         // containing the typevars that don't appear outside any return type Callable.

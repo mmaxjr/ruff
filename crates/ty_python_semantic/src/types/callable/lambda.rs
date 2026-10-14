@@ -2,6 +2,7 @@
 
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::RefCell;
 
 use rustc_hash::FxHashSet;
@@ -18,10 +19,7 @@ use crate::types::generics::{
 use crate::types::infer::InferenceEnvironment;
 use crate::types::typevar::TypeVarSet;
 use crate::types::variance::{VarianceInferable, VarianceOrigin, VarianceTerm};
-use crate::types::visitor::{
-    TypeCollector, TypeVisitor, any_over_type_including_alias_arguments,
-    walk_type_with_recursion_guard,
-};
+use crate::types::visitor::{TypeCollector, TypeVisitor, any_over_type_including_alias_arguments};
 use crate::types::{
     ApplyTypeMappingVisitor, BindingContext, BoundTypeVarIdentity, BoundTypeVarInstance,
     MaterializationKind, Parameters, PromotionKind, PromotionMode, RecursiveType, SelfBinding,
@@ -72,7 +70,7 @@ fn lambda_inference_sources<'db>(
         sources: RefCell<FxHashSet<ScopeId<'db>>>,
     }
 
-    impl<'db> TypeVisitor<'db> for SourceVisitor<'db> {
+    impl<'db> TypeVisitorHooks<'db> for SourceVisitor<'db> {
         fn program_environment(&self) -> &TypeOperations<'db> {
             &self.env
         }
@@ -81,31 +79,46 @@ fn lambda_inference_sources<'db>(
             false
         }
 
-        fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
-            walk_type_with_recursion_guard(db, ty, self, &self.visited);
+        fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, _ty: Type<'db>) {
+            visit.walk_children_once(db, &self.visited);
         }
 
-        fn visit_callable_type(&self, db: &'db dyn Db, callable: CallableType<'db>) {
+        fn visit_callable_type(
+            &self,
+            db: &'db dyn Db,
+            visit: &TypeVisit<'_, 'db, Self>,
+            callable: CallableType<'db>,
+        ) {
             match callable.signature_source(db) {
                 SignatureSource::Lambda(lambda) => {
                     self.sources.borrow_mut().insert(lambda.scope(db));
                     if self.include_inputs {
-                        lambda.walk_inference_inputs(db, self);
+                        lambda.walk_inference_inputs(db, visit);
                     }
                 }
-                SignatureSource::Explicit(_) => walk_callable_type(db, callable, self),
+                SignatureSource::Explicit(_) => walk_callable_type(db, callable, visit),
             }
         }
 
-        fn visit_type_alias_type(&self, db: &'db dyn Db, alias: TypeAliasType<'db>) {
+        fn visit_type_alias_type(
+            &self,
+            db: &'db dyn Db,
+            visit: &TypeVisit<'_, 'db, Self>,
+            alias: TypeAliasType<'db>,
+        ) {
             if let Some(arguments) = alias.specialization(db) {
-                walk_specialization_types(db, arguments, self);
+                walk_specialization_types(db, arguments, visit);
             }
         }
 
-        fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
+        fn visit_recursive_type(
+            &self,
+            db: &'db dyn Db,
+            visit: &TypeVisit<'_, 'db, Self>,
+            recursive: RecursiveType<'db>,
+        ) {
             if let Some(arguments) = recursive.arguments(db) {
-                walk_specialization_types(db, arguments, self);
+                walk_specialization_types(db, arguments, visit);
             }
         }
     }
@@ -116,7 +129,7 @@ fn lambda_inference_sources<'db>(
         visited: TypeCollector::default(),
         sources: RefCell::default(),
     };
-    visitor.visit_type(db, ty);
+    TypeVisitorContext::new(&visitor).visit_type(db, ty);
     let mut sources: Box<[_]> = visitor.sources.into_inner().into_iter().collect();
     sources.sort_unstable_by_key(AsId::as_id);
     sources
@@ -404,7 +417,7 @@ impl<'db> LambdaSignature<'db> {
                 .map(|mut step| {
                     match &mut step.mapping {
                         LambdaMapping::Specialize { specialization, .. } => {
-                            *specialization = specialization.map_recursive_references(db, mapper)
+                            *specialization = specialization.map_recursive_references(db, mapper);
                         }
                         LambdaMapping::BindSelf(binding) => binding.ty = map(binding.ty),
                         LambdaMapping::ReplaceSelf(ty) => *ty = map(*ty),
@@ -420,7 +433,7 @@ impl<'db> LambdaSignature<'db> {
                             self_binding.ty = map(self_binding.ty);
                         }
                         LambdaMapping::BindParameters(parameters) => {
-                            *parameters = parameters.map_recursive_references(db, mapper)
+                            *parameters = parameters.map_recursive_references(db, mapper);
                         }
                         LambdaMapping::Promote(..)
                         | LambdaMapping::BindLegacyTypevars(_)

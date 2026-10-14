@@ -88,6 +88,7 @@
 
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::convert::Infallible;
@@ -112,7 +113,6 @@ use crate::types::typevar::{
 };
 use crate::types::visitor::{
     NonAtomicType, TypeCollector, TypeKind, TypeVisitor, any_over_type_expanding_aliases,
-    walk_non_atomic_type, walk_type_with_recursion_guard,
 };
 use crate::types::{
     ApplyTypeMappingVisitor, BoundTypeVarInstance, DynamicType, IntersectionType, Type,
@@ -1349,7 +1349,7 @@ impl<'db> ConstraintSetStorage<'db> {
             recursion_guard: TypeCollector<'db>,
         }
 
-        impl<'db> TypeVisitor<'db> for InternMentionedTypevars<'_, 'db> {
+        impl<'db> TypeVisitorHooks<'db> for InternMentionedTypevars<'_, 'db> {
             fn program_environment(&self) -> &TypeOperations<'db> {
                 self.env
             }
@@ -1361,6 +1361,7 @@ impl<'db> ConstraintSetStorage<'db> {
             fn visit_recursive_type(
                 &self,
                 _db: &'db dyn Db,
+                _visit: &TypeVisit<'_, 'db, Self>,
                 _recursive: crate::types::RecursiveType<'db>,
             ) {
                 self.notify_skipped_lazy_type_attributes();
@@ -1370,34 +1371,44 @@ impl<'db> ConstraintSetStorage<'db> {
                 self.support.borrow_mut().mark_incomplete();
             }
 
-            fn visit_type_var_type(&self, _db: &'db dyn Db, _typevar: TypeVarInstance<'db>) {
+            fn visit_type_var_type(
+                &self,
+                _db: &'db dyn Db,
+                _visit: &TypeVisit<'_, 'db, Self>,
+                _typevar: TypeVarInstance<'db>,
+            ) {
                 // Declaration bounds, constraints, and defaults are not occurrences in the
                 // constraint itself and must not contribute to its support.
             }
 
-            fn visit_generic_alias_type(&self, db: &'db dyn Db, alias: GenericAlias<'db>) {
+            fn visit_generic_alias_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                alias: GenericAlias<'db>,
+            ) {
                 for ty in alias.specialization(db).types(db) {
-                    self.visit_type(db, *ty);
+                    visit.visit_type(db, *ty);
                 }
             }
 
-            fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+            fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
                 if let Type::TypeVar(bound_typevar) = ty {
                     let mut storage = self.storage.borrow_mut();
                     let typevar = storage.intern_typevar(db, bound_typevar);
                     let mut support = self.support.borrow_mut();
                     support.insert(typevar);
                 }
-                walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+                visit.walk_children_once(db, &self.recursion_guard);
             }
         }
 
-        InternMentionedTypevars {
+        TypeVisitorContext::new(&InternMentionedTypevars {
             env,
             storage: RefCell::new(self),
             support: RefCell::new(support),
             recursion_guard: TypeCollector::default(),
-        }
+        })
         .visit_type(db, ty);
     }
 
@@ -2048,13 +2059,12 @@ fn max_constructor_and_typevar_depth<'db>(
     ) -> (u16, u16) {
         struct TypeDepthVisitor<'a, 'db> {
             env: &'a TypeOperations<'db>,
-            active: RefCell<FxHashSet<Type<'db>>>,
             current_depth: Cell<u16>,
             max_constructor_depth: Cell<u16>,
             max_typevar_depth: Cell<u16>,
         }
 
-        impl<'db> TypeVisitor<'db> for TypeDepthVisitor<'_, 'db> {
+        impl<'db> TypeVisitorHooks<'db> for TypeDepthVisitor<'_, 'db> {
             fn program_environment(&self) -> &TypeOperations<'db> {
                 self.env
             }
@@ -2066,19 +2076,20 @@ fn max_constructor_and_typevar_depth<'db>(
             fn visit_recursive_type(
                 &self,
                 _db: &'db dyn Db,
+                _visit: &TypeVisit<'_, 'db, Self>,
                 _recursive: crate::types::RecursiveType<'db>,
             ) {
                 self.notify_skipped_lazy_type_attributes();
             }
 
-            fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+            fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
                 if ty.is_type_var() {
                     self.max_typevar_depth
                         .set(self.max_typevar_depth.get().max(self.current_depth.get()));
                     return;
                 }
 
-                let non_atomic = match TypeKind::from(ty) {
+                match TypeKind::from(ty) {
                     TypeKind::Atomic => return,
                     // A non-generic nominal instance is an opaque leaf. Its class literal
                     // identifies the leaf but does not add nested type structure.
@@ -2087,11 +2098,7 @@ fn max_constructor_and_typevar_depth<'db>(
                     {
                         return;
                     }
-                    TypeKind::NonAtomic(non_atomic) => non_atomic,
-                };
-
-                if !self.active.borrow_mut().insert(ty) {
-                    return;
+                    TypeKind::NonAtomic(_) => {}
                 }
 
                 let current_depth = self.current_depth.get();
@@ -2099,20 +2106,18 @@ fn max_constructor_and_typevar_depth<'db>(
                 self.current_depth.set(nested_depth);
                 self.max_constructor_depth
                     .set(self.max_constructor_depth.get().max(nested_depth));
-                walk_non_atomic_type(db, non_atomic, self);
+                visit.walk_children(db);
                 self.current_depth.set(current_depth);
-                self.active.borrow_mut().remove(&ty);
             }
         }
 
         let visitor = TypeDepthVisitor {
             env,
-            active: RefCell::default(),
             current_depth: Cell::default(),
             max_constructor_depth: Cell::default(),
             max_typevar_depth: Cell::default(),
         };
-        visitor.visit_type(db, ty);
+        TypeVisitorContext::new(&visitor).visit_type(db, ty);
         (
             visitor.max_constructor_depth.get(),
             visitor.max_typevar_depth.get(),

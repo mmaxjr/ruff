@@ -13,6 +13,7 @@ mod property;
 
 use crate::types::TypeOperations;
 use crate::types::recursive::TypeInspector;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -68,10 +69,7 @@ use crate::types::tuple::{TupleLength, TupleSpec, TupleSpecBuilder, TupleType, V
 use crate::types::typed_dict::TypedDictOpenness;
 use crate::types::typevar::{BoundTypeVarIdentity, TypeVarNonceGenerator, TypeVarSet};
 use crate::types::variance::VarianceInferable;
-use crate::types::visitor::{
-    TypeCollector, TypeKind, TypeVisitor, any_over_type, walk_non_atomic_type,
-    walk_type_with_recursion_guard,
-};
+use crate::types::visitor::{TypeCollector, TypeVisitor, any_over_type};
 use crate::types::{
     ApplyTypeMappingVisitor, BindingContext, BoundTypeVarInstance, CallableType, CallableTypes,
     ClassLiteral, CycleDetector, DATACLASS_FLAGS, DataclassFlags, DataclassParams, DynamicType,
@@ -154,27 +152,33 @@ impl<'db> GenericContextCollector<'_, 'db> {
         &self,
         db: &'db dyn Db,
         signatures: &CallableSignature<'db>,
+        visit: &TypeVisit<'_, 'db, Self>,
     ) {
         for signature in signatures {
-            self.visit_signature(db, signature);
+            self.visit_signature(db, visit, signature);
         }
     }
 
-    fn visit_signature(&self, db: &'db dyn Db, signature: &Signature<'db>) {
+    fn visit_signature(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        signature: &Signature<'db>,
+    ) {
         if let Some(generic_context) = signature.generic_context {
             self.generic_contexts.borrow_mut().insert(generic_context);
         }
         for parameter in signature.parameters() {
-            self.visit_type(db, parameter.annotated_type());
+            visit.visit_type(db, parameter.annotated_type());
             if let Some(default_ty) = parameter.eager_default_type() {
-                self.visit_type(db, default_ty);
+                visit.visit_type(db, default_ty);
             }
         }
-        self.visit_type(db, signature.return_ty);
+        visit.visit_type(db, signature.return_ty);
     }
 }
 
-impl<'db> TypeVisitor<'db> for GenericContextCollector<'_, 'db> {
+impl<'db> TypeVisitorHooks<'db> for GenericContextCollector<'_, 'db> {
     fn program_environment(&self) -> &TypeOperations<'db> {
         self.env
     }
@@ -183,25 +187,40 @@ impl<'db> TypeVisitor<'db> for GenericContextCollector<'_, 'db> {
         false
     }
 
-    fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: crate::types::RecursiveType<'db>) {
+    fn visit_recursive_type(
+        &self,
+        _db: &'db dyn Db,
+        _visit: &TypeVisit<'_, 'db, Self>,
+        _recursive: crate::types::RecursiveType<'db>,
+    ) {
         self.notify_skipped_lazy_type_attributes();
     }
 
-    fn visit_callable_type(&self, db: &'db dyn Db, callable: CallableType<'db>) {
+    fn visit_callable_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        callable: CallableType<'db>,
+    ) {
         callable.inspect_signatures(db, self.env, |signatures| {
-            signatures.collect_generic_contexts(db, self);
+            signatures.collect_generic_contexts(db, self, visit);
         });
     }
 
-    fn visit_function_type(&self, db: &'db dyn Db, function: FunctionType<'db>) {
+    fn visit_function_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        function: FunctionType<'db>,
+    ) {
         for signature in &function.signature(db).overloads {
-            self.visit_signature(db, signature);
+            self.visit_signature(db, visit, signature);
         }
-        self.visit_signature(db, function.last_definition_signature(db));
+        self.visit_signature(db, visit, function.last_definition_signature(db));
     }
 
-    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
-        walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+    fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, _ty: Type<'db>) {
+        visit.walk_children_once(db, &self.recursion_guard);
     }
 }
 
@@ -215,7 +234,7 @@ fn generic_contexts_mentioned_in_type<'db>(
         generic_contexts: RefCell::default(),
         recursion_guard: TypeCollector::default(),
     };
-    collector.visit_type(db, ty);
+    TypeVisitorContext::new(&collector).visit_type(db, ty);
     collector.generic_contexts.into_inner()
 }
 
@@ -7581,10 +7600,9 @@ fn inferable_typevar_occurrences<'db>(
         env: &'a TypeOperations<'db>,
         inferable: TypeVarSet<'db>,
         count: Cell<usize>,
-        stack: RefCell<SmallVec<[Type<'db>; 8]>>,
     }
 
-    impl<'db> TypeVisitor<'db> for InferableTypeVarVisitor<'_, 'db> {
+    impl<'db> TypeVisitorHooks<'db> for InferableTypeVarVisitor<'_, 'db> {
         fn program_environment(&self) -> &TypeOperations<'db> {
             self.env
         }
@@ -7596,12 +7614,13 @@ fn inferable_typevar_occurrences<'db>(
         fn visit_recursive_type(
             &self,
             _db: &'db dyn Db,
+            _visit: &TypeVisit<'_, 'db, Self>,
             _recursive: crate::types::RecursiveType<'db>,
         ) {
             self.notify_skipped_lazy_type_attributes();
         }
 
-        fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+        fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
             if let Type::TypeVar(typevar) = ty {
                 let identity = if typevar.is_paramspec(db) {
                     typevar.without_paramspec_attr(db).identity(db)
@@ -7614,16 +7633,7 @@ fn inferable_typevar_occurrences<'db>(
                 return;
             }
 
-            let TypeKind::NonAtomic(non_atomic_type) = TypeKind::from(ty) else {
-                return;
-            };
-            if self.stack.borrow().contains(&ty) {
-                return;
-            }
-
-            self.stack.borrow_mut().push(ty);
-            walk_non_atomic_type(db, non_atomic_type, self);
-            self.stack.borrow_mut().pop();
+            visit.walk_children(db);
         }
     }
 
@@ -7631,9 +7641,8 @@ fn inferable_typevar_occurrences<'db>(
         env,
         inferable,
         count: Cell::new(0),
-        stack: RefCell::default(),
     };
-    visitor.visit_type(db, ty);
+    TypeVisitorContext::new(&visitor).visit_type(db, ty);
     visitor.count.get()
 }
 
@@ -10565,6 +10574,47 @@ impl<'db> ClassInfoValidator<'_, 'db> {
     }
 }
 
+pub(in crate::types) use constructor::constructor_returns_instance_resolved;
+
+impl<'db> ArgumentTypeChecker<'_, 'db> {
+    pub(in crate::types) fn paramspec_prefix_length_resolved(
+        &self,
+        declared_type: Type<'db>,
+        argument_type: Type<'db>,
+        paramspec: BoundTypeVarInstance<'db>,
+    ) -> Option<usize> {
+        let db = self.db;
+        let env = self.env;
+        let paramspec_prefix_len = |candidate: Type<'db>| {
+            candidate
+                .try_upcast_to_callable(db, env)?
+                .iter()
+                .find_map(|callable| {
+                    callable.parameter_lists(db).find_map(|parameters| {
+                        let (prefix, declared_paramspec) = parameters.as_paramspec_with_prefix()?;
+                        (declared_paramspec == paramspec).then_some(prefix.len())
+                    })
+                })
+        };
+
+        if let Type::Union(union) = declared_type {
+            union.elements(db).iter().find_map(|candidate| {
+                let specialized_candidate = candidate.apply_optional_specialization(
+                    db,
+                    self.env,
+                    self.merged_specialization(),
+                );
+                argument_type
+                    .is_assignable_to(db, env, specialized_candidate)
+                    .then_some(*candidate)
+                    .and_then(paramspec_prefix_len)
+            })
+        } else {
+            paramspec_prefix_len(declared_type)
+        }
+    }
+}
+
 // TODO: Replace these tests with mdtests once correlated alternatives affect call inference's
 // return types or diagnostics, making retained correlations and completeness observable.
 #[cfg(test)]
@@ -10751,46 +10801,5 @@ expected: tuple[list[object], A | B, C | D | E]
             [[Some(Resolved(Type::object())), None].as_slice()]
         );
         Ok(())
-    }
-}
-
-pub(in crate::types) use constructor::constructor_returns_instance_resolved;
-
-impl<'db> ArgumentTypeChecker<'_, 'db> {
-    pub(in crate::types) fn paramspec_prefix_length_resolved(
-        &self,
-        declared_type: Type<'db>,
-        argument_type: Type<'db>,
-        paramspec: BoundTypeVarInstance<'db>,
-    ) -> Option<usize> {
-        let db = self.db;
-        let env = self.env;
-        let paramspec_prefix_len = |candidate: Type<'db>| {
-            candidate
-                .try_upcast_to_callable(db, env)?
-                .iter()
-                .find_map(|callable| {
-                    callable.parameter_lists(db).find_map(|parameters| {
-                        let (prefix, declared_paramspec) = parameters.as_paramspec_with_prefix()?;
-                        (declared_paramspec == paramspec).then_some(prefix.len())
-                    })
-                })
-        };
-
-        if let Type::Union(union) = declared_type {
-            union.elements(db).iter().find_map(|candidate| {
-                let specialized_candidate = candidate.apply_optional_specialization(
-                    db,
-                    self.env,
-                    self.merged_specialization(),
-                );
-                argument_type
-                    .is_assignable_to(db, env, specialized_candidate)
-                    .then_some(*candidate)
-                    .and_then(paramspec_prefix_len)
-            })
-        } else {
-            paramspec_prefix_len(declared_type)
-        }
     }
 }

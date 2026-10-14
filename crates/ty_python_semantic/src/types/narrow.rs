@@ -5945,14 +5945,14 @@ impl<'db> NarrowingConstraintsBuilder<'db, '_> {
             lhs_ty,
             |_, _| None,
             |_, lhs_resolved| {
-                lhs_resolved.finish_identity_overlap(RuntimeOverlap {
+                Some(lhs_resolved.finish_identity_overlap(RuntimeOverlap {
                     narrowing: self,
                     builder,
                     lhs_ty,
                     rhs_ty,
                     rhs_resolved,
                     rhs_identity_ty,
-                })
+                }))
             },
         )
     }
@@ -5968,7 +5968,7 @@ pub(super) struct RuntimeOverlap<'a, 'db, 'ast> {
 }
 
 impl<'db> RuntimeOverlap<'_, 'db, '_> {
-    pub(super) fn finish(self, lhs_resolved: Type<'db>) -> Option<Type<'db>> {
+    pub(super) fn finish(self, lhs_resolved: Type<'db>) -> Type<'db> {
         let Self {
             narrowing,
             mut builder,
@@ -6028,6 +6028,6 @@ impl<'db> RuntimeOverlap<'_, 'db, '_> {
         } else {
             builder = add_runtime_overlap(builder, lhs_ty);
         }
-        Some(builder.build())
+        builder.build()
     }
 }

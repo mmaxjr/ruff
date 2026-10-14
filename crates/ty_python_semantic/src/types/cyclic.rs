@@ -21,6 +21,7 @@
 //! `Type`.
 
 use crate::types::TypeOperations;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Eq;
 use std::collections::hash_map::Entry;
@@ -38,7 +39,7 @@ use crate::types::callable::{
 };
 use crate::types::function::FunctionLiteral;
 use crate::types::generics::{GenericContext, Specialization};
-use crate::types::visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard};
+use crate::types::visitor::{TypeCollector, TypeVisitor};
 use crate::types::{
     BoundTypeVarIdentity, BoundTypeVarInstance, KnownClass, MaterializationKind,
     ProtocolInstanceType, RecursiveType, StaticClassLiteral, Type, TypeAliasType, TypedDictType,
@@ -737,6 +738,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
     /// Visits the definition with each formal parameter mapped to itself.
     /// Returns `false` if the body is incomplete and could still introduce recursive references.
     fn visit_definition_body(&self, db: &'db dyn Db, source: RecursiveDefinition<'db>) -> bool {
+        let traversal = TypeVisitorContext::new(self);
         match source {
             RecursiveDefinition::Structural(recursive) => {
                 let visitor: super::recursive::TypeVisitorState<'_, 'db, (), Type<'db>, bool, 1> =
@@ -745,32 +747,32 @@ impl<'db> SpecializationFlowVisitor<'db> {
                     let Some(body) = expansion.recursive_body(db, recursive).into_unfolded() else {
                         return false;
                     };
-                    body.visit(db, self);
+                    body.visit(db, &traversal);
                     !self.has_unresolved_type.get()
                 });
             }
             RecursiveDefinition::TypeAlias(alias) => {
-                self.visit_type(db, alias.raw_value_type(db));
+                traversal.visit_type(db, alias.raw_value_type(db));
             }
             RecursiveDefinition::Protocol(origin) => {
                 let Some(protocol) = origin.identity_specialization(db).into_protocol_class(db)
                 else {
                     return false;
                 };
-                protocol.walk_recursive_member_types(db, self);
+                protocol.walk_recursive_member_types(db, &traversal);
             }
             RecursiveDefinition::TypedDict(origin) => {
                 let typed_dict = TypedDictType::new(origin.identity_specialization(db));
                 for field in typed_dict.items(db).values() {
-                    self.visit_type(db, field.declared_ty);
+                    traversal.visit_type(db, field.declared_ty);
                 }
                 if let Some(extra_items) = typed_dict.explicit_extra_items(db) {
-                    self.visit_type(db, extra_items.declared_ty);
+                    traversal.visit_type(db, extra_items.declared_ty);
                 }
             }
             RecursiveDefinition::Lambda(lambda) => {
                 for signature in infer_lambda_signature(db, LambdaSource::of(db, lambda)) {
-                    walk_signature(db, signature, self);
+                    walk_signature(db, signature, &traversal);
                 }
             }
         }
@@ -806,7 +808,7 @@ impl<'db> SpecializationFlowVisitor<'db> {
     }
 }
 
-impl<'db> TypeVisitor<'db> for SpecializationFlowVisitor<'db> {
+impl<'db> TypeVisitorHooks<'db> for SpecializationFlowVisitor<'db> {
     fn program_environment(&self) -> &TypeOperations<'db> {
         &self.env
     }
@@ -815,11 +817,16 @@ impl<'db> TypeVisitor<'db> for SpecializationFlowVisitor<'db> {
         false
     }
 
-    fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: crate::types::RecursiveType<'db>) {
+    fn visit_recursive_type(
+        &self,
+        _db: &'db dyn Db,
+        _visit: &TypeVisit<'_, 'db, Self>,
+        _recursive: crate::types::RecursiveType<'db>,
+    ) {
         self.notify_skipped_lazy_type_attributes();
     }
 
-    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+    fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
         if ty.is_divergent() {
             // An unfinished body can still introduce a reference back to the root. Until it is
             // resolved, the absence of that edge does not prove that specialization is bounded.
@@ -839,16 +846,17 @@ impl<'db> TypeVisitor<'db> for SpecializationFlowVisitor<'db> {
 
         if let Some(reference) = RecursiveDefinition::from_type(db, ty) {
             self.record_reference(db, reference);
-            reference.walk_arguments(db, self);
+            reference.walk_arguments(db, visit);
             return;
         }
 
-        walk_type_with_recursion_guard(db, ty, self, &self.visited_types);
+        visit.walk_children_once(db, &self.visited_types);
     }
 
     fn visit_bound_type_var_type(
         &self,
         _db: &'db dyn Db,
+        _visit: &TypeVisit<'_, 'db, Self>,
         _bound_typevar: BoundTypeVarInstance<'db>,
     ) {
     }
@@ -868,7 +876,7 @@ impl<'a, 'db> SourceParameterCollector<'a, 'db> {
             visited_types: TypeCollector::default(),
             in_nested_type: Cell::default(),
         };
-        collector.visit_type(db, argument);
+        TypeVisitorContext::new(&collector).visit_type(db, argument);
         collector
             .found
             .into_inner()
@@ -886,7 +894,7 @@ impl<'a, 'db> SourceParameterCollector<'a, 'db> {
     }
 }
 
-impl<'db> TypeVisitor<'db> for SourceParameterCollector<'_, 'db> {
+impl<'db> TypeVisitorHooks<'db> for SourceParameterCollector<'_, 'db> {
     fn program_environment(&self) -> &TypeOperations<'db> {
         self.env
     }
@@ -895,11 +903,16 @@ impl<'db> TypeVisitor<'db> for SourceParameterCollector<'_, 'db> {
         false
     }
 
-    fn visit_recursive_type(&self, _db: &'db dyn Db, _recursive: crate::types::RecursiveType<'db>) {
+    fn visit_recursive_type(
+        &self,
+        _db: &'db dyn Db,
+        _visit: &TypeVisit<'_, 'db, Self>,
+        _recursive: crate::types::RecursiveType<'db>,
+    ) {
         self.notify_skipped_lazy_type_attributes();
     }
 
-    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+    fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
         if let Type::TypeVar(typevar) = ty {
             let identity = RecursiveDefinition::parameter_identity(db, typevar);
             if self.source_parameters.contains(&identity) {
@@ -915,18 +928,18 @@ impl<'db> TypeVisitor<'db> for SourceParameterCollector<'_, 'db> {
         // Unions and intersections are normalized set operations. Reapplying the same operation
         // does not add another structural layer to a parameter.
         match ty {
-            Type::Union(union) => {
-                self.visit_union_type(db, union);
+            Type::Union(_union) => {
+                visit.walk_children(db);
                 return;
             }
-            Type::Intersection(intersection) => {
-                self.visit_intersection_type(db, intersection);
+            Type::Intersection(_intersection) => {
+                visit.walk_children(db);
                 return;
             }
             Type::SubclassOf(subclass_of) if let Some(typevar) = subclass_of.into_type_var() => {
                 // Repeated metaclass projection reaches `type`; it does not
                 // accumulate layers like `list[T]` or `tuple[T]`.
-                self.visit_type(db, Type::TypeVar(typevar));
+                visit.visit_type(db, Type::TypeVar(typevar));
                 return;
             }
             _ => {}
@@ -934,9 +947,9 @@ impl<'db> TypeVisitor<'db> for SourceParameterCollector<'_, 'db> {
 
         let was_in_nested_type = self.in_nested_type.replace(true);
         if let Some(reference) = RecursiveDefinition::from_type(db, ty) {
-            reference.walk_arguments(db, self);
+            reference.walk_arguments(db, visit);
         } else {
-            walk_type_with_recursion_guard(db, ty, self, &self.visited_types);
+            visit.walk_children_once(db, &self.visited_types);
         }
         self.in_nested_type.set(was_in_nested_type);
     }
@@ -944,6 +957,7 @@ impl<'db> TypeVisitor<'db> for SourceParameterCollector<'_, 'db> {
     fn visit_bound_type_var_type(
         &self,
         _db: &'db dyn Db,
+        _visit: &TypeVisit<'_, 'db, Self>,
         _bound_typevar: BoundTypeVarInstance<'db>,
     ) {
     }

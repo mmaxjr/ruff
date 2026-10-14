@@ -1495,9 +1495,11 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
             let name = candidate.as_name_expr()?;
             let ty = self.expression_type(candidate);
             if ty.is_never()
-                || !self
-                    .type_before_if_chain(name)?
-                    .has_outer_type(db, env, |ty| ty.is_union())
+                || !self.type_before_if_chain(name)?.has_outer_type(
+                    db,
+                    env,
+                    crate::types::Type::is_union,
+                )
             {
                 return None;
             }

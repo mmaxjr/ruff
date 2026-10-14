@@ -1,6 +1,7 @@
 //! The [`SequentMap`] and related functionality
 
 use crate::types::TypeOperations;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::Cell;
 use std::fmt::{Debug, Display};
 
@@ -19,7 +20,7 @@ use crate::types::constraints::{
 };
 use crate::types::typevar::TypeVarSet;
 use crate::types::variance::VarianceInferable;
-use crate::types::visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard};
+use crate::types::visitor::{TypeCollector, TypeVisitor};
 use crate::types::{BoundTypeVarInstance, IntersectionType, Type, TypeVarVariance, UnionType};
 use crate::{Db, Program, ProgramEnvironment};
 
@@ -2009,7 +2010,7 @@ impl<'db> Type<'db> {
             eligible: Cell<bool>,
         }
 
-        impl<'db> TypeVisitor<'db> for EligibilityVisitor<'_, 'db> {
+        impl<'db> TypeVisitorHooks<'db> for EligibilityVisitor<'_, 'db> {
             fn program_environment(&self) -> &TypeOperations<'db> {
                 self.env
             }
@@ -2021,12 +2022,13 @@ impl<'db> Type<'db> {
             fn visit_recursive_type(
                 &self,
                 _db: &'db dyn Db,
+                _visit: &TypeVisit<'_, 'db, Self>,
                 _recursive: crate::types::RecursiveType<'db>,
             ) {
                 self.notify_skipped_lazy_type_attributes();
             }
 
-            fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+            fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
                 if !self.eligible.get() || ty.is_type_var() {
                     return;
                 }
@@ -2034,7 +2036,7 @@ impl<'db> Type<'db> {
                     self.eligible.set(false);
                     return;
                 }
-                walk_type_with_recursion_guard(db, ty, self, &self.seen);
+                visit.walk_children_once(db, &self.seen);
             }
         }
 
@@ -2043,7 +2045,7 @@ impl<'db> Type<'db> {
             seen: TypeCollector::default(),
             eligible: Cell::new(true),
         };
-        visitor.visit_type(db, self);
+        TypeVisitorContext::new(&visitor).visit_type(db, self);
         visitor.eligible.get()
     }
 }

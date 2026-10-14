@@ -354,7 +354,7 @@ pub(super) fn walk_known_instance_type<'db, V: visitor::TypeVisitor<'db> + ?Size
             visitor.visit_type_var_type(db, typevar);
         }
         KnownInstanceType::TypeAliasType(type_alias) => {
-            visitor.visit_type_alias_type(db, type_alias);
+            visitor.visit_type_contents(db, Type::TypeAlias(type_alias));
         }
         KnownInstanceType::Deprecated(_)
         | KnownInstanceType::Range { .. }
@@ -389,10 +389,10 @@ pub(super) fn walk_known_instance_type<'db, V: visitor::TypeVisitor<'db> + ?Size
             visitor.visit_type(db, ty.inner(db));
         }
         KnownInstanceType::Callable(callable) => {
-            visitor.visit_callable_type(db, callable);
+            visitor.visit_type_contents(db, Type::Callable(callable));
         }
         KnownInstanceType::NewType(newtype) => {
-            visitor.visit_newtype_instance_type(db, newtype);
+            visitor.visit_type_contents(db, Type::NewTypeInstance(newtype));
         }
         KnownInstanceType::Sentinel(_) => {
             // Nothing to visit

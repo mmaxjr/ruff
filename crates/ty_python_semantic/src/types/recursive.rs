@@ -134,6 +134,12 @@ pub(super) struct ExpandedType<'scope, 'db> {
     mapping: &'scope ApplyTypeMappingVisitor<'scope, 'db>,
 }
 
+/// Whether a context containing `TypeForm` also permits an ordinary value.
+pub(super) enum TypeFormContext<'db> {
+    OnlyTypeForms,
+    WithValueAlternative(Type<'db>),
+}
+
 /// The result of unfolding under an operation's guard.
 pub(super) struct ExpandedRecursive<'scope, 'db> {
     result: UnfoldResult<'db>,
@@ -181,7 +187,7 @@ impl<'db> ExpandedType<'_, 'db> {
     pub(super) fn finish_identity_overlap(
         self,
         overlap: super::narrow::RuntimeOverlap<'_, 'db, '_>,
-    ) -> Option<Type<'db>> {
+    ) -> Type<'db> {
         overlap.finish(self.ty)
     }
 
@@ -512,7 +518,7 @@ impl<'db> ExpandedType<'_, 'db> {
     pub(super) fn retained_function_binding(
         self,
         db: &'db dyn Db,
-        exposed_type: ExpandedType<'_, 'db>,
+        exposed_type: &ExpandedType<'_, 'db>,
         exposed: Type<'db>,
         function: super::FunctionType<'db>,
     ) -> Option<(super::FunctionType<'db>, Type<'db>)> {
@@ -536,7 +542,7 @@ impl<'db> ExpandedType<'_, 'db> {
             binding_union.map_or(std::slice::from_ref(&binding), |union| union.elements(db));
         let retained = UnionType::from_elements(
             db,
-            &env,
+            env,
             binding_alternatives
                 .iter()
                 .copied()
@@ -577,7 +583,7 @@ impl<'db> ExpandedType<'_, 'db> {
         );
     }
 
-    pub(super) fn is_string_keyed_mapping(self, db: &'db dyn Db) -> bool {
+    pub(super) fn is_string_keyed_mapping(&self, db: &'db dyn Db) -> bool {
         let env = self.mapping.env;
         let ty = self.ty;
 
@@ -606,19 +612,26 @@ impl<'db> ExpandedType<'_, 'db> {
                 })
     }
 
-    pub(super) fn type_form_context_fallback(self, db: &'db dyn Db) -> Option<Option<Type<'db>>> {
+    pub(super) fn type_form_context_fallback(
+        self,
+        db: &'db dyn Db,
+    ) -> Option<TypeFormContext<'db>> {
         let env = self.mapping.env;
         let target = self.ty;
         match target {
-            Type::TypeForm(_) => Some(None),
+            Type::TypeForm(_) => Some(TypeFormContext::OnlyTypeForms),
             Type::Union(union)
                 if union.elements(db).iter().any(|element| {
                     element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
                 }) =>
             {
-                Some(Some(target.filter_union(db, env, |element| {
-                    !element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
-                })))
+                Some(TypeFormContext::WithValueAlternative(target.filter_union(
+                    db,
+                    env,
+                    |element| {
+                        !element.has_outer_type(db, env, |ty| matches!(ty, Type::TypeForm(_)))
+                    },
+                )))
             }
             _ => None,
         }
@@ -917,7 +930,7 @@ impl<'db> ExpandedType<'_, 'db> {
     }
 
     pub(super) fn is_literal_or_union_of_literals(
-        self,
+        &self,
         db: &'db dyn Db,
         inspector: &TypeInspector<'_, 'db>,
     ) -> bool {
@@ -1004,7 +1017,7 @@ impl<'db> ExpandedType<'_, 'db> {
         )
     }
 
-    pub(super) fn is_builtin_comparison_literal(self, db: &'db dyn Db) -> bool {
+    pub(super) fn is_builtin_comparison_literal(&self, db: &'db dyn Db) -> bool {
         super::equality::is_builtin_comparison_literal_resolved(db, self.ty)
     }
     pub(super) fn all_builtin_comparison_literals(self, db: &'db dyn Db) -> bool {
@@ -1218,7 +1231,7 @@ impl<'db> ExpandedType<'_, 'db> {
 
     pub(super) fn evaluate_comparison(
         self,
-        target: ExpandedType<'_, 'db>,
+        target: &ExpandedType<'_, 'db>,
         evaluator: &super::equality::ComparisonEvaluator<'_, 'db>,
         branch: super::equality::ComparisonBranch,
         operator: super::equality::ComparisonOperator,
@@ -3121,6 +3134,41 @@ impl Type<'_> {
     }
 }
 
+fn pattern_filtering_arms<'db>(
+    db: &'db dyn Db,
+    original: Type<'db>,
+    ty: Type<'db>,
+) -> smallvec::SmallVec<[(Type<'db>, Type<'db>); 2]> {
+    match ty {
+        Type::Union(union) => union
+            .elements(db)
+            .iter()
+            .map(|ty| (original, *ty))
+            .collect(),
+        ty => smallvec::smallvec![(original, ty)],
+    }
+}
+
+impl<'db> NormalizedType<'_, 'db> {
+    pub(super) fn narrow_targets(
+        self,
+        db: &'db dyn Db,
+        inspector: &TypeInspector<'_, 'db>,
+    ) -> Option<std::borrow::Cow<'db, [Type<'db>]>> {
+        match self.ty.ty {
+            Type::Union(union) => Some(std::borrow::Cow::Borrowed(union.elements(db))),
+            ty if self.was_union => Some(std::borrow::Cow::Owned(vec![ty])),
+            Type::NewTypeInstance(newtype) => inspector.inspect_normalized(
+                db,
+                newtype.concrete_base_type(db),
+                |_, _| None,
+                |inspector, normalized| normalized.narrow_targets(db, inspector),
+            ),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod query_tests {
     use std::cell::{Cell, RefCell};
@@ -3538,40 +3586,5 @@ mod query_tests {
             assert!(query.visit(&db, ty));
         });
         Ok(())
-    }
-}
-
-fn pattern_filtering_arms<'db>(
-    db: &'db dyn Db,
-    original: Type<'db>,
-    ty: Type<'db>,
-) -> smallvec::SmallVec<[(Type<'db>, Type<'db>); 2]> {
-    match ty {
-        Type::Union(union) => union
-            .elements(db)
-            .iter()
-            .map(|ty| (original, *ty))
-            .collect(),
-        ty => smallvec::smallvec![(original, ty)],
-    }
-}
-
-impl<'db> NormalizedType<'_, 'db> {
-    pub(super) fn narrow_targets(
-        self,
-        db: &'db dyn Db,
-        inspector: &TypeInspector<'_, 'db>,
-    ) -> Option<std::borrow::Cow<'db, [Type<'db>]>> {
-        match self.ty.ty {
-            Type::Union(union) => Some(std::borrow::Cow::Borrowed(union.elements(db))),
-            ty if self.was_union => Some(std::borrow::Cow::Owned(vec![ty])),
-            Type::NewTypeInstance(newtype) => inspector.inspect_normalized(
-                db,
-                newtype.concrete_base_type(db),
-                |_, _| None,
-                |inspector, normalized| normalized.narrow_targets(db, inspector),
-            ),
-            _ => None,
-        }
     }
 }

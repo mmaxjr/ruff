@@ -1,5 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
@@ -25,7 +26,7 @@ use crate::{
         definition_expression_type,
         tuple::Tuple,
         variance::VarianceInferable,
-        visitor::{self, TypeCollector, TypeVisitor, walk_type_with_recursion_guard},
+        visitor::{self, TypeCollector, TypeVisitor},
     },
 };
 use ty_python_core::{
@@ -846,7 +847,7 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
         }
     }
 
-    impl<'db> TypeVisitor<'db> for MatchingFreshnessCollector<'_, 'db> {
+    impl<'db> TypeVisitorHooks<'db> for MatchingFreshnessCollector<'_, 'db> {
         fn program_environment(&self) -> &TypeOperations<'db> {
             self.env
         }
@@ -858,6 +859,7 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
         fn visit_recursive_type(
             &self,
             _db: &'db dyn Db,
+            _visit: &TypeVisit<'_, 'db, Self>,
             _recursive: crate::types::RecursiveType<'db>,
         ) {
             self.notify_skipped_lazy_type_attributes();
@@ -866,6 +868,7 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
         fn visit_bound_type_var_type(
             &self,
             db: &'db dyn Db,
+            _visit: &TypeVisit<'_, 'db, Self>,
             bound_typevar: BoundTypeVarInstance<'db>,
         ) {
             let mut identity = bound_typevar.identity(db);
@@ -879,8 +882,8 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
             }
         }
 
-        fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
-            walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+        fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, _ty: Type<'db>) {
+            visit.walk_children_once(db, &self.recursion_guard);
         }
     }
 
@@ -889,7 +892,7 @@ pub(crate) fn max_typevar_freshness_matching_generic_context<'db>(
     ));
     let collector = MatchingFreshnessCollector::new(db, &env, generic_context);
     for ty in types {
-        collector.visit_type(db, ty);
+        TypeVisitorContext::new(&collector).visit_type(db, ty);
     }
     collector.max_freshness.get()
 }

@@ -1201,8 +1201,9 @@ impl<'db> ExpandedSignatures<'_, 'db> {
         self,
         db: &'db dyn Db,
         collector: &super::call::bind::GenericContextCollector<'_, 'db>,
+        visit: &visitor::TypeVisit<'_, 'db, super::call::bind::GenericContextCollector<'_, 'db>>,
     ) {
-        collector.visit_signatures(db, self.signatures);
+        collector.visit_signatures(db, self.signatures, visit);
     }
 
     /// Return `true` if a callable has at least one overload and none return `Never`.
@@ -1226,7 +1227,7 @@ impl<'db> ExpandedSignatures<'_, 'db> {
     pub(super) fn compare_return_disjointness<'c>(
         self,
         db: &'db dyn Db,
-        target: ExpandedSignatures<'_, 'db>,
+        target: &ExpandedSignatures<'_, 'db>,
         checker: &super::relation::DisjointnessChecker<'_, 'c, 'db>,
     ) -> super::constraints::ConstraintSet<'db, 'c> {
         let env = self.env;
@@ -1410,7 +1411,7 @@ impl<'db> ExpandedSignatures<'_, 'db> {
     pub(super) fn compare<'c>(
         self,
         db: &'db dyn Db,
-        target: ExpandedSignatures<'_, 'db>,
+        target: &ExpandedSignatures<'_, 'db>,
         checker: &super::relation::TypeRelationChecker<'_, 'c, 'db>,
     ) -> super::constraints::ConstraintSet<'db, 'c> {
         checker.check_callable_signature_pair(db, self.signatures, target.signatures)
@@ -2097,6 +2098,16 @@ impl<'a, 'db> IntoIterator for &'a CallableTypes<'db> {
     }
 }
 
+impl<'db> CallableType<'db> {
+    pub(super) fn with_signature_source(
+        self,
+        db: &'db dyn Db,
+        source: SignatureSource<'db>,
+    ) -> Self {
+        Self::new_internal(db, source, self.kind(db), self.deprecated(db))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2133,15 +2144,5 @@ mod tests {
         assert_eq!(paramspec_value, bottom);
         let top = paramspec_value.top_materialization(&db, &env);
         assert_eq!(paramspec_value, top);
-    }
-}
-
-impl<'db> CallableType<'db> {
-    pub(super) fn with_signature_source(
-        self,
-        db: &'db dyn Db,
-        source: SignatureSource<'db>,
-    ) -> Self {
-        Self::new_internal(db, source, self.kind(db), self.deprecated(db))
     }
 }

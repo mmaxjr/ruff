@@ -503,7 +503,7 @@ impl<'env, 'db> ComparisonEvaluator<'env, 'db> {
                 };
                 let left = expansion.normalize(db, left);
                 let right = expansion.normalize(db, right);
-                left.evaluate_comparison(right, self, branch, operator)
+                left.evaluate_comparison(&right, self, branch, operator)
             },
         )
     }

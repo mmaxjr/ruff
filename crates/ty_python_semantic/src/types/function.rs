@@ -2253,6 +2253,17 @@ pub(super) fn report_revealed_type<'db>(
     }
 }
 
+/// Collect signatures while inferring a function definition's source-level type.
+pub(super) struct DefinitionSignatures<'db> {
+    overloads: SmallVec<[Signature<'db>; 1]>,
+}
+
+impl<'db> DefinitionSignatures<'db> {
+    pub(super) fn extend(&mut self, signatures: &CallableSignature<'db>) {
+        self.overloads.extend(signatures.iter().cloned());
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use strum::IntoEnumIterator;
@@ -2351,16 +2362,5 @@ pub(crate) mod tests {
                 "The strum `EnumString` implementation appears to be incorrect for `{function_name}`"
             );
         }
-    }
-}
-
-/// Collect signatures while inferring a function definition's source-level type.
-pub(super) struct DefinitionSignatures<'db> {
-    overloads: SmallVec<[Signature<'db>; 1]>,
-}
-
-impl<'db> DefinitionSignatures<'db> {
-    pub(super) fn extend(&mut self, signatures: &CallableSignature<'db>) {
-        self.overloads.extend(signatures.iter().cloned());
     }
 }

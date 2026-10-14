@@ -115,7 +115,7 @@ pub(super) fn check_class_method_typevar_variance<'db>(
                     instance,
                     member,
                     reported: &mut reported,
-                })
+                });
             },
         );
     }

@@ -1347,7 +1347,7 @@ impl<'db> TypeInferenceBuilder<'db, '_> {
         } else if self.is_truthiness_test_of_iterable_candidate(value_type) {
             Some(ConditionKind::Iterable)
         } else {
-            return None;
+            None
         }
     }
 

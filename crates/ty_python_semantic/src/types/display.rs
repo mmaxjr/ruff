@@ -3,6 +3,7 @@
 use super::signatures::CallableSignature;
 use crate::types::TypeOperations;
 use crate::types::typevar::TypeVarSet;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
@@ -278,7 +279,7 @@ impl<'db> DisplaySettings<'db> {
         };
 
         for ty in types {
-            collector.visit_type(db, ty.into());
+            TypeVisitorContext::new(&collector).visit_type(db, ty.into());
         }
 
         build_display_settings(&collector)
@@ -750,7 +751,7 @@ enum AmbiguityState<'db> {
     RequiresFileAndLineNumber,
 }
 
-impl<'db> TypeVisitor<'db> for AmbiguousNameCollector<'_, 'db> {
+impl<'db> TypeVisitorHooks<'db> for AmbiguousNameCollector<'_, 'db> {
     fn program_environment(&self) -> &TypeOperations<'db> {
         self.env
     }
@@ -759,7 +760,7 @@ impl<'db> TypeVisitor<'db> for AmbiguousNameCollector<'_, 'db> {
         false
     }
 
-    fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+    fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
         match ty {
             Type::ClassLiteral(class) => self.record_class(db, class),
             Type::LiteralValue(literal) => {
@@ -778,23 +779,28 @@ impl<'db> TypeVisitor<'db> for AmbiguousNameCollector<'_, 'db> {
             // rather than the protocol members, if it is a class-based protocol.
             // (For the purposes of displaying the type, we'll use the class name.)
             Type::ProtocolInstance(protocol) if let Some(class) = protocol.class_origin(db) => {
-                return self.visit_type(db, Type::from(class));
+                return visit.visit_type(db, Type::from(class));
             }
             // no need to recurse into TypeVar bounds/constraints
             Type::TypeVar(_) => return,
             _ => {}
         }
 
-        if let visitor::TypeKind::NonAtomic(t) = visitor::TypeKind::from(ty) {
+        if let visitor::TypeKind::NonAtomic(_t) = visitor::TypeKind::from(ty) {
             if !self.visited_types.borrow_mut().insert(ty) {
                 // If we have already seen this type, we can skip it.
                 return;
             }
-            visitor::walk_non_atomic_type(db, t, self);
+            visit.walk_children(db);
         }
     }
 
-    fn visit_recursive_type(&self, db: &'db dyn Db, recursive: RecursiveType<'db>) {
+    fn visit_recursive_type(
+        &self,
+        db: &'db dyn Db,
+        visit: &TypeVisit<'_, 'db, Self>,
+        recursive: RecursiveType<'db>,
+    ) {
         if recursive.alias(db).is_none() {
             self.active_recursive_types.visit_with_expansion(
                 &Type::Recursive(recursive).to_type_identity(db),
@@ -804,7 +810,7 @@ impl<'db> TypeVisitor<'db> for AmbiguousNameCollector<'_, 'db> {
                     if let Some(unfolded) =
                         expansion.expand_recursive(db, recursive).into_unfolded()
                     {
-                        unfolded.visit(db, self);
+                        unfolded.visit(db, visit);
                     }
                 },
             );
@@ -812,7 +818,7 @@ impl<'db> TypeVisitor<'db> for AmbiguousNameCollector<'_, 'db> {
         }
         // Only the alias name and its arguments are displayed, not its unfolded body.
         if let Some(arguments) = recursive.arguments(db) {
-            walk_specialization_types(db, arguments, self);
+            walk_specialization_types(db, arguments, visit);
         }
     }
 }
@@ -1130,11 +1136,11 @@ impl<'db> TypeAliasType<'db> {
 impl<'db> Type<'db> {
     /// Displays an alias declaration with its original type parameters, if this type denotes one.
     /// Recursive types without a source alias use ordinary type display instead.
-    pub fn display_alias_declaration<'env>(
+    pub fn display_alias_declaration(
         self,
         db: &'db dyn Db,
-        env: &'env TypeOperations<'db>,
-    ) -> Option<impl Display + 'env> {
+        env: &TypeOperations<'db>,
+    ) -> Option<String> {
         match self {
             Type::KnownInstance(KnownInstanceType::TypeAliasType(alias))
             | Type::TypeAlias(alias) => Some(render_alias_declaration(
@@ -4078,6 +4084,31 @@ impl<'db> FmtDetailed<'db> for DisplayKnownInstanceRepr<'_, 'db> {
     }
 }
 
+pub(super) fn render_alias_declaration<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    ty: Type<'db>,
+    definition: Definition<'db>,
+    name: &'db str,
+    generic_context: Option<GenericContext<'db>>,
+    value_ty: Type<'db>,
+) -> String {
+    DisplayTypeAliasDeclaration {
+        db,
+        env,
+        type_alias: TypeAliasDisplay {
+            db,
+            ty,
+            definition,
+            name,
+            settings: DisplaySettings::from_possibly_ambiguous_types(db, env, [ty, value_ty]),
+        },
+        generic_context,
+        value_ty,
+    }
+    .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use insta::assert_snapshot;
@@ -4633,29 +4664,4 @@ mod tests {
         "
         );
     }
-}
-
-pub(super) fn render_alias_declaration<'db>(
-    db: &'db dyn Db,
-    env: &TypeOperations<'db>,
-    ty: Type<'db>,
-    definition: Definition<'db>,
-    name: &'db str,
-    generic_context: Option<GenericContext<'db>>,
-    value_ty: Type<'db>,
-) -> String {
-    DisplayTypeAliasDeclaration {
-        db,
-        env,
-        type_alias: TypeAliasDisplay {
-            db,
-            ty,
-            definition,
-            name,
-            settings: DisplaySettings::from_possibly_ambiguous_types(db, env, [ty, value_ty]),
-        },
-        generic_context,
-        value_ty,
-    }
-    .to_string()
 }

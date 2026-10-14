@@ -3,6 +3,7 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
 use crate::types::recursive::RecursiveReferenceMapper;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::debug_assert_matches;
@@ -33,7 +34,7 @@ use crate::types::tuple::{TupleSpec, TupleType, walk_tuple_type};
 use crate::types::typevar::{TypeVarBoundOrConstraints, TypeVarSet};
 use crate::types::visitor::{
     DynamicContentMode, TypeCollector, TypeVisitor, any_over_type, any_over_type_expanding_aliases,
-    dynamic_content_impl, walk_type_with_recursion_guard,
+    dynamic_content_impl,
 };
 use crate::types::{
     ApplyTypeMappingVisitor, CallableType, ClassBase, ClassLiteral, ErrorContext,
@@ -639,7 +640,7 @@ fn protocol_materialization_is_noop_with_type_parameters<'db>(
         recursion_guard: TypeCollector<'db>,
     }
 
-    impl<'db> TypeVisitor<'db> for ParameterVisitor<'_, 'db> {
+    impl<'db> TypeVisitorHooks<'db> for ParameterVisitor<'_, 'db> {
         fn program_environment(&self) -> &TypeOperations<'db> {
             self.env
         }
@@ -651,12 +652,18 @@ fn protocol_materialization_is_noop_with_type_parameters<'db>(
         fn visit_recursive_type(
             &self,
             _db: &'db dyn Db,
+            _visit: &TypeVisit<'_, 'db, Self>,
             _recursive: crate::types::RecursiveType<'db>,
         ) {
             self.notify_skipped_lazy_type_attributes();
         }
 
-        fn visit_bound_type_var_type(&self, db: &'db dyn Db, variable: BoundTypeVarInstance<'db>) {
+        fn visit_bound_type_var_type(
+            &self,
+            db: &'db dyn Db,
+            _visit: &TypeVisit<'_, 'db, Self>,
+            variable: BoundTypeVarInstance<'db>,
+        ) {
             // Signature generic contexts are visited even for unused parameters, so this also
             // rejects method-scoped type variables absent from parameter and return types.
             if !variable.typevar(db).is_self(db)
@@ -671,17 +678,18 @@ fn protocol_materialization_is_noop_with_type_parameters<'db>(
         fn visit_generic_alias_type(
             &self,
             db: &'db dyn Db,
+            visit: &TypeVisit<'_, 'db, Self>,
             alias: crate::types::GenericAlias<'db>,
         ) {
             let specialization = alias.specialization(db);
             if specialization.materialization_kind(db).is_some() {
                 self.invalid.set(true);
             } else {
-                walk_specialization_types(db, specialization, self);
+                walk_specialization_types(db, specialization, visit);
             }
         }
 
-        fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+        fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
             if self.invalid.get() {
                 return;
             }
@@ -705,7 +713,7 @@ fn protocol_materialization_is_noop_with_type_parameters<'db>(
                                 || specialization.tuple(db).is_some()
                                 || specialization.types(db).iter().any(|ty| {
                                     if matches!(ty, Type::ProtocolInstance(_)) {
-                                        self.visit_type(db, *ty);
+                                        visit.visit_type(db, *ty);
                                         self.invalid.get()
                                     } else {
                                         !specialization_argument_is_static(
@@ -731,7 +739,7 @@ fn protocol_materialization_is_noop_with_type_parameters<'db>(
                 | Type::Union(_)
                 | Type::Intersection(_)
                 | Type::LiteralValue(_) => {
-                    walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+                    visit.walk_children_once(db, &self.recursion_guard);
                 }
                 _ => self.invalid.set(true),
             }
@@ -815,7 +823,12 @@ fn protocol_materialization_is_noop_with_type_parameters<'db>(
         if has_property && has_explicit_receiver {
             return false;
         }
-        walk_protocol_instance_member(db, &template_member, receiver, &visitor);
+        walk_protocol_instance_member(
+            db,
+            &template_member,
+            receiver,
+            &TypeVisitorContext::new(&visitor),
+        );
         if visitor.invalid.get() {
             return false;
         }
@@ -1455,7 +1468,7 @@ fn non_recursive_protocol_interface<'db>(
         active_aliases: ActiveRecursionDetector<TypeIdentity<'db>>,
     }
 
-    impl<'db> TypeVisitor<'db> for ProtocolReferenceFinder<'_, 'db> {
+    impl<'db> TypeVisitorHooks<'db> for ProtocolReferenceFinder<'_, 'db> {
         fn program_environment(&self) -> &TypeOperations<'db> {
             self.env
         }
@@ -1467,20 +1480,26 @@ fn non_recursive_protocol_interface<'db>(
         fn visit_recursive_type(
             &self,
             _db: &'db dyn Db,
+            _visit: &TypeVisit<'_, 'db, Self>,
             _recursive: crate::types::RecursiveType<'db>,
         ) {
             self.notify_skipped_lazy_type_attributes();
         }
 
-        fn visit_type_alias_type(&self, db: &'db dyn Db, type_alias: TypeAliasType<'db>) {
+        fn visit_type_alias_type(
+            &self,
+            db: &'db dyn Db,
+            visit: &TypeVisit<'_, 'db, Self>,
+            type_alias: TypeAliasType<'db>,
+        ) {
             self.active_aliases.visit(
                 &Type::TypeAlias(type_alias).to_type_identity(db),
                 || self.found.set(true),
-                || type_alias.walk_body(db, self),
+                || type_alias.walk_body(db, visit),
             );
         }
 
-        fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
+        fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, ty: Type<'db>) {
             if self.found.get() {
                 return;
             }
@@ -1496,7 +1515,7 @@ fn non_recursive_protocol_interface<'db>(
                 return;
             }
 
-            walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+            visit.walk_children_once(db, &self.recursion_guard);
         }
     }
 
@@ -1512,7 +1531,7 @@ fn non_recursive_protocol_interface<'db>(
             recursion_guard: TypeCollector::default(),
             active_aliases: ActiveRecursionDetector::default(),
         };
-        walk_protocol_instance_member(db, member, receiver_ty, &visitor);
+        walk_protocol_instance_member(db, member, receiver_ty, &TypeVisitorContext::new(&visitor));
         !visitor.found.get()
     })
 }

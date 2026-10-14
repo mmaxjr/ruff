@@ -1,5 +1,6 @@
 use crate::ProgramEnvironment;
 use crate::types::TypeOperations;
+use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use itertools::{Either, Itertools};
 use ruff_db::{
     PythonFile,
@@ -55,7 +56,7 @@ use crate::{
         tuple::{FixedLengthTuple, Tuple},
         typed_dict::{TypedDictParams, TypedDictType, typed_dict_params_from_class_def},
         variance::{MemberVariance, VarianceInferable, VarianceOrigin, VarianceTerm},
-        visitor::{TypeCollector, TypeVisitor, walk_type_with_recursion_guard},
+        visitor::{TypeCollector, TypeVisitor},
     },
 };
 use ty_python_core::{
@@ -512,7 +513,7 @@ impl<'db> StaticClassLiteral<'db> {
             recursion_guard: TypeCollector<'db>,
         }
 
-        impl<'db> TypeVisitor<'db> for CollectTypeVars<'_, 'db> {
+        impl<'db> TypeVisitorHooks<'db> for CollectTypeVars<'_, 'db> {
             fn program_environment(&self) -> &TypeOperations<'db> {
                 self.env
             }
@@ -524,6 +525,7 @@ impl<'db> StaticClassLiteral<'db> {
             fn visit_recursive_type(
                 &self,
                 _db: &'db dyn Db,
+                _visit: &TypeVisit<'_, 'db, Self>,
                 _recursive: crate::types::RecursiveType<'db>,
             ) {
                 self.notify_skipped_lazy_type_attributes();
@@ -532,21 +534,32 @@ impl<'db> StaticClassLiteral<'db> {
             fn visit_bound_type_var_type(
                 &self,
                 _db: &'db dyn Db,
+                _visit: &TypeVisit<'_, 'db, Self>,
                 bound_typevar: BoundTypeVarInstance<'db>,
             ) {
                 self.typevars.borrow_mut().insert(bound_typevar);
             }
 
-            fn visit_generic_alias_type(&self, db: &'db dyn Db, alias: GenericAlias<'db>) {
+            fn visit_generic_alias_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                alias: GenericAlias<'db>,
+            ) {
                 // The generic context contains the base class's formal type parameters, not type
                 // variables referenced by this class's base expression.
                 for ty in alias.specialization(db).types(db) {
-                    self.visit_type(db, *ty);
+                    visit.visit_type(db, *ty);
                 }
             }
 
-            fn visit_type(&self, db: &'db dyn Db, ty: Type<'db>) {
-                walk_type_with_recursion_guard(db, ty, self, &self.recursion_guard);
+            fn visit_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                _ty: Type<'db>,
+            ) {
+                visit.walk_children_once(db, &self.recursion_guard);
             }
         }
 
@@ -558,7 +571,7 @@ impl<'db> StaticClassLiteral<'db> {
             recursion_guard: TypeCollector::default(),
         };
         for base in self.explicit_bases(db) {
-            visitor.visit_type(db, *base);
+            TypeVisitorContext::new(&visitor).visit_type(db, *base);
         }
         visitor.typevars.into_inner()
     }
