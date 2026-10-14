@@ -195,17 +195,10 @@ impl<'db> DynamicEnumLiteral<'db> {
     #[salsa::tracked(
         returns(ref),
         heap_size=ruff_memory_usage::heap_size,
-        cycle_initial=|db, _, self_: DynamicEnumLiteral<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| {
-            Ok(Mro::from([
-                ClassBase::Class(ClassType::NonGeneric(ClassLiteral::DynamicEnum(self_))),
-                ClassBase::object(db, &source_operation.operations(ProgramEnvironment::from_scope(self_.scope(db)))),
-            ]))
-        })
+        cycle_initial=|db, _, self_: DynamicEnumLiteral<'db>| SourceTypeQuery::run::<crate::types::source_queries::DynamicEnumLiteralTryMroInitial>(db, (self_,))
     )]
     pub(crate) fn try_mro(self, db: &'db dyn Db) -> Result<Mro<'db>, DynamicMroError<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.try_mro_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::DynamicEnumLiteralTryMro>(db, (self,))
     }
 
     fn try_mro_from_source(
@@ -336,5 +329,30 @@ impl<'db> DynamicEnumLiteral<'db> {
     #[expect(clippy::unused_self)]
     pub(super) fn own_instance_member(self, _db: &'db dyn Db, _name: &str) -> Member<'db> {
         Member::unbound()
+    }
+}
+crate::types::source_query! {
+    fn DynamicEnumLiteralTryMroInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        self_: DynamicEnumLiteral<'db>,
+    ) -> Result<Mro<'db>, DynamicMroError<'db>> {
+        Ok(Mro::from([
+            ClassBase::Class(ClassType::NonGeneric(ClassLiteral::DynamicEnum(self_))),
+            ClassBase::object(
+                db,
+                &source_operation.operations(ProgramEnvironment::from_scope(self_.scope(db))),
+            ),
+        ]))
+    }
+}
+
+crate::types::source_query! {
+    fn DynamicEnumLiteralTryMro<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: DynamicEnumLiteral<'db>,
+    ) -> Result<Mro<'db>, DynamicMroError<'db>> {
+        source_self.try_mro_from_source(db, source_operation)
     }
 }

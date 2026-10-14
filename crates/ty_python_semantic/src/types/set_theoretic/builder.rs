@@ -1794,7 +1794,7 @@ impl<'db> IntersectionBuilder<'db> {
 
 /// The signs of a pair of intersection elements. For `Mixed`, the first is positive.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, salsa::SalsaValue)]
-pub(in crate::types) enum IntersectionPolarity {
+pub(crate) enum IntersectionPolarity {
     Positive,
     Negative,
     Mixed,
@@ -1802,7 +1802,7 @@ pub(in crate::types) enum IntersectionPolarity {
 
 /// Describes the signed intersection elements, so `Disjoint` also covers `S & ~T` when `S <: T`.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, salsa::SalsaValue, get_size2::GetSize)]
-enum IntersectionSimplification {
+pub(crate) enum IntersectionSimplification {
     Unchanged,
     FirstRedundant,
     SecondRedundant,
@@ -1910,23 +1910,22 @@ fn simplify_intersection_pair_query<'db>(
     types: TypePair<'db>,
     polarity: IntersectionPolarity,
 ) -> IntersectionSimplification {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::SimplifyIntersectionPairQuery>(
         db,
         (types, polarity),
-        |db, source_operation, (types, polarity)| {
-            simplify_intersection_pair_query_from_source(db, source_operation, types, polarity)
-        },
     )
 }
 
-fn simplify_intersection_pair_query_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    types: TypePair<'db>,
-    polarity: IntersectionPolarity,
-) -> IntersectionSimplification {
-    let env = source_operation.operations(ProgramEnvironment::from_program(types.program(db)));
-    compute_intersection_simplification(db, &env, types.first(db), types.second(db), polarity)
+crate::types::source_query! {
+    fn SimplifyIntersectionPairQuery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        types: TypePair<'db>,
+        polarity: IntersectionPolarity,
+    ) -> IntersectionSimplification {
+        let env = source_operation.operations(ProgramEnvironment::from_program(types.program(db)));
+        compute_intersection_simplification(db, &env, types.first(db), types.second(db), polarity)
+    }
 }
 
 fn compute_intersection_simplification<'db>(

@@ -65,7 +65,7 @@ use ty_python_core::definition::{
 /// Selects which binding context to use for type variables that only appear in a return-position
 /// `Callable`.
 #[derive(Debug, Copy, Clone, Eq, Hash, PartialEq)]
-pub(super) enum ReturnCallableTypeVarScope {
+pub(crate) enum ReturnCallableTypeVarScope {
     /// Keep the type variables bound to the function's lexical generic context.
     Lexical,
     /// Move the type variables to the returned `Callable`'s generic context.
@@ -942,7 +942,7 @@ impl<'db> Signature<'db> {
         has_implicitly_positional_first_parameter: bool,
         return_callable_typevar_scope: ReturnCallableTypeVarScope,
     ) -> Self {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::SignatureFromFunction>(
             db,
             (
                 pep695_generic_context,
@@ -951,25 +951,6 @@ impl<'db> Signature<'db> {
                 has_implicitly_positional_first_parameter,
                 return_callable_typevar_scope,
             ),
-            |db,
-             source_operation,
-             (
-                pep695_generic_context,
-                definition,
-                function_node,
-                has_implicitly_positional_first_parameter,
-                return_callable_typevar_scope,
-            )| {
-                Self::from_function_from_source(
-                    db,
-                    source_operation,
-                    pep695_generic_context,
-                    definition,
-                    function_node,
-                    has_implicitly_positional_first_parameter,
-                    return_callable_typevar_scope,
-                )
-            },
         )
     }
 
@@ -2292,6 +2273,27 @@ impl<'db> Signature<'db> {
     /// Create a new signature with the given return type.
     pub(crate) fn with_return_type(self, return_ty: Type<'db>) -> Self {
         Self { return_ty, ..self }
+    }
+}
+crate::types::source_query! {
+    fn SignatureFromFunction<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        pep695_generic_context: Option<GenericContext<'db>>,
+        definition: Definition<'db>,
+        function_node: &'input ast::StmtFunctionDef,
+        has_implicitly_positional_first_parameter: bool,
+        return_callable_typevar_scope: ReturnCallableTypeVarScope,
+    ) -> Signature<'db> {
+        Signature::from_function_from_source(
+            db,
+            source_operation,
+            pep695_generic_context,
+            definition,
+            function_node,
+            has_implicitly_positional_first_parameter,
+            return_callable_typevar_scope,
+        )
     }
 }
 
@@ -5347,24 +5349,13 @@ impl<'db> Parameters<'db> {
         parameters: &ast::Parameters,
         has_implicitly_positional_first_parameter: bool,
     ) -> Self {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::ParametersFromParameters>(
             db,
             (
                 definition,
                 parameters,
                 has_implicitly_positional_first_parameter,
             ),
-            |db,
-             source_operation,
-             (definition, parameters, has_implicitly_positional_first_parameter)| {
-                Self::from_parameters_from_source(
-                    db,
-                    source_operation,
-                    definition,
-                    parameters,
-                    has_implicitly_positional_first_parameter,
-                )
-            },
         )
     }
 
@@ -5801,6 +5792,23 @@ impl<'db> Parameters<'db> {
         }
     }
 }
+crate::types::source_query! {
+    fn ParametersFromParameters<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+        parameters: &'input ast::Parameters,
+        has_implicitly_positional_first_parameter: bool,
+    ) -> Parameters<'db> {
+        Parameters::from_parameters_from_source(
+            db,
+            source_operation,
+            definition,
+            parameters,
+            has_implicitly_positional_first_parameter,
+        )
+    }
+}
 
 impl<'db, 'a> IntoIterator for &'a Parameters<'db> {
     type Item = &'a Parameter<'db>;
@@ -6201,18 +6209,9 @@ impl<'db> Parameter<'db> {
         parameter: &ast::Parameter,
         kind: ParameterKind<'db>,
     ) -> Self {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::ParameterFromNodeAndKind>(
             db,
             (function_definition, parameter, kind),
-            |db, source_operation, (function_definition, parameter, kind)| {
-                Self::from_node_and_kind_from_source(
-                    db,
-                    source_operation,
-                    function_definition,
-                    parameter,
-                    kind,
-                )
-            },
         )
     }
 
@@ -6436,6 +6435,23 @@ impl<'db> Parameter<'db> {
         result
     }
 }
+crate::types::source_query! {
+    fn ParameterFromNodeAndKind<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        function_definition: Definition<'db>,
+        parameter: &'input ast::Parameter,
+        kind: ParameterKind<'db>,
+    ) -> Parameter<'db> {
+        Parameter::from_node_and_kind_from_source(
+            db,
+            source_operation,
+            function_definition,
+            parameter,
+            kind,
+        )
+    }
+}
 
 /// A parameter default whose presence is known without evaluating its type.
 ///
@@ -6480,9 +6496,7 @@ impl<'db> ParameterDefault<'db> {
 #[salsa::tracked(
     returns(copy),
     cycle_initial=|_, id, _, _| Type::divergent(id),
-    cycle_fn=|db, cycle, previous: &Type<'db>, ty: Type<'db>, parameter: Definition<'db>, _| SourceTypeQuery::run(db, (cycle, previous, ty, parameter), |db, source_operation, (cycle, previous, ty, parameter)| {
-        ty.cycle_normalized(db, &source_operation.operations(ProgramEnvironment::from_definition(parameter)), *previous, cycle)
-    }),
+    cycle_fn=|db, cycle, previous: &Type<'db>, ty: Type<'db>, parameter: Definition<'db>, _| SourceTypeQuery::run::<crate::types::source_queries::ParameterDefaultTypeRecovery>(db, (cycle, previous, ty, parameter,)),
     heap_size=ruff_memory_usage::heap_size
 )]
 fn parameter_default_type<'db>(
@@ -6490,25 +6504,41 @@ fn parameter_default_type<'db>(
     parameter: Definition<'db>,
     context: ExpressionInferenceContext<'db>,
 ) -> Type<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::ParameterDefaultType>(
         db,
         (parameter, context),
-        |db, source_operation, (parameter, context)| {
-            parameter_default_type_from_source(db, source_operation, parameter, context)
-        },
     )
 }
+crate::types::source_query! {
+    fn ParameterDefaultTypeRecovery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input Type<'db>,
+        ty: Type<'db>,
+        parameter: Definition<'db>,
+    ) -> Type<'db> {
+        ty.cycle_normalized(
+            db,
+            &source_operation.operations(ProgramEnvironment::from_definition(parameter)),
+            *previous,
+            cycle,
+        )
+    }
+}
 
-fn parameter_default_type_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    parameter: Definition<'db>,
-    context: ExpressionInferenceContext<'db>,
-) -> Type<'db> {
-    raw_parameter_default_type(db, parameter, context).replace_parameter_defaults(
-        db,
-        &source_operation.operations(ProgramEnvironment::from_definition(parameter)),
-    )
+crate::types::source_query! {
+    fn ParameterDefaultType<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        parameter: Definition<'db>,
+        context: ExpressionInferenceContext<'db>,
+    ) -> Type<'db> {
+        raw_parameter_default_type(db, parameter, context).replace_parameter_defaults(
+            db,
+            &source_operation.operations(ProgramEnvironment::from_definition(parameter)),
+        )
+    }
 }
 
 /// Read a source default before normalizing nested defaults for signature display and comparison.

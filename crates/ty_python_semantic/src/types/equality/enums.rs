@@ -1034,7 +1034,7 @@ impl<'db> EnumValueSet<'db> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-struct EnumClassKeyProfile<'db> {
+pub(crate) struct EnumClassKeyProfile<'db> {
     members_are_exhaustive: bool,
     semantics: Option<KnownComparisonSemantics>,
     members: Box<[(Name, Option<LiteralValueTypeKind<'db>>)]>,
@@ -1047,49 +1047,48 @@ fn enum_class_key_profile<'db>(
     enum_class: EnumClassLiteral<'db>,
     operator: ComparisonOperator,
 ) -> EnumClassKeyProfile<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::EnumClassKeyProfile>(
         db,
         (enum_class, operator),
-        |db, source_operation, (enum_class, operator)| {
-            enum_class_key_profile_from_source(db, source_operation, enum_class, operator)
-        },
     )
 }
 
-fn enum_class_key_profile_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    enum_class: EnumClassLiteral<'db>,
-    operator: ComparisonOperator,
-) -> EnumClassKeyProfile<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_file(
-        enum_class.class_literal(db).program_file(db),
-    ));
-    let semantics = KnownComparisonSemantics::of_instance(
-        db,
-        &env,
-        enum_class
-            .class_literal(db)
-            .to_non_generic_instance(db, &env),
-        operator,
-    );
-    let members: Box<[(Name, Option<LiteralValueTypeKind<'db>>)]> = enum_class
-        .members(db)
-        .iter()
-        .map(|(name, _)| {
-            (
-                name.clone(),
-                semantics.and_then(|semantics| {
-                    enum_literal_value(db, &env, EnumLiteralType::new(db, enum_class, name))
-                        .and_then(|value| enum_comparison_key(semantics, value))
-                }),
-            )
-        })
-        .collect();
-    EnumClassKeyProfile {
-        members_are_exhaustive: enum_class.members_are_exhaustive(db),
-        semantics,
-        members,
+crate::types::source_query! {
+    fn EnumClassKeyProfile<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        enum_class: EnumClassLiteral<'db>,
+        operator: ComparisonOperator,
+    ) -> EnumClassKeyProfile<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            enum_class.class_literal(db).program_file(db),
+        ));
+        let semantics = KnownComparisonSemantics::of_instance(
+            db,
+            &env,
+            enum_class
+                .class_literal(db)
+                .to_non_generic_instance(db, &env),
+            operator,
+        );
+        let members: Box<[(Name, Option<LiteralValueTypeKind<'db>>)]> = enum_class
+            .members(db)
+            .iter()
+            .map(|(name, _)| {
+                (
+                    name.clone(),
+                    semantics.and_then(|semantics| {
+                        enum_literal_value(db, &env, EnumLiteralType::new(db, enum_class, name))
+                            .and_then(|value| enum_comparison_key(semantics, value))
+                    }),
+                )
+            })
+            .collect();
+        EnumClassKeyProfile {
+            members_are_exhaustive: enum_class.members_are_exhaustive(db),
+            semantics,
+            members,
+        }
     }
 }
 

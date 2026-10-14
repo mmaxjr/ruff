@@ -1,7 +1,6 @@
 //! Inference for subscript expressions (e.g., `x[0]`, `list[int]`).
 
 use crate::Db;
-use crate::types::ApplyTypeMappingVisitor;
 use crate::types::TypeOperations;
 use std::fmt::{self, Display};
 
@@ -15,7 +14,7 @@ use super::call::{Bindings, CallArguments, CallDunderError, CallErrorKind};
 use super::class::KnownClass;
 use super::class_base::ClassBase;
 use super::context::InferContext;
-use super::cyclic::{CycleDetector, CycleKind};
+use super::cyclic::CycleKind;
 use super::diagnostic::{
     CALL_NON_CALLABLE, INVALID_ARGUMENT_TYPE, INVALID_GENERIC_CLASS, NOT_SUBSCRIPTABLE,
     POSSIBLY_MISSING_IMPLICIT_CALL, report_index_out_of_bounds, report_invalid_key_on_typed_dict,
@@ -23,6 +22,7 @@ use super::diagnostic::{
 };
 use super::infer::TypeContext;
 use super::instance::SliceLiteral;
+use super::recursive::{TypeVisitorKey, TypeVisitorState};
 use super::special_form::SpecialFormType;
 use super::{
     ClassLiteral, IntersectionBuilder, IntersectionType, KnownInstanceType, Type, TypeAliasType,
@@ -562,9 +562,8 @@ fn typed_dict_subscript<'db>(
 /// A subscript operation keeps both operands in its recursion key. Expanding either operand
 /// can revisit the pair, and alias normalization must reuse the same mapping state.
 pub(super) struct SubscriptChecker<'env, 'db> {
-    mapping: ApplyTypeMappingVisitor<'env, 'db>,
     expr_context: ast::ExprContext,
-    active: CycleDetector<'db, ast::ExprContext, (Type<'db>, Type<'db>), (), 1>,
+    active: TypeVisitorState<'env, 'db, (Type<'db>, Type<'db>), ()>,
 }
 
 impl<'db> SubscriptChecker<'_, 'db> {
@@ -582,31 +581,29 @@ impl<'db> SubscriptChecker<'_, 'db> {
             return value_ty.subscript_impl(db, self, slice_ty);
         }
         self.active
-            .visit_active_with_expansion(db, (value_ty, slice_ty), &self.mapping, |visit| {
-                match visit {
-                    Err(CycleKind::Exact) => Ok(Type::Never),
-                    Err(CycleKind::MatchingIdentity | CycleKind::Reentrant) => Ok(Type::unknown()),
-                    Ok(expansion) => match (value_ty, slice_ty) {
-                        (Type::Dynamic(_) | Type::Divergent(_) | Type::Never, _) => {
-                            value_ty.subscript_impl(db, self, slice_ty)
-                        }
-                        (Type::Recursive(recursive), _) => expansion
-                            .expand_recursive(db, recursive)
-                            .map(|body| body.subscript_as_value(db, self, slice_ty))
-                            .unwrap_or(Ok(value_ty)),
-                        (_, Type::Recursive(recursive)) => expansion
-                            .expand_recursive(db, recursive)
-                            .map(|body| body.subscript_as_index(db, self, value_ty))
-                            .unwrap_or(Ok(value_ty)),
-                        (Type::TypeAlias(alias), _) => expansion
-                            .alias_body(db, alias)
-                            .subscript_as_value(db, self, slice_ty),
-                        (_, Type::TypeAlias(alias)) => expansion
-                            .alias_body(db, alias)
-                            .subscript_as_index(db, self, value_ty),
-                        _ => value_ty.subscript_impl(db, self, slice_ty),
-                    },
-                }
+            .visit_active_with_expansion(db, (value_ty, slice_ty), |visit| match visit {
+                Err(CycleKind::Exact) => Ok(Type::Never),
+                Err(CycleKind::MatchingIdentity | CycleKind::Reentrant) => Ok(Type::unknown()),
+                Ok(expansion) => match (value_ty, slice_ty) {
+                    (Type::Dynamic(_) | Type::Divergent(_) | Type::Never, _) => {
+                        value_ty.subscript_impl(db, self, slice_ty)
+                    }
+                    (Type::Recursive(recursive), _) => expansion
+                        .expand_recursive(db, recursive)
+                        .map(|body| body.subscript_as_value(db, self, slice_ty))
+                        .unwrap_or(Ok(value_ty)),
+                    (_, Type::Recursive(recursive)) => expansion
+                        .expand_recursive(db, recursive)
+                        .map(|body| body.subscript_as_index(db, self, value_ty))
+                        .unwrap_or(Ok(value_ty)),
+                    (Type::TypeAlias(alias), _) => expansion
+                        .alias_body(db, alias)
+                        .subscript_as_value(db, self, slice_ty),
+                    (_, Type::TypeAlias(alias)) => expansion
+                        .alias_body(db, alias)
+                        .subscript_as_index(db, self, value_ty),
+                    _ => value_ty.subscript_impl(db, self, slice_ty),
+                },
             })
     }
 }
@@ -620,9 +617,8 @@ impl<'db> Type<'db> {
         expr_context: ast::ExprContext,
     ) -> Result<Type<'db>, SubscriptError<'db>> {
         SubscriptChecker {
-            mapping: ApplyTypeMappingVisitor::new(env),
             expr_context,
-            active: CycleDetector::new(()),
+            active: TypeVisitorState::new(env, TypeVisitorKey::Subscript(expr_context), ()),
         }
         .check(db, self, slice_ty)
     }
@@ -633,7 +629,7 @@ impl<'db> Type<'db> {
         checker: &SubscriptChecker<'_, 'db>,
         slice_ty: Type<'db>,
     ) -> Result<Type<'db>, SubscriptError<'db>> {
-        let env = checker.mapping.env;
+        let env = checker.active.mapping().env;
         let expr_context = checker.expr_context;
         if let Some(fallback) = self.materialized_divergent_fallback() {
             return checker.check(db, fallback, slice_ty);
@@ -659,12 +655,24 @@ impl<'db> Type<'db> {
             ) => Some(Ok(value_ty)),
 
             // Expand overlapping alternatives before collecting their subscript errors.
-            (Type::Union(union), _) if union.needs_alias_expansion(db, &checker.mapping) => {
-                Some(checker.check(db, union.expand_aliases(db, &checker.mapping), slice_ty))
+            (Type::Union(union), _)
+                if union.needs_alias_expansion(db, checker.active.mapping()) =>
+            {
+                Some(checker.check(
+                    db,
+                    union.expand_aliases(db, checker.active.mapping()),
+                    slice_ty,
+                ))
             }
 
-            (_, Type::Union(union)) if union.needs_alias_expansion(db, &checker.mapping) => {
-                Some(checker.check(db, value_ty, union.expand_aliases(db, &checker.mapping)))
+            (_, Type::Union(union))
+                if union.needs_alias_expansion(db, checker.active.mapping()) =>
+            {
+                Some(checker.check(
+                    db,
+                    value_ty,
+                    union.expand_aliases(db, checker.active.mapping()),
+                ))
             }
 
             (Type::Union(union), _) => Some(map_subscript_alternatives(

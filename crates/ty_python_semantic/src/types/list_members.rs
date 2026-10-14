@@ -758,7 +758,7 @@ pub struct MemberWithDefinition<'db> {
 /// members, and a [`Type`] currently (as of 2025-07-09) has no way to do
 /// ordered comparisons.
 #[derive(Clone, Debug)]
-pub struct Member<'db> {
+pub(crate) struct Member<'db> {
     pub(crate) name: Name,
     pub(crate) ty: Type<'db>,
     /// Whether this member is known to exist only during type checking.

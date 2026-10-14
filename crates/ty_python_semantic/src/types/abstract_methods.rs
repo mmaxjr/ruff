@@ -271,9 +271,10 @@ impl<'db> ClassType<'db> {
 
     #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size, cycle_initial=|_, _, _| FxIndexMap::default())]
     fn cached_abstract_methods(self, db: &'db dyn Db) -> FxIndexMap<Name, AbstractMethod<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.cached_abstract_methods_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::ClassTypeCachedAbstractMethods>(
+            db,
+            (self,),
+        )
     }
 
     fn cached_abstract_methods_from_source(
@@ -427,6 +428,15 @@ impl<'db> ClassType<'db> {
         abstract_methods
     }
 }
+crate::types::source_query! {
+    fn ClassTypeCachedAbstractMethods<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: ClassType<'db>,
+    ) -> FxIndexMap<Name, AbstractMethod<'db>> {
+        source_self.cached_abstract_methods_from_source(db, source_operation)
+    }
+}
 
 /// Whether a binding could resolve to a method marked with `@abstractmethod`.
 ///
@@ -449,7 +459,7 @@ fn might_be_explicitly_abstract<'db>(db: &'db dyn Db, definition: Definition<'db
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct AbstractMethod<'db> {
+pub(crate) struct AbstractMethod<'db> {
     pub(super) defining_class: ClassType<'db>,
     pub(super) definition: Definition<'db>,
     pub(super) kind: AbstractMethodKind,

@@ -337,48 +337,48 @@ fn enum_class_literal<'db>(
     db: &'db dyn Db,
     class: ClassLiteral<'db>,
 ) -> Option<EnumClassLiteral<'db>> {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        enum_class_literal_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::EnumClassLiteral>(db, (class,))
 }
 
-fn enum_class_literal_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: ClassLiteral<'db>,
-) -> Option<EnumClassLiteral<'db>> {
-    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
-    let metadata = enum_metadata(db, class)?;
-    let members = metadata
-        .members
-        .keys()
-        .map(|name| {
-            metadata
-                .value_type(db, &env, name)
-                .map(|ty| (name.clone(), ty))
-        })
-        .collect::<Option<Box<[_]>>>()?;
-    let mut aliases: Vec<_> = metadata
-        .aliases
-        .iter()
-        .map(|(alias, member)| (alias.clone(), member.clone()))
-        .collect();
-    aliases.sort_unstable();
-    let members_are_exhaustive = !metadata.value_construction.metaclass_may_transform_values
-        && !Type::ClassLiteral(class).is_subtype_of(
-            db,
-            &env,
-            KnownClass::Flag.to_subclass_of(db, &env),
-        );
+crate::types::source_query! {
+    fn EnumClassLiteral<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassLiteral<'db>,
+    ) -> Option<EnumClassLiteral<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
+        let metadata = enum_metadata(db, class)?;
+        let members = metadata
+            .members
+            .keys()
+            .map(|name| {
+                metadata
+                    .value_type(db, &env, name)
+                    .map(|ty| (name.clone(), ty))
+            })
+            .collect::<Option<Box<[_]>>>()?;
+        let mut aliases: Vec<_> = metadata
+            .aliases
+            .iter()
+            .map(|(alias, member)| (alias.clone(), member.clone()))
+            .collect();
+        aliases.sort_unstable();
+        let members_are_exhaustive = !metadata.value_construction.metaclass_may_transform_values
+            && !Type::ClassLiteral(class).is_subtype_of(
+                db,
+                &env,
+                KnownClass::Flag.to_subclass_of(db, &env),
+            );
 
-    Some(EnumClassLiteral::new(
-        db,
-        class,
-        members,
-        aliases.into_boxed_slice(),
-        metadata.aliases_are_known,
-        members_are_exhaustive,
-    ))
+        Some(EnumClassLiteral::new(
+            db,
+            class,
+            members,
+            aliases.into_boxed_slice(),
+            metadata.aliases_are_known,
+            members_are_exhaustive,
+        ))
+    }
 }
 
 impl<'db> EnumClassLiteral<'db> {
@@ -981,41 +981,41 @@ impl<'db> EnumComplementType<'db> {
 /// Returns the set of names listed in an enum's `_ignore_` attribute.
 #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
 pub(crate) fn enum_ignored_names<'db>(db: &'db dyn Db, scope_id: ScopeId<'db>) -> FxHashSet<Name> {
-    SourceTypeQuery::run(db, (scope_id,), |db, source_operation, (scope_id,)| {
-        enum_ignored_names_from_source(db, source_operation, scope_id)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::EnumIgnoredNames>(db, (scope_id,))
 }
 
-fn enum_ignored_names_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    scope_id: ScopeId<'db>,
-) -> FxHashSet<Name> {
-    let use_def_map = use_def_map(db, scope_id);
-    let table = place_table(db, scope_id);
+crate::types::source_query! {
+    fn EnumIgnoredNames<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        scope_id: ScopeId<'db>,
+    ) -> FxHashSet<Name> {
+        let use_def_map = use_def_map(db, scope_id);
+        let table = place_table(db, scope_id);
 
-    let Some(ignore) = table.symbol_id("_ignore_") else {
-        return FxHashSet::default();
-    };
+        let Some(ignore) = table.symbol_id("_ignore_") else {
+            return FxHashSet::default();
+        };
 
-    let ignore_bindings = use_def_map.reachable_symbol_bindings(ignore);
-    let env = source_operation.operations(ProgramEnvironment::from_scope(scope_id));
-    let ignore_place = place_from_bindings(db, &env, ignore_bindings).place;
+        let ignore_bindings = use_def_map.reachable_symbol_bindings(ignore);
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope_id));
+        let ignore_place = place_from_bindings(db, &env, ignore_bindings).place;
 
-    match ignore_place {
-        Place::Defined(DefinedPlace { ty, .. }) => ty
-            .as_string_literal()
-            .map(|ignored_names| {
-                ignored_names
-                    .value(db)
-                    .split_ascii_whitespace()
-                    .map(Name::new)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        match ignore_place {
+            Place::Defined(DefinedPlace { ty, .. }) => ty
+                .as_string_literal()
+                .map(|ignored_names| {
+                    ignored_names
+                        .value(db)
+                        .split_ascii_whitespace()
+                        .map(Name::new)
+                        .collect()
+                })
+                .unwrap_or_default(),
 
-        // TODO: support the list-variant of `_ignore_`.
-        Place::Undefined => FxHashSet::default(),
+            // TODO: support the list-variant of `_ignore_`.
+            Place::Undefined => FxHashSet::default(),
+        }
     }
 }
 
@@ -1053,349 +1053,349 @@ pub(crate) fn enum_metadata<'db>(
     db: &'db dyn Db,
     class: ClassLiteral<'db>,
 ) -> Option<EnumMetadata<'db>> {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        enum_metadata_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::EnumMetadata>(db, (class,))
 }
 
-fn enum_metadata_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: ClassLiteral<'db>,
-) -> Option<EnumMetadata<'db>> {
-    let class = match class {
-        ClassLiteral::Static(class) => class,
-        ClassLiteral::Dynamic(..) => {
-            // Classes created via `type` cannot be enums; the following fails at runtime:
-            // ```python
-            // import enum
-            //
-            // class BaseEnum(enum.Enum):
-            //     pass
-            //
-            // MyEnum = type("MyEnum", (BaseEnum,), {"A": 1, "B": 2})
-            // ```
-            return None;
-        }
-        ClassLiteral::DynamicNamedTuple(..) | ClassLiteral::DynamicTypedDict(..) => return None,
-        ClassLiteral::DynamicEnum(enum_lit) => {
-            let spec = enum_lit.spec(db);
-            if !spec.has_known_members(db) {
+crate::types::source_query! {
+    fn EnumMetadata<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassLiteral<'db>,
+    ) -> Option<EnumMetadata<'db>> {
+        let class = match class {
+            ClassLiteral::Static(class) => class,
+            ClassLiteral::Dynamic(..) => {
+                // Classes created via `type` cannot be enums; the following fails at runtime:
+                // ```python
+                // import enum
+                //
+                // class BaseEnum(enum.Enum):
+                //     pass
+                //
+                // MyEnum = type("MyEnum", (BaseEnum,), {"A": 1, "B": 2})
+                // ```
                 return None;
             }
-            let env =
-                source_operation.operations(ProgramEnvironment::from_scope(enum_lit.scope(db)));
-            let value_construction = EnumValueConstruction {
-                data_type: inherited_enum_data_type(db, &env, ClassLiteral::DynamicEnum(enum_lit)),
-                ..EnumValueConstruction::default()
-            };
-            let mut members = FxIndexMap::default();
-            let mut aliases = FxHashMap::default();
-            let mut enum_values: FxHashMap<LiteralValueTypeKind<'db>, Name> = FxHashMap::default();
-            for (name, ty) in spec.members(db) {
-                if value_construction
-                    .alias_detection_value(db, &env, *ty, false)
-                    .and_then(|alias_value_ty| {
-                        try_register_alias(alias_value_ty, name, &mut enum_values, &mut aliases)
-                            // Identical raw literals remain aliases even when normalization widens.
-                            .or_else(|| {
-                                try_register_alias(*ty, name, &mut enum_values, &mut aliases)
-                            })
-                    })
-                    == Some(true)
-                {
-                    continue;
-                }
-                members.insert(name.clone(), *ty);
-            }
-            members.shrink_to_fit();
-
-            return Some(EnumMetadata {
-                members,
-                aliases,
-                aliases_are_known: true,
-                auto_members: FxHashSet::default(),
-                value_annotation: None,
-                value_construction,
-            });
-        }
-    };
-    // This is a fast path to avoid traversing the MRO of known classes
-    if class
-        .known(db)
-        .is_some_and(|known_class| !known_class.is_enum_subclass_with_members())
-    {
-        return None;
-    }
-
-    let scope_id = class.body_scope(db);
-    let use_def_map = use_def_map(db, scope_id);
-    // As a fast path, avoid looking up base classes if the class body is empty
-    use_def_map.all_end_of_scope_symbol_bindings().next()?;
-
-    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
-
-    if !is_enum_class_by_inheritance(db, &env, class) {
-        return None;
-    }
-
-    let table = place_table(db, scope_id);
-
-    let mut enum_values: FxHashMap<LiteralValueTypeKind<'db>, Name> = FxHashMap::default();
-    let mut auto_counter = 0;
-    let mut auto_members = FxHashSet::default();
-    let mut aliases_are_known = true;
-    let mut prev_value_was_non_literal_int = false;
-    let mut prev_bool_literal = None;
-    let ignored_names = enum_ignored_names(db, scope_id);
-
-    // Look up custom construction methods, falling back to parent enum classes. An opaque binding
-    // still shadows methods from classes later in the MRO.
-    let data_type = inherited_enum_data_type(db, &env, ClassLiteral::Static(class));
-    let user_defined_init = custom_enum_method(db, scope_id, "__init__")
-        .or_else(|| inherited_user_defined_enum_method(db, &env, class, "__init__"));
-    let init = resolve_enum_method(user_defined_init, || {
-        inherited_known_enum_method(db, &env, class, "__init__")
-    });
-    // CPython checks `__new_member__` and then `__new__` on each enum base before continuing
-    // through the MRO or falling back to the data-type constructor.
-    let user_defined_new = custom_enum_method(db, scope_id, "__new__")
-        .or_else(|| inherited_user_defined_enum_new(db, &env, class))
-        .or_else(|| inherited_user_defined_mixin_new(db, &env, class));
-    let new = resolve_enum_method(user_defined_new, || {
-        inherited_known_enum_method(db, &env, class, "__new__")
-    });
-    let metaclass_may_transform_values = enum_metaclass_may_transform_values(db, &env, class);
-    let user_defined_generate_next_value =
-        custom_enum_method(db, scope_id, "_generate_next_value_").or_else(|| {
-            inherited_user_defined_enum_method(db, &env, class, "_generate_next_value_")
-        });
-    let generate_next_value = resolve_enum_method(user_defined_generate_next_value, || {
-        inherited_known_enum_method(db, &env, class, "_generate_next_value_")
-    });
-    let value_construction = EnumValueConstruction {
-        init,
-        new,
-        generate_next_value,
-        data_type,
-        metaclass_may_transform_values,
-    };
-
-    let mut aliases = FxHashMap::default();
-
-    let mut members = use_def_map
-        .all_end_of_scope_symbol_bindings()
-        .filter_map(|(symbol_id, bindings)| {
-            let name = table.symbol(symbol_id).name();
-
-            if name.starts_with("__") {
-                // Skip private attributes (`__private`) and dunders (`__module__`, etc.).
-                // CPython's enum metaclass never treats these as members.
-                return None;
-            }
-
-            if matches!(
-                name.as_str(),
-                "_generate_next_value_" | "_ignore_" | "_value_" | "_name_"
-            ) || ignored_names.contains(name)
-            {
-                // Skip ignored attributes
-                return None;
-            }
-
-            let inferred = place_from_bindings(db, &env, bindings).place;
-            let mut explicit_member_wrapper = false;
-
-            let value_ty = match inferred {
-                Place::Undefined => {
+            ClassLiteral::DynamicNamedTuple(..) | ClassLiteral::DynamicTypedDict(..) => return None,
+            ClassLiteral::DynamicEnum(enum_lit) => {
+                let spec = enum_lit.spec(db);
+                if !spec.has_known_members(db) {
                     return None;
                 }
-                Place::Defined(DefinedPlace { ty, .. }) => {
-                    let special_case = match ty {
-                        Type::Callable(_) | Type::FunctionLiteral(_) => {
-                            // Some types are specifically disallowed for enum members.
-                            return None;
-                        }
-                        Type::NominalInstance(instance) => match instance.known_class(db) {
-                            // enum.nonmember
-                            Some(KnownClass::Nonmember) => return None,
+                let env =
+                    source_operation.operations(ProgramEnvironment::from_scope(enum_lit.scope(db)));
+                let value_construction = EnumValueConstruction {
+                    data_type: inherited_enum_data_type(db, &env, ClassLiteral::DynamicEnum(enum_lit)),
+                    ..EnumValueConstruction::default()
+                };
+                let mut members = FxIndexMap::default();
+                let mut aliases = FxHashMap::default();
+                let mut enum_values: FxHashMap<LiteralValueTypeKind<'db>, Name> = FxHashMap::default();
+                for (name, ty) in spec.members(db) {
+                    if value_construction
+                        .alias_detection_value(db, &env, *ty, false)
+                        .and_then(|alias_value_ty| {
+                            try_register_alias(alias_value_ty, name, &mut enum_values, &mut aliases)
+                                // Identical raw literals remain aliases even when normalization widens.
+                                .or_else(|| {
+                                    try_register_alias(*ty, name, &mut enum_values, &mut aliases)
+                                })
+                        })
+                        == Some(true)
+                    {
+                        continue;
+                    }
+                    members.insert(name.clone(), *ty);
+                }
+                members.shrink_to_fit();
 
-                            // enum.member
-                            Some(KnownClass::Member) => {
-                                explicit_member_wrapper = true;
-                                Some(
-                                    ty.member(db, &env, "value")
-                                        .place
-                                        .ignore_possibly_undefined()
-                                        .unwrap_or(Type::unknown()),
-                                )
+                return Some(EnumMetadata {
+                    members,
+                    aliases,
+                    aliases_are_known: true,
+                    auto_members: FxHashSet::default(),
+                    value_annotation: None,
+                    value_construction,
+                });
+            }
+        };
+        // This is a fast path to avoid traversing the MRO of known classes
+        if class
+            .known(db)
+            .is_some_and(|known_class| !known_class.is_enum_subclass_with_members())
+        {
+            return None;
+        }
+
+        let scope_id = class.body_scope(db);
+        let use_def_map = use_def_map(db, scope_id);
+        // As a fast path, avoid looking up base classes if the class body is empty
+        use_def_map.all_end_of_scope_symbol_bindings().next()?;
+
+        let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
+
+        if !is_enum_class_by_inheritance(db, &env, class) {
+            return None;
+        }
+
+        let table = place_table(db, scope_id);
+
+        let mut enum_values: FxHashMap<LiteralValueTypeKind<'db>, Name> = FxHashMap::default();
+        let mut auto_counter = 0;
+        let mut auto_members = FxHashSet::default();
+        let mut aliases_are_known = true;
+        let mut prev_value_was_non_literal_int = false;
+        let mut prev_bool_literal = None;
+        let ignored_names = enum_ignored_names(db, scope_id);
+
+        // Look up custom construction methods, falling back to parent enum classes. An opaque binding
+        // still shadows methods from classes later in the MRO.
+        let data_type = inherited_enum_data_type(db, &env, ClassLiteral::Static(class));
+        let user_defined_init = custom_enum_method(db, scope_id, "__init__")
+            .or_else(|| inherited_user_defined_enum_method(db, &env, class, "__init__"));
+        let init = resolve_enum_method(user_defined_init, || {
+            inherited_known_enum_method(db, &env, class, "__init__")
+        });
+        // CPython checks `__new_member__` and then `__new__` on each enum base before continuing
+        // through the MRO or falling back to the data-type constructor.
+        let user_defined_new = custom_enum_method(db, scope_id, "__new__")
+            .or_else(|| inherited_user_defined_enum_new(db, &env, class))
+            .or_else(|| inherited_user_defined_mixin_new(db, &env, class));
+        let new = resolve_enum_method(user_defined_new, || {
+            inherited_known_enum_method(db, &env, class, "__new__")
+        });
+        let metaclass_may_transform_values = enum_metaclass_may_transform_values(db, &env, class);
+        let user_defined_generate_next_value =
+            custom_enum_method(db, scope_id, "_generate_next_value_").or_else(|| {
+                inherited_user_defined_enum_method(db, &env, class, "_generate_next_value_")
+            });
+        let generate_next_value = resolve_enum_method(user_defined_generate_next_value, || {
+            inherited_known_enum_method(db, &env, class, "_generate_next_value_")
+        });
+        let value_construction = EnumValueConstruction {
+            init,
+            new,
+            generate_next_value,
+            data_type,
+            metaclass_may_transform_values,
+        };
+
+        let mut aliases = FxHashMap::default();
+
+        let mut members = use_def_map
+            .all_end_of_scope_symbol_bindings()
+            .filter_map(|(symbol_id, bindings)| {
+                let name = table.symbol(symbol_id).name();
+
+                if name.starts_with("__") {
+                    // Skip private attributes (`__private`) and dunders (`__module__`, etc.).
+                    // CPython's enum metaclass never treats these as members.
+                    return None;
+                }
+
+                if matches!(
+                    name.as_str(),
+                    "_generate_next_value_" | "_ignore_" | "_value_" | "_name_"
+                ) || ignored_names.contains(name)
+                {
+                    // Skip ignored attributes
+                    return None;
+                }
+
+                let inferred = place_from_bindings(db, &env, bindings).place;
+                let mut explicit_member_wrapper = false;
+
+                let value_ty = match inferred {
+                    Place::Undefined => {
+                        return None;
+                    }
+                    Place::Defined(DefinedPlace { ty, .. }) => {
+                        let special_case = match ty {
+                            Type::Callable(_) | Type::FunctionLiteral(_) => {
+                                // Some types are specifically disallowed for enum members.
+                                return None;
                             }
+                            Type::NominalInstance(instance) => match instance.known_class(db) {
+                                // enum.nonmember
+                                Some(KnownClass::Nonmember) => return None,
 
-                            // enum.auto
-                            Some(KnownClass::Auto) => {
-                                auto_counter += 1;
-                                auto_members.insert(name.clone());
+                                // enum.member
+                                Some(KnownClass::Member) => {
+                                    explicit_member_wrapper = true;
+                                    Some(
+                                        ty.member(db, &env, "value")
+                                            .place
+                                            .ignore_possibly_undefined()
+                                            .unwrap_or(Type::unknown()),
+                                    )
+                                }
 
-                                // `StrEnum`s have different `auto()` behaviour to enums inheriting from `(str, Enum)`
-                                let auto_value_ty =
-                                    if Type::ClassLiteral(ClassLiteral::Static(class))
-                                        .is_subtype_of(
-                                            db,
-                                            &env,
-                                            KnownClass::StrEnum.to_subclass_of(db, &env),
-                                        )
-                                    {
-                                        Type::string_literal(db, &*name.to_lowercase())
-                                    } else {
-                                        let custom_mixins: SmallVec<[Option<KnownClass>; 1]> =
-                                            class
-                                                .iter_mro(db, &env)
-                                                .skip(1)
-                                                .filter_map(ClassBase::into_class)
-                                                .filter(|class| {
-                                                    !Type::from(*class).is_subtype_of(
-                                                        db,
-                                                        &env,
-                                                        KnownClass::Enum.to_subclass_of(db, &env),
-                                                    )
-                                                })
-                                                .map(|class| class.known(db))
-                                                .filter(|class| {
-                                                    !matches!(class, Some(KnownClass::Object))
-                                                })
-                                                .collect();
+                                // enum.auto
+                                Some(KnownClass::Auto) => {
+                                    auto_counter += 1;
+                                    auto_members.insert(name.clone());
 
-                                        // `IntEnum`s have the same `auto()` behaviour to enums inheriting from `(int, Enum)`,
-                                        // and `IntEnum`s also have `int` in their MROs, so both cases are handled here.
-                                        //
-                                        // In general, the `auto()` behaviour for enums with non-`int` mixins is hard to predict,
-                                        // so we fall back to `Any` in those cases.
-                                        if matches!(
-                                            custom_mixins.as_slice(),
-                                            [] | [Some(KnownClass::Int)]
-                                        ) {
-                                            if prev_value_was_non_literal_int {
-                                                KnownClass::Int.to_instance(db, &env)
-                                            } else if let Some(prev_bool_literal) =
-                                                prev_bool_literal
-                                            {
-                                                Type::int_literal(i64::from(prev_bool_literal) + 1)
-                                            } else {
-                                                Type::int_literal(auto_counter)
-                                            }
+                                    // `StrEnum`s have different `auto()` behaviour to enums inheriting from `(str, Enum)`
+                                    let auto_value_ty =
+                                        if Type::ClassLiteral(ClassLiteral::Static(class))
+                                            .is_subtype_of(
+                                                db,
+                                                &env,
+                                                KnownClass::StrEnum.to_subclass_of(db, &env),
+                                            )
+                                        {
+                                            Type::string_literal(db, &*name.to_lowercase())
                                         } else {
-                                            Type::any()
-                                        }
-                                    };
-                                Some(auto_value_ty)
-                            }
+                                            let custom_mixins: SmallVec<[Option<KnownClass>; 1]> =
+                                                class
+                                                    .iter_mro(db, &env)
+                                                    .skip(1)
+                                                    .filter_map(ClassBase::into_class)
+                                                    .filter(|class| {
+                                                        !Type::from(*class).is_subtype_of(
+                                                            db,
+                                                            &env,
+                                                            KnownClass::Enum.to_subclass_of(db, &env),
+                                                        )
+                                                    })
+                                                    .map(|class| class.known(db))
+                                                    .filter(|class| {
+                                                        !matches!(class, Some(KnownClass::Object))
+                                                    })
+                                                    .collect();
+
+                                            // `IntEnum`s have the same `auto()` behaviour to enums inheriting from `(int, Enum)`,
+                                            // and `IntEnum`s also have `int` in their MROs, so both cases are handled here.
+                                            //
+                                            // In general, the `auto()` behaviour for enums with non-`int` mixins is hard to predict,
+                                            // so we fall back to `Any` in those cases.
+                                            if matches!(
+                                                custom_mixins.as_slice(),
+                                                [] | [Some(KnownClass::Int)]
+                                            ) {
+                                                if prev_value_was_non_literal_int {
+                                                    KnownClass::Int.to_instance(db, &env)
+                                                } else if let Some(prev_bool_literal) =
+                                                    prev_bool_literal
+                                                {
+                                                    Type::int_literal(i64::from(prev_bool_literal) + 1)
+                                                } else {
+                                                    Type::int_literal(auto_counter)
+                                                }
+                                            } else {
+                                                Type::any()
+                                            }
+                                        };
+                                    Some(auto_value_ty)
+                                }
+
+                                _ => None,
+                            },
 
                             _ => None,
-                        },
+                        };
 
-                        _ => None,
-                    };
+                        if let Some(special_case) = special_case {
+                            special_case
+                        } else {
+                            let dunder_get = ty
+                                .member_lookup_with_policy(
+                                    db,
+                                    &env,
+                                    "__get__",
+                                    MemberLookupPolicy::NO_INSTANCE_FALLBACK,
+                                )
+                                .place;
 
-                    if let Some(special_case) = special_case {
-                        special_case
-                    } else {
-                        let dunder_get = ty
-                            .member_lookup_with_policy(
-                                db,
-                                &env,
-                                "__get__",
-                                MemberLookupPolicy::NO_INSTANCE_FALLBACK,
-                            )
-                            .place;
+                            match dunder_get {
+                                Place::Undefined
+                                | Place::Defined(DefinedPlace {
+                                    ty: Type::Dynamic(_),
+                                    ..
+                                }) => ty,
 
-                        match dunder_get {
-                            Place::Undefined
-                            | Place::Defined(DefinedPlace {
-                                ty: Type::Dynamic(_),
-                                ..
-                            }) => ty,
-
-                            Place::Defined(_) => {
-                                // Descriptors are not considered members.
-                                return None;
+                                Place::Defined(_) => {
+                                    // Descriptors are not considered members.
+                                    return None;
+                                }
                             }
                         }
                     }
-                }
-            };
+                };
 
-            let declarations = use_def_map.end_of_scope_symbol_declarations(symbol_id);
+                let declarations = use_def_map.end_of_scope_symbol_declarations(symbol_id);
 
-            if !explicit_member_wrapper
-                && declarations.any_reachable(db, |declaration| {
-                    declaration.is_defined_and(|declaration| {
-                        !matches!(
-                            declaration.kind(db),
-                            DefinitionKind::AnnotatedAssignment(assignment)
-                                if assignment
-                                    .value(&parsed_module(db, declaration.python_file(db)).load(db))
-                                    .is_some()
-                        )
+                if !explicit_member_wrapper
+                    && declarations.any_reachable(db, |declaration| {
+                        declaration.is_defined_and(|declaration| {
+                            !matches!(
+                                declaration.kind(db),
+                                DefinitionKind::AnnotatedAssignment(assignment)
+                                    if assignment
+                                        .value(&parsed_module(db, declaration.python_file(db)).load(db))
+                                        .is_some()
+                            )
+                        })
                     })
-                })
-            {
-                return None;
-            }
-
-            // Track whether this member's value is a non-literal `int`, so a
-            // following `auto()` knows to widen its result to `int`.
-            prev_value_was_non_literal_int = value_ty.as_int_like_literal().is_none()
-                && value_ty.is_assignable_to(db, &env, KnownClass::Int.to_instance(db, &env));
-            prev_bool_literal =
-                value_ty
-                    .as_literal_value_kind()
-                    .and_then(|literal| match literal {
-                        LiteralValueTypeKind::Bool(value) => Some(value),
-                        _ => None,
-                    });
-
-            match value_construction
-                .alias_detection_value(db, &env, value_ty, auto_members.contains(name))
-                .and_then(|alias_value_ty| {
-                    try_register_alias(alias_value_ty, name, &mut enum_values, &mut aliases)
-                }) {
-                Some(true) => return None,
-                Some(false) => {}
-                None if value_construction.data_type != InheritedEnumDataType::None => {
-                    aliases_are_known = false;
+                {
+                    return None;
                 }
-                None => {}
-            }
 
-            Some((name.clone(), value_ty))
+                // Track whether this member's value is a non-literal `int`, so a
+                // following `auto()` knows to widen its result to `int`.
+                prev_value_was_non_literal_int = value_ty.as_int_like_literal().is_none()
+                    && value_ty.is_assignable_to(db, &env, KnownClass::Int.to_instance(db, &env));
+                prev_bool_literal =
+                    value_ty
+                        .as_literal_value_kind()
+                        .and_then(|literal| match literal {
+                            LiteralValueTypeKind::Bool(value) => Some(value),
+                            _ => None,
+                        });
+
+                match value_construction
+                    .alias_detection_value(db, &env, value_ty, auto_members.contains(name))
+                    .and_then(|alias_value_ty| {
+                        try_register_alias(alias_value_ty, name, &mut enum_values, &mut aliases)
+                    }) {
+                    Some(true) => return None,
+                    Some(false) => {}
+                    None if value_construction.data_type != InheritedEnumDataType::None => {
+                        aliases_are_known = false;
+                    }
+                    None => {}
+                }
+
+                Some((name.clone(), value_ty))
+            })
+            .collect::<FxIndexMap<_, _>>();
+
+        if members.is_empty() {
+            // Enum subclasses without members are not considered enums.
+            return None;
+        }
+
+        let value_annotation = custom_value_annotation(db, &env, scope_id)
+            .or_else(|| inherited_user_defined_value_annotation(db, &env, class))
+            .map(EnumValueAnnotation::UserDefined)
+            .or_else(|| {
+                (!metaclass_may_transform_values)
+                    .then(|| inherited_value_annotation(db, &env, class))
+                    .flatten()
+                    .map(EnumValueAnnotation::StandardLibrary)
+            });
+
+        members.shrink_to_fit();
+
+        Some(EnumMetadata {
+            members,
+            aliases,
+            aliases_are_known,
+            auto_members,
+            value_annotation,
+            value_construction,
         })
-        .collect::<FxIndexMap<_, _>>();
-
-    if members.is_empty() {
-        // Enum subclasses without members are not considered enums.
-        return None;
     }
-
-    let value_annotation = custom_value_annotation(db, &env, scope_id)
-        .or_else(|| inherited_user_defined_value_annotation(db, &env, class))
-        .map(EnumValueAnnotation::UserDefined)
-        .or_else(|| {
-            (!metaclass_may_transform_values)
-                .then(|| inherited_value_annotation(db, &env, class))
-                .flatten()
-                .map(EnumValueAnnotation::StandardLibrary)
-        });
-
-    members.shrink_to_fit();
-
-    Some(EnumMetadata {
-        members,
-        aliases,
-        aliases_are_known,
-        auto_members,
-        value_annotation,
-        value_construction,
-    })
 }
 
 /// Returns whether an enum's metaclass has a custom value-transforming method before the stdlib

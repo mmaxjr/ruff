@@ -353,106 +353,106 @@ fn pytest_test_class_kind<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> Option<PytestTestKind> {
-    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-        pytest_test_class_kind_from_source(db, source_operation, definition)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::PytestTestClassKind>(db, (definition,))
 }
 
-fn pytest_test_class_kind_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-) -> Option<PytestTestKind> {
-    let DefinitionKind::Class(class_ref) = definition.kind(db) else {
-        return None;
-    };
-    if !super::is_available_definition(db, definition) {
-        return None;
-    }
+crate::types::source_query! {
+    fn PytestTestClassKind<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> Option<PytestTestKind> {
+        let DefinitionKind::Class(class_ref) = definition.kind(db) else {
+            return None;
+        };
+        if !super::is_available_definition(db, definition) {
+            return None;
+        }
 
-    match enclosing_scope(db, definition)? {
-        EnclosingScope::Module => {}
-        EnclosingScope::Class(parent) => {
-            if pytest_test_class_kind(db, parent) != Some(PytestTestKind::Pytest) {
-                return None;
+        match enclosing_scope(db, definition)? {
+            EnclosingScope::Module => {}
+            EnclosingScope::Class(parent) => {
+                if pytest_test_class_kind(db, parent) != Some(PytestTestKind::Pytest) {
+                    return None;
+                }
             }
         }
-    }
 
-    let class = original_class_type(db, definition)?;
-    let env =
-        source_operation.operations(ProgramEnvironment::from_file(definition.program_file(db)));
-    if place_value_type(
-        db,
-        class
-            .class_member(db, &env, "__test__", MemberLookupPolicy::default())
-            .place,
-    )
-    .is_some_and(|flag| flag.bool(db, &env).is_always_false())
-    {
-        return None;
-    }
+        let class = original_class_type(db, definition)?;
+        let env =
+            source_operation.operations(ProgramEnvironment::from_file(definition.program_file(db)));
+        if place_value_type(
+            db,
+            class
+                .class_member(db, &env, "__test__", MemberLookupPolicy::default())
+                .place,
+        )
+        .is_some_and(|flag| flag.bool(db, &env).is_always_false())
+        {
+            return None;
+        }
 
-    // The subtype check models `isinstance(cls, ABCMeta)`. Inheriting from ABC supplies this
-    // metaclass; @abstractmethod alone does not make a class abstract at runtime.
-    // Exclude classes with explicitly abstract members that have not been concretely overridden.
-    // Implicit abstract methods in protocols affect only type checking and are ignored here.
-    // Custom metaclass behavior is approximated.
-    if Type::ClassLiteral(class).is_subtype_of(db, &env, KnownClass::ABCMeta.to_instance(db, &env))
-        && class
-            .identity_specialization(db)
-            .abstract_methods(db, &env)
-            .values()
-            .any(|method| method.kind.is_explicit())
-    {
-        return None;
-    }
+        // The subtype check models `isinstance(cls, ABCMeta)`. Inheriting from ABC supplies this
+        // metaclass; @abstractmethod alone does not make a class abstract at runtime.
+        // Exclude classes with explicitly abstract members that have not been concretely overridden.
+        // Implicit abstract methods in protocols affect only type checking and are ignored here.
+        // Custom metaclass behavior is approximated.
+        if Type::ClassLiteral(class).is_subtype_of(db, &env, KnownClass::ABCMeta.to_instance(db, &env))
+            && class
+                .identity_specialization(db)
+                .abstract_methods(db, &env)
+                .values()
+                .any(|method| method.kind.is_explicit())
+        {
+            return None;
+        }
 
-    if is_unittest_test_case(db, &env, class) {
-        return Some(PytestTestKind::StdlibUnittest);
-    }
+        if is_unittest_test_case(db, &env, class) {
+            return Some(PytestTestKind::StdlibUnittest);
+        }
 
-    let module = parsed_module(db, definition.python_file(db)).load(db);
-    if !class_ref.node(&module).name.as_str().starts_with("Test") {
-        return None;
-    }
+        let module = parsed_module(db, definition.python_file(db)).load(db);
+        if !class_ref.node(&module).name.as_str().starts_with("Test") {
+            return None;
+        }
 
-    has_default_pytest_constructors(db, class).then_some(PytestTestKind::Pytest)
+        has_default_pytest_constructors(db, class).then_some(PytestTestKind::Pytest)
+    }
 }
 
 /// Returns whether `class` inherits both constructors from `object`.
 fn has_default_pytest_constructors<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> bool {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        has_default_pytest_constructors_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::HasDefaultPytestConstructors>(db, (class,))
 }
 
-fn has_default_pytest_constructors_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: ClassLiteral<'db>,
-) -> bool {
-    let Some(class) = class.as_static() else {
-        return false;
-    };
-    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
-    let Some(object) = KnownClass::Object.try_to_class_literal(db, &env) else {
-        return false;
-    };
-
-    ["__init__", "__new__"].into_iter().all(|name| {
-        let actual = ClassLiteral::Static(class)
-            .class_member(db, &env, name, MemberLookupPolicy::default())
-            .place;
-        let expected = ClassLiteral::Static(object)
-            .class_member(db, &env, name, MemberLookupPolicy::default())
-            .place;
-        let (Place::Defined(actual), Place::Defined(expected)) = (actual, expected) else {
+crate::types::source_query! {
+    fn HasDefaultPytestConstructors<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassLiteral<'db>,
+    ) -> bool {
+        let Some(class) = class.as_static() else {
+            return false;
+        };
+        let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
+        let Some(object) = KnownClass::Object.try_to_class_literal(db, &env) else {
             return false;
         };
 
-        actual.provenance == expected.provenance
-    })
+        ["__init__", "__new__"].into_iter().all(|name| {
+            let actual = ClassLiteral::Static(class)
+                .class_member(db, &env, name, MemberLookupPolicy::default())
+                .place;
+            let expected = ClassLiteral::Static(object)
+                .class_member(db, &env, name, MemberLookupPolicy::default())
+                .place;
+            let (Place::Defined(actual), Place::Defined(expected)) = (actual, expected) else {
+                return false;
+            };
+
+            actual.provenance == expected.provenance
+        })
+    }
 }
 
 /// Returns whether the class inherits from the canonical `unittest.TestCase`.
@@ -469,77 +469,77 @@ fn is_unittest_test_case<'db>(
 
 /// Unittest uses `runTest` only when no named test methods are available, including inherited ones.
 fn has_unittest_test_methods<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> bool {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        has_unittest_test_methods_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::HasUnittestTestMethods>(db, (class,))
 }
 
-fn has_unittest_test_methods_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: ClassLiteral<'db>,
-) -> bool {
-    let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
-    class
-        .iter_mro(db, &env)
-        .filter_map(ClassBase::into_class)
-        .filter_map(|ancestor| ancestor.static_class_literal(db))
-        .any(|(ancestor, _)| {
-            place_table(db, ancestor.body_scope(db))
-                .symbols()
-                .any(|symbol| {
-                    if !symbol.name().starts_with("test") {
-                        return false;
-                    }
-                    let member = class
-                        .class_member(db, &env, symbol.name(), MemberLookupPolicy::default())
-                        .place;
-                    place_value_type(db, member)
-                        .is_some_and(|ty| ty.try_upcast_to_callable(db, &env).is_some())
-                })
-        })
+crate::types::source_query! {
+    fn HasUnittestTestMethods<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassLiteral<'db>,
+    ) -> bool {
+        let env = source_operation.operations(ProgramEnvironment::from_file(class.program_file(db)));
+        class
+            .iter_mro(db, &env)
+            .filter_map(ClassBase::into_class)
+            .filter_map(|ancestor| ancestor.static_class_literal(db))
+            .any(|(ancestor, _)| {
+                place_table(db, ancestor.body_scope(db))
+                    .symbols()
+                    .any(|symbol| {
+                        if !symbol.name().starts_with("test") {
+                            return false;
+                        }
+                        let member = class
+                            .class_member(db, &env, symbol.name(), MemberLookupPolicy::default())
+                            .place;
+                        place_value_type(db, member)
+                            .is_some_and(|ty| ty.try_upcast_to_callable(db, &env).is_some())
+                    })
+            })
+    }
 }
 
 fn is_default_pytest_test_file<'db>(db: &'db dyn Db, file: ProgramFile<'db>) -> bool {
-    SourceTypeQuery::run(db, (file,), |db, source_operation, (file,)| {
-        is_default_pytest_test_file_from_source(db, source_operation, file)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::IsDefaultPytestTestFile>(db, (file,))
 }
 
-fn is_default_pytest_test_file_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    file: ProgramFile<'db>,
-) -> bool {
-    let Some(file_name) = file
-        .file(db)
-        .path(db)
-        .as_system_path()
-        .and_then(|path| path.file_name())
-    else {
-        return false;
-    };
+crate::types::source_query! {
+    fn IsDefaultPytestTestFile<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        file: ProgramFile<'db>,
+    ) -> bool {
+        let Some(file_name) = file
+            .file(db)
+            .path(db)
+            .as_system_path()
+            .and_then(|path| path.file_name())
+        else {
+            return false;
+        };
 
-    let Some(stem) = file_name.strip_suffix(".py") else {
-        return false;
-    };
+        let Some(stem) = file_name.strip_suffix(".py") else {
+            return false;
+        };
 
-    if !(stem.starts_with("test_") || stem.ends_with("_test")) {
-        return false;
-    }
+        if !(stem.starts_with("test_") || stem.ends_with("_test")) {
+            return false;
+        }
 
-    let env = source_operation.operations(ProgramEnvironment::from_file(file));
-    !place_value_type(
-        db,
-        symbol(
+        let env = source_operation.operations(ProgramEnvironment::from_file(file));
+        !place_value_type(
             db,
-            global_scope(db, file),
-            "__test__",
-            ConsideredDefinitions::EndOfScope,
+            symbol(
+                db,
+                global_scope(db, file),
+                "__test__",
+                ConsideredDefinitions::EndOfScope,
+            )
+            .place,
         )
-        .place,
-    )
-    .is_some_and(|flag| flag.bool(db, &env).is_always_false())
+        .is_some_and(|flag| flag.bool(db, &env).is_always_false())
+    }
 }
 
 #[cfg(test)]

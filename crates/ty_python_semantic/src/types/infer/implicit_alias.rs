@@ -36,31 +36,31 @@ pub(in crate::types) fn implicit_alias_parameters<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> Option<GenericContext<'db>> {
-    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-        implicit_alias_parameters_from_source(db, source_operation, definition)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::ImplicitAliasParameters>(db, (definition,))
 }
 
-fn implicit_alias_parameters_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-) -> Option<GenericContext<'db>> {
-    let file = definition.program_file(db);
-    let parsed = parsed_module(db, file.python_file(db)).load(db);
-    let value = definition.kind(db).value(&parsed)?;
-    let mut collector = ImplicitAliasLegacyTypeVarCollector {
-        db,
-        operations: source_operation.operations(ProgramEnvironment::from_file(file)),
-        alias_definition: definition,
-        index: semantic_index(db, file),
-        string_annotation_scope: None,
-        variables: FxOrderSet::default(),
-    };
-    collector.visit_expr(value);
-    (!collector.variables.is_empty()).then(|| {
-        GenericContext::from_typevar_instances(db, &collector.operations, collector.variables)
-    })
+crate::types::source_query! {
+    fn ImplicitAliasParameters<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> Option<GenericContext<'db>> {
+        let file = definition.program_file(db);
+        let parsed = parsed_module(db, file.python_file(db)).load(db);
+        let value = definition.kind(db).value(&parsed)?;
+        let mut collector = ImplicitAliasLegacyTypeVarCollector {
+            db,
+            operations: source_operation.operations(ProgramEnvironment::from_file(file)),
+            alias_definition: definition,
+            index: semantic_index(db, file),
+            string_annotation_scope: None,
+            variables: FxOrderSet::default(),
+        };
+        collector.visit_expr(value);
+        (!collector.variables.is_empty()).then(|| {
+            GenericContext::from_typevar_instances(db, &collector.operations, collector.variables)
+        })
+    }
 }
 
 struct ImplicitAliasLegacyTypeVarCollector<'a, 'db> {

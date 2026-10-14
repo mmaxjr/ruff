@@ -1004,9 +1004,10 @@ impl<'db> DynamicTypedDictLiteral<'db> {
     /// [self, `TypedDict`, object]
     #[salsa::tracked(returns(ref), heap_size = ruff_memory_usage::heap_size)]
     pub(crate) fn mro(self, db: &'db dyn Db) -> Mro<'db> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.mro_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::DynamicTypedDictLiteralMro>(
+            db,
+            (self,),
+        )
     }
 
     fn mro_from_source(self, db: &'db dyn Db, source_operation: &SourceTypeQuery<'db>) -> Mro<'db> {
@@ -1069,6 +1070,15 @@ impl<'db> DynamicTypedDictLiteral<'db> {
             policy,
             name,
         )
+    }
+}
+crate::types::source_query! {
+    fn DynamicTypedDictLiteralMro<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: DynamicTypedDictLiteral<'db>,
+    ) -> Mro<'db> {
+        source_self.mro_from_source(db, source_operation)
     }
 }
 

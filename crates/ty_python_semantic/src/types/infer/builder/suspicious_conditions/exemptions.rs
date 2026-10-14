@@ -485,7 +485,7 @@ fn place_condition_definition_info<'db>(
 /// Retaining only the unique definition and the provenance result lets both uses share a lookup
 /// without caching a potentially large list of bindings.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ConditionDefinitionInfo<'db> {
+pub(crate) struct ConditionDefinitionInfo<'db> {
     provenance: Provenance<'db>,
     contains_special_cased_condition: bool,
 }
@@ -582,32 +582,35 @@ fn resolved_condition_definition_info<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> ConditionDefinitionInfo<'db> {
-    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-        resolved_condition_definition_info_from_source(db, source_operation, definition)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::ResolvedConditionDefinitionInfo>(
+        db,
+        (definition,),
+    )
 }
 
-fn resolved_condition_definition_info_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-) -> ConditionDefinitionInfo<'db> {
-    let scope = definition.scope(db);
-    let places = place_table(db, scope);
-    let symbol_name = places
-        .place(definition.place(db))
-        .as_symbol()
-        .map(|symbol| symbol.name().as_str());
-    ConditionDefinitionInfo::from_definitions(
-        db,
-        &resolve_definition(
+crate::types::source_query! {
+    fn ResolvedConditionDefinitionInfo<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> ConditionDefinitionInfo<'db> {
+        let scope = definition.scope(db);
+        let places = place_table(db, scope);
+        let symbol_name = places
+            .place(definition.place(db))
+            .as_symbol()
+            .map(|symbol| symbol.name().as_str());
+        ConditionDefinitionInfo::from_definitions(
             db,
-            &source_operation.operations(ProgramEnvironment::from_scope(scope)),
-            definition,
-            symbol_name,
-            ImportAliasResolution::ResolveAliases,
-        ),
-    )
+            &resolve_definition(
+                db,
+                &source_operation.operations(ProgramEnvironment::from_scope(scope)),
+                definition,
+                symbol_name,
+                ImportAliasResolution::ResolveAliases,
+            ),
+        )
+    }
 }
 
 /// Lazy closure reads share all reachable definitions in the owning scope. Cache both the provenance
@@ -683,19 +686,21 @@ fn attribute_condition_definition_info<'db>(
     receiver: Type<'db>,
     name: Name,
 ) -> ConditionDefinitionInfo<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::AttributeConditionDefinitionInfo>(
         db,
         (program, receiver, name),
-        |db, source_operation, (program, receiver, name)| {
-            attribute_condition_definition_info_from_source(
-                db,
-                source_operation,
-                program,
-                receiver,
-                &name,
-            )
-        },
     )
+}
+crate::types::source_query! {
+    fn AttributeConditionDefinitionInfo<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        receiver: Type<'db>,
+        name: Name,
+    ) -> ConditionDefinitionInfo<'db> {
+        attribute_condition_definition_info_from_source(db, source_operation, program, receiver, &name)
+    }
 }
 
 fn attribute_condition_definition_info_from_source<'db>(
@@ -736,143 +741,146 @@ fn definition_contains_special_cased_condition<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> bool {
-    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-        definition_contains_special_cased_condition_from_source(db, source_operation, definition)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::DefinitionContainsSpecialCasedCondition>(
+        db,
+        (definition,),
+    )
 }
 
-fn definition_contains_special_cased_condition_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-) -> bool {
-    let module = parsed_module(db, definition.python_file(db)).load(db);
-    let definition_kind = definition.kind(db);
-    let file = definition.file(db);
-    let program_file = definition.program_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+crate::types::source_query! {
+    fn DefinitionContainsSpecialCasedCondition<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> bool {
+        let module = parsed_module(db, definition.python_file(db)).load(db);
+        let definition_kind = definition.kind(db);
+        let file = definition.file(db);
+        let program_file = definition.program_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
-    let in_known_module = |known| {
-        file_to_module(db, program_file.resolver_file(db))
-            .is_some_and(|module| module.is_known(db, known))
-    };
+        let in_known_module = |known| {
+            file_to_module(db, program_file.resolver_file(db))
+                .is_some_and(|module| module.is_known(db, known))
+        };
 
-    if let DefinitionKind::AnnotatedAssignment(annotated_assignment) = definition_kind
-        && file.is_stub(db)
-        && let ast::Expr::Name(ast::ExprName { id, .. }) = annotated_assignment.target(&module)
-    {
-        match &**id {
-            "version_info" | "platform" if in_known_module(KnownModule::Sys) => {
-                return true;
+        if let DefinitionKind::AnnotatedAssignment(annotated_assignment) = definition_kind
+            && file.is_stub(db)
+            && let ast::Expr::Name(ast::ExprName { id, .. }) = annotated_assignment.target(&module)
+        {
+            match &**id {
+                "version_info" | "platform" if in_known_module(KnownModule::Sys) => {
+                    return true;
+                }
+                "name" if in_known_module(KnownModule::Os) => {
+                    return true;
+                }
+                "TYPE_CHECKING" if in_known_module(KnownModule::Typing) => {
+                    return true;
+                }
+                _ => {}
             }
-            "name" if in_known_module(KnownModule::Os) => {
-                return true;
+        }
+
+        let source_expression = match definition_kind {
+            DefinitionKind::Assignment(assignment) => Some(assignment.value(&module)),
+            DefinitionKind::AnnotatedAssignment(assignment) => assignment.value(&module),
+            DefinitionKind::NamedExpression(named) => Some(&*named.node(&module).value),
+            DefinitionKind::For(for_statement) => Some(for_statement.iterable(&module)),
+            DefinitionKind::Comprehension(comprehension) => Some(comprehension.iterable(&module)),
+            DefinitionKind::WithItem(with_item) => Some(with_item.context_expr(&module)),
+            DefinitionKind::MatchPattern(pattern) => {
+                Some(pattern.predicate().subject(db).node_ref(db).node(&module))
             }
-            "TYPE_CHECKING" if in_known_module(KnownModule::Typing) => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-
-    let source_expression = match definition_kind {
-        DefinitionKind::Assignment(assignment) => Some(assignment.value(&module)),
-        DefinitionKind::AnnotatedAssignment(assignment) => assignment.value(&module),
-        DefinitionKind::NamedExpression(named) => Some(&*named.node(&module).value),
-        DefinitionKind::For(for_statement) => Some(for_statement.iterable(&module)),
-        DefinitionKind::Comprehension(comprehension) => Some(comprehension.iterable(&module)),
-        DefinitionKind::WithItem(with_item) => Some(with_item.context_expr(&module)),
-        DefinitionKind::MatchPattern(pattern) => {
-            Some(pattern.predicate().subject(db).node_ref(db).node(&module))
-        }
-        DefinitionKind::LoopHeader(header) => {
-            let use_def = use_def_map(db, definition.scope(db));
-            return use_def
-                .loop_header(header.loop_header_id())
-                .bindings_for_place(header.place())
-                .filter(|binding| {
-                    binding.reachability_constraint()
-                        != ScopedReachabilityConstraintId::ALWAYS_FALSE
-                })
-                .filter_map(|binding| use_def.definition(binding.binding()).definition())
-                .any(|source| {
-                    resolved_condition_definition_info(db, source).contains_special_cased_condition
-                });
-        }
-        DefinitionKind::NestedBindings(nested) => {
-            return nested
-                .visible_binding_sources(
-                    semantic_index(db, program_file),
-                    definition.file_scope(db),
-                )
-                .any(|bindings| {
-                    ConditionDefinitionInfo::from_bindings(db, bindings)
-                        .contains_special_cased_condition
-                });
-        }
-        DefinitionKind::AugmentedAssignment(assignment) => {
-            let assignment = assignment.node(&module);
-            if place_condition_definition_info(db, &env, program_file, &assignment.target, |expr| {
-                infer_definition_types(db, definition).expression_type(expr)
-            })
-            .contains_special_cased_condition
-            {
-                return true;
-            }
-            Some(&*assignment.value)
-        }
-        DefinitionKind::Import(_)
-        | DefinitionKind::ImportFrom(_)
-        | DefinitionKind::ImportFromSubmodule(_)
-        | DefinitionKind::StarImport(_)
-        | DefinitionKind::Function(_)
-        | DefinitionKind::Class(_)
-        | DefinitionKind::TypeAlias(_)
-        | DefinitionKind::DictKeyAssignment(_)
-        | DefinitionKind::Parameter(_)
-        | DefinitionKind::LambdaParameter(_)
-        | DefinitionKind::ExceptHandler(_)
-        | DefinitionKind::TypeVar(_)
-        | DefinitionKind::ParamSpec(_)
-        | DefinitionKind::TypeVarTuple(_) => None,
-    };
-    let Some(source_expression) = source_expression else {
-        return false;
-    };
-
-    // A version guard can select a different function signature without changing the fact that
-    // the function object is always truthy. Only definitions with a source expression above
-    // inherit the provenance of their guards.
-    let reachability = definition_reachability(db, definition.scope(db), definition.place(db))
-        .get(&definition)
-        .copied()
-        .unwrap_or(ScopedReachabilityConstraintId::ALWAYS_TRUE);
-    if reachability_contains_special_cased_condition(db, definition.scope(db), reachability) {
-        return true;
-    }
-
-    // Binding inference does not always retain the source expression's types: unpacked targets
-    // share a source, and a comprehension's first iterable belongs to the enclosing scope.
-    // Read those types from the standalone expression query, without re-entering scope inference.
-    let standalone = semantic_index(db, program_file).try_expression(source_expression);
-    let mut expression_inference = None;
-    let mut definition_inference = None;
-
-    any_over_expr(source_expression, |expression| {
-        is_special_cased_condition_expression(db, &env, program_file, expression, |expr| {
-            if let Some(standalone) = standalone {
-                expression_inference
-                    .get_or_insert_with(|| {
-                        infer_expression_types(db, standalone, TypeContext::default())
+            DefinitionKind::LoopHeader(header) => {
+                let use_def = use_def_map(db, definition.scope(db));
+                return use_def
+                    .loop_header(header.loop_header_id())
+                    .bindings_for_place(header.place())
+                    .filter(|binding| {
+                        binding.reachability_constraint()
+                            != ScopedReachabilityConstraintId::ALWAYS_FALSE
                     })
-                    .expression_type(expr)
-            } else {
-                definition_inference
-                    .get_or_insert_with(|| infer_definition_types(db, definition))
-                    .expression_type(expr)
+                    .filter_map(|binding| use_def.definition(binding.binding()).definition())
+                    .any(|source| {
+                        resolved_condition_definition_info(db, source).contains_special_cased_condition
+                    });
             }
+            DefinitionKind::NestedBindings(nested) => {
+                return nested
+                    .visible_binding_sources(
+                        semantic_index(db, program_file),
+                        definition.file_scope(db),
+                    )
+                    .any(|bindings| {
+                        ConditionDefinitionInfo::from_bindings(db, bindings)
+                            .contains_special_cased_condition
+                    });
+            }
+            DefinitionKind::AugmentedAssignment(assignment) => {
+                let assignment = assignment.node(&module);
+                if place_condition_definition_info(db, &env, program_file, &assignment.target, |expr| {
+                    infer_definition_types(db, definition).expression_type(expr)
+                })
+                .contains_special_cased_condition
+                {
+                    return true;
+                }
+                Some(&*assignment.value)
+            }
+            DefinitionKind::Import(_)
+            | DefinitionKind::ImportFrom(_)
+            | DefinitionKind::ImportFromSubmodule(_)
+            | DefinitionKind::StarImport(_)
+            | DefinitionKind::Function(_)
+            | DefinitionKind::Class(_)
+            | DefinitionKind::TypeAlias(_)
+            | DefinitionKind::DictKeyAssignment(_)
+            | DefinitionKind::Parameter(_)
+            | DefinitionKind::LambdaParameter(_)
+            | DefinitionKind::ExceptHandler(_)
+            | DefinitionKind::TypeVar(_)
+            | DefinitionKind::ParamSpec(_)
+            | DefinitionKind::TypeVarTuple(_) => None,
+        };
+        let Some(source_expression) = source_expression else {
+            return false;
+        };
+
+        // A version guard can select a different function signature without changing the fact that
+        // the function object is always truthy. Only definitions with a source expression above
+        // inherit the provenance of their guards.
+        let reachability = definition_reachability(db, definition.scope(db), definition.place(db))
+            .get(&definition)
+            .copied()
+            .unwrap_or(ScopedReachabilityConstraintId::ALWAYS_TRUE);
+        if reachability_contains_special_cased_condition(db, definition.scope(db), reachability) {
+            return true;
+        }
+
+        // Binding inference does not always retain the source expression's types: unpacked targets
+        // share a source, and a comprehension's first iterable belongs to the enclosing scope.
+        // Read those types from the standalone expression query, without re-entering scope inference.
+        let standalone = semantic_index(db, program_file).try_expression(source_expression);
+        let mut expression_inference = None;
+        let mut definition_inference = None;
+
+        any_over_expr(source_expression, |expression| {
+            is_special_cased_condition_expression(db, &env, program_file, expression, |expr| {
+                if let Some(standalone) = standalone {
+                    expression_inference
+                        .get_or_insert_with(|| {
+                            infer_expression_types(db, standalone, TypeContext::default())
+                        })
+                        .expression_type(expr)
+                } else {
+                    definition_inference
+                        .get_or_insert_with(|| infer_definition_types(db, definition))
+                        .expression_type(expr)
+                }
+            })
         })
-    })
+    }
 }
 
 /// Summarize environment provenance for a reachability node and all its descendants.
@@ -924,53 +932,47 @@ fn predicate_contains_special_cased_condition<'db>(
     scope: ScopeId<'db>,
     predicate: ScopedPredicateId,
 ) -> bool {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::PredicateContainsSpecialCasedCondition>(
         db,
         (scope, predicate),
-        |db, source_operation, (scope, predicate)| {
-            predicate_contains_special_cased_condition_from_source(
-                db,
-                source_operation,
-                scope,
-                predicate,
-            )
-        },
     )
 }
 
-fn predicate_contains_special_cased_condition_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    scope: ScopeId<'db>,
-    predicate: ScopedPredicateId,
-) -> bool {
-    let expression = match use_def_map(db, scope).predicates()[predicate].node {
-        PredicateNode::Expression { expression, .. }
-        | PredicateNode::Condition(expression)
-        | PredicateNode::IsNonEmptyIterable(expression) => expression,
-        PredicateNode::Pattern(pattern) => pattern.subject(db),
-        PredicateNode::SubjectElementPattern(element) => element.pattern.subject(db),
-        // These predicates describe implicit control flow rather than a tested value. In
-        // particular, a statement such as `print(sys.platform)` should not make every later
-        // definition environment-dependent merely because it is reached after that call returns.
-        PredicateNode::IsNonTerminalCall(_)
-        | PredicateNode::ContextManagerSuppresses { .. }
-        | PredicateNode::FinallyNormalPathImpossible { .. }
-        | PredicateNode::OrPatternAlternative(_)
-        | PredicateNode::StarImportPlaceholder(_) => return false,
-    };
-    let file = expression.program_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(file));
-    let module = parsed_module(db, expression.python_file(db)).load(db);
-    let mut inference = None;
+crate::types::source_query! {
+    fn PredicateContainsSpecialCasedCondition<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        scope: ScopeId<'db>,
+        predicate: ScopedPredicateId,
+    ) -> bool {
+        let expression = match use_def_map(db, scope).predicates()[predicate].node {
+            PredicateNode::Expression { expression, .. }
+            | PredicateNode::Condition(expression)
+            | PredicateNode::IsNonEmptyIterable(expression) => expression,
+            PredicateNode::Pattern(pattern) => pattern.subject(db),
+            PredicateNode::SubjectElementPattern(element) => element.pattern.subject(db),
+            // These predicates describe implicit control flow rather than a tested value. In
+            // particular, a statement such as `print(sys.platform)` should not make every later
+            // definition environment-dependent merely because it is reached after that call returns.
+            PredicateNode::IsNonTerminalCall(_)
+            | PredicateNode::ContextManagerSuppresses { .. }
+            | PredicateNode::FinallyNormalPathImpossible { .. }
+            | PredicateNode::OrPatternAlternative(_)
+            | PredicateNode::StarImportPlaceholder(_) => return false,
+        };
+        let file = expression.program_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(file));
+        let module = parsed_module(db, expression.python_file(db)).load(db);
+        let mut inference = None;
 
-    any_over_expr(expression.node_ref(db).node(&module), |subexpression| {
-        is_special_cased_condition_expression(db, &env, file, subexpression, |expr| {
-            inference
-                .get_or_insert_with(|| {
-                    infer_expression_types(db, expression, TypeContext::default())
-                })
-                .expression_type(expr)
+        any_over_expr(expression.node_ref(db).node(&module), |subexpression| {
+            is_special_cased_condition_expression(db, &env, file, subexpression, |expr| {
+                inference
+                    .get_or_insert_with(|| {
+                        infer_expression_types(db, expression, TypeContext::default())
+                    })
+                    .expression_type(expr)
+            })
         })
-    })
+    }
 }

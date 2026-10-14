@@ -57,16 +57,11 @@ impl<'db> NewType<'db> {
 
     #[salsa::tracked(
         returns(copy),
-        cycle_initial=|db, _, self_: NewType<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| NewTypeBase::ClassType(ClassType::object(
-            db,
-            &source_operation.operations(ProgramEnvironment::from_definition(self_.definition(db))),
-        ))),
+        cycle_initial=|db, _, self_: NewType<'db>| SourceTypeQuery::run::<crate::types::source_queries::NewTypeLazyBaseInitial>(db, (self_,)),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn lazy_base(self, db: &'db dyn Db) -> NewTypeBase<'db> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.lazy_base_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::NewTypeLazyBase>(db, (self,))
     }
 
     fn lazy_base_from_source(
@@ -217,6 +212,28 @@ impl<'db> NewType<'db> {
             self.definition(db),
             eager_base,
         ))
+    }
+}
+crate::types::source_query! {
+    fn NewTypeLazyBaseInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        self_: NewType<'db>,
+    ) -> NewTypeBase<'db> {
+        NewTypeBase::ClassType(ClassType::object(
+            db,
+            &source_operation.operations(ProgramEnvironment::from_definition(self_.definition(db))),
+        ))
+    }
+}
+
+crate::types::source_query! {
+    fn NewTypeLazyBase<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: NewType<'db>,
+    ) -> NewTypeBase<'db> {
+        source_self.lazy_base_from_source(db, source_operation)
     }
 }
 

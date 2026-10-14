@@ -64,94 +64,93 @@ fn lambda_inference_sources<'db>(
     ty: Type<'db>,
     include_inputs: bool,
 ) -> Box<[ScopeId<'db>]> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::LambdaInferenceSources>(
         db,
         (program, ty, include_inputs),
-        |db, source_operation, (program, ty, include_inputs)| {
-            lambda_inference_sources_from_source(db, source_operation, program, ty, include_inputs)
-        },
     )
 }
 
-fn lambda_inference_sources_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    program: Program<'db>,
-    ty: Type<'db>,
-    include_inputs: bool,
-) -> Box<[ScopeId<'db>]> {
-    struct SourceVisitor<'db> {
-        env: TypeOperations<'db>,
+crate::types::source_query! {
+    fn LambdaInferenceSources<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        ty: Type<'db>,
         include_inputs: bool,
-        visited: TypeCollector<'db>,
-        sources: RefCell<FxHashSet<ScopeId<'db>>>,
-    }
-
-    impl<'db> TypeVisitorHooks<'db> for SourceVisitor<'db> {
-        fn program_environment(&self) -> &TypeOperations<'db> {
-            &self.env
+    ) -> Box<[ScopeId<'db>]> {
+        struct SourceVisitor<'db> {
+            env: TypeOperations<'db>,
+            include_inputs: bool,
+            visited: TypeCollector<'db>,
+            sources: RefCell<FxHashSet<ScopeId<'db>>>,
         }
 
-        fn should_visit_lazy_type_attributes(&self) -> bool {
-            false
-        }
+        impl<'db> TypeVisitorHooks<'db> for SourceVisitor<'db> {
+            fn program_environment(&self) -> &TypeOperations<'db> {
+                &self.env
+            }
 
-        fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, _ty: Type<'db>) {
-            visit.walk_children_once(db, &self.visited);
-        }
+            fn should_visit_lazy_type_attributes(&self) -> bool {
+                false
+            }
 
-        fn visit_callable_type(
-            &self,
-            db: &'db dyn Db,
-            visit: &TypeVisit<'_, 'db, Self>,
-            callable: CallableType<'db>,
-        ) {
-            match callable.signature_source(db) {
-                SignatureSource::Lambda(lambda) => {
-                    self.sources.borrow_mut().insert(lambda.scope(db));
-                    if self.include_inputs {
-                        lambda.walk_inference_inputs(db, visit);
+            fn visit_type(&self, db: &'db dyn Db, visit: &TypeVisit<'_, 'db, Self>, _ty: Type<'db>) {
+                visit.walk_children_once(db, &self.visited);
+            }
+
+            fn visit_callable_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                callable: CallableType<'db>,
+            ) {
+                match callable.signature_source(db) {
+                    SignatureSource::Lambda(lambda) => {
+                        self.sources.borrow_mut().insert(lambda.scope(db));
+                        if self.include_inputs {
+                            lambda.walk_inference_inputs(db, visit);
+                        }
+                    }
+                    SignatureSource::Explicit(_) | SignatureSource::Projected(_) => {
+                        walk_callable_type(db, callable, visit);
                     }
                 }
-                SignatureSource::Explicit(_) | SignatureSource::Projected(_) => {
-                    walk_callable_type(db, callable, visit);
+            }
+
+            fn visit_type_alias_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                alias: TypeAliasType<'db>,
+            ) {
+                if let Some(arguments) = alias.specialization(db) {
+                    walk_specialization_types(db, arguments, visit);
+                }
+            }
+
+            fn visit_recursive_type(
+                &self,
+                db: &'db dyn Db,
+                visit: &TypeVisit<'_, 'db, Self>,
+                recursive: RecursiveType<'db>,
+            ) {
+                if let Some(arguments) = recursive.arguments(db) {
+                    walk_specialization_types(db, arguments, visit);
                 }
             }
         }
 
-        fn visit_type_alias_type(
-            &self,
-            db: &'db dyn Db,
-            visit: &TypeVisit<'_, 'db, Self>,
-            alias: TypeAliasType<'db>,
-        ) {
-            if let Some(arguments) = alias.specialization(db) {
-                walk_specialization_types(db, arguments, visit);
-            }
-        }
-
-        fn visit_recursive_type(
-            &self,
-            db: &'db dyn Db,
-            visit: &TypeVisit<'_, 'db, Self>,
-            recursive: RecursiveType<'db>,
-        ) {
-            if let Some(arguments) = recursive.arguments(db) {
-                walk_specialization_types(db, arguments, visit);
-            }
-        }
+        let visitor = SourceVisitor {
+            env: source_operation.operations(ProgramEnvironment::from_program(program)),
+            include_inputs,
+            visited: TypeCollector::default(),
+            sources: RefCell::default(),
+        };
+        TypeVisitorContext::new(&visitor).visit_type(db, ty);
+        let mut sources: Box<[_]> = visitor.sources.into_inner().into_iter().collect();
+        sources.sort_unstable_by_key(AsId::as_id);
+        sources
     }
-
-    let visitor = SourceVisitor {
-        env: source_operation.operations(ProgramEnvironment::from_program(program)),
-        include_inputs,
-        visited: TypeCollector::default(),
-        sources: RefCell::default(),
-    };
-    TypeVisitorContext::new(&visitor).visit_type(db, ty);
-    let mut sources: Box<[_]> = visitor.sources.into_inner().into_iter().collect();
-    sources.sort_unstable_by_key(AsId::as_id);
-    sources
 }
 
 /// Original inference inputs and the saved transformations of a lambda.
@@ -1326,23 +1325,26 @@ fn source_return_type_dependencies<'db>(
     db: &'db dyn Db,
     source: LambdaSource<'db>,
 ) -> TypeVarSet<'db> {
-    SourceTypeQuery::run(db, (source,), |db, source_operation, (source,)| {
-        source_return_type_dependencies_from_source(db, source_operation, source)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::SourceReturnTypeDependencies>(
+        db,
+        (source,),
+    )
 }
 
-fn source_return_type_dependencies_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    source: LambdaSource<'db>,
-) -> TypeVarSet<'db> {
-    let lambda = source.input(db);
-    let env = source_operation.operations(ProgramEnvironment::from_scope(lambda.scope(db)));
-    type_dependencies(
-        db,
-        &env,
-        [infer_lambda_signature(db, source).overload_return_type_or_unknown(db, &env)],
-    )
+crate::types::source_query! {
+    fn SourceReturnTypeDependencies<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source: LambdaSource<'db>,
+    ) -> TypeVarSet<'db> {
+        let lambda = source.input(db);
+        let env = source_operation.operations(ProgramEnvironment::from_scope(lambda.scope(db)));
+        type_dependencies(
+            db,
+            &env,
+            [infer_lambda_signature(db, source).overload_return_type_or_unknown(db, &env)],
+        )
+    }
 }
 
 #[salsa::tracked(
@@ -1353,79 +1355,79 @@ fn source_return_type_dependencies_from_source<'db>(
     heap_size=ruff_memory_usage::heap_size,
 )]
 fn source_captured_typevars<'db>(db: &'db dyn Db, input: LambdaSource<'db>) -> GenericContext<'db> {
-    SourceTypeQuery::run(db, (input,), |db, source_operation, (input,)| {
-        source_captured_typevars_from_source(db, source_operation, input)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::SourceCapturedTypevars>(db, (input,))
 }
 
-fn source_captured_typevars_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    input: LambdaSource<'db>,
-) -> GenericContext<'db> {
-    let source = input.input(db);
-    let scope = source.scope(db);
-    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
-    let index = semantic_index(db, scope.program_file(db));
-    let mut scopes = vec![scope.file_scope_id(db)];
-    let mut position = 0;
-    while let Some(current) = scopes.get(position).copied() {
-        scopes.extend(index.child_scopes(current).map(|(id, _)| id));
-        position += 1;
-    }
-    let local_scopes: FxHashSet<_> = scopes.iter().copied().collect();
-    let mut captured_scopes = FxHashSet::default();
-    let mut free_names = FxHashSet::default();
-    for current in scopes {
-        for symbol in index.place_table(current).symbols() {
-            if !symbol.is_used() || symbol.is_local() {
-                continue;
-            }
-            let owner = index
-                .visible_ancestor_scopes(current)
-                .skip(1)
-                .find_map(|(id, _)| {
-                    let places = index.place_table(id);
-                    places
-                        .symbol_id(symbol.name())
-                        .filter(|symbol| places.symbol(*symbol).is_local())
-                        .map(|_| id)
-                });
-            if owner.is_some_and(|owner| local_scopes.contains(&owner)) {
-                continue;
-            }
-            free_names.insert(symbol.name());
-            if let Some(owner) = owner.filter(|owner| !owner.is_global()) {
-                captured_scopes.extend(index.ancestor_scopes(owner).map(|(id, _)| id));
+crate::types::source_query! {
+    fn SourceCapturedTypevars<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        input: LambdaSource<'db>,
+    ) -> GenericContext<'db> {
+        let source = input.input(db);
+        let scope = source.scope(db);
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
+        let index = semantic_index(db, scope.program_file(db));
+        let mut scopes = vec![scope.file_scope_id(db)];
+        let mut position = 0;
+        while let Some(current) = scopes.get(position).copied() {
+            scopes.extend(index.child_scopes(current).map(|(id, _)| id));
+            position += 1;
+        }
+        let local_scopes: FxHashSet<_> = scopes.iter().copied().collect();
+        let mut captured_scopes = FxHashSet::default();
+        let mut free_names = FxHashSet::default();
+        for current in scopes {
+            for symbol in index.place_table(current).symbols() {
+                if !symbol.is_used() || symbol.is_local() {
+                    continue;
+                }
+                let owner = index
+                    .visible_ancestor_scopes(current)
+                    .skip(1)
+                    .find_map(|(id, _)| {
+                        let places = index.place_table(id);
+                        places
+                            .symbol_id(symbol.name())
+                            .filter(|symbol| places.symbol(*symbol).is_local())
+                            .map(|_| id)
+                    });
+                if owner.is_some_and(|owner| local_scopes.contains(&owner)) {
+                    continue;
+                }
+                free_names.insert(symbol.name());
+                if let Some(owner) = owner.filter(|owner| !owner.is_global()) {
+                    captured_scopes.extend(index.ancestor_scopes(owner).map(|(id, _)| id));
+                }
             }
         }
-    }
-    // A generic environment is an input only when the body reads a value from it, or
-    // names one of its type parameters. Closed lambdas must not acquire substitutions
-    // for unrelated enclosing parameters, such as T in `class C[T]: f = lambda: 0`.
-    let mut lexical_variables = FxOrderSet::default();
-    if !free_names.is_empty() {
-        for (ancestor_id, ancestor) in index.ancestor_scopes(scope.file_scope_id(db)) {
-            if let Some(context) = GenericContext::lexical_of_node(db, &env, ancestor.node(), index)
-            {
-                lexical_variables.extend(context.variables(db).filter(|variable| {
-                    captured_scopes.contains(&ancestor_id) || free_names.contains(variable.name(db))
-                }));
+        // A generic environment is an input only when the body reads a value from it, or
+        // names one of its type parameters. Closed lambdas must not acquire substitutions
+        // for unrelated enclosing parameters, such as T in `class C[T]: f = lambda: 0`.
+        let mut lexical_variables = FxOrderSet::default();
+        if !free_names.is_empty() {
+            for (ancestor_id, ancestor) in index.ancestor_scopes(scope.file_scope_id(db)) {
+                if let Some(context) = GenericContext::lexical_of_node(db, &env, ancestor.node(), index)
+                {
+                    lexical_variables.extend(context.variables(db).filter(|variable| {
+                        captured_scopes.contains(&ancestor_id) || free_names.contains(variable.name(db))
+                    }));
+                }
             }
         }
-    }
-    let variables = RefCell::new(lexical_variables);
-    for parameter in source.parameters(db) {
-        collect_captured_typevars(db, &env, parameter.annotated_type(), &variables);
-        if let Some(default) = parameter.eager_default_type() {
-            collect_captured_typevars(db, &env, default, &variables);
+        let variables = RefCell::new(lexical_variables);
+        for parameter in source.parameters(db) {
+            collect_captured_typevars(db, &env, parameter.annotated_type(), &variables);
+            if let Some(default) = parameter.eager_default_type() {
+                collect_captured_typevars(db, &env, default, &variables);
+            }
         }
-    }
-    if let Some(annotation) = source.return_context(db).annotation {
-        collect_captured_typevars(db, &env, annotation, &variables);
-    }
+        if let Some(annotation) = source.return_context(db).annotation {
+            collect_captured_typevars(db, &env, annotation, &variables);
+        }
 
-    GenericContext::from_typevar_instances(db, &env, variables.into_inner())
+        GenericContext::from_typevar_instances(db, &env, variables.into_inner())
+    }
 }
 
 impl<'db> LambdaSource<'db> {

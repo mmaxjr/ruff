@@ -1052,12 +1052,9 @@ impl<'db> LambdaSource<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::LambdaSourceReturnVariance>(
             db,
             (self, typevar),
-            |db, source_operation, (source_self, typevar)| {
-                source_self.return_variance_from_source(db, source_operation, typevar)
-            },
         )
     }
 
@@ -1073,6 +1070,16 @@ impl<'db> LambdaSource<'db> {
             .infer_body(db)
             .expression_type(source.body(db))
             .variance_of(db, &env, typevar)
+    }
+}
+crate::types::source_query! {
+    fn LambdaSourceReturnVariance<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: LambdaSource<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        source_self.return_variance_from_source(db, source_operation, typevar)
     }
 }
 

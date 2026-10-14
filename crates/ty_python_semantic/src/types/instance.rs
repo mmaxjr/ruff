@@ -592,47 +592,49 @@ fn protocol_materialization_is_noop<'db>(
         program: crate::Program<'db>,
         class: ProtocolClass<'db>,
     ) -> bool {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::ProtocolMaterializationIsNoop>(
             db,
             (program, class),
-            |db, source_operation, (program, class)| {
-                cached_from_source(db, source_operation, program, class)
-            },
         )
     }
 
-    fn cached_from_source<'db>(
+    env.cached_query(
+        || cached(db, env.program(db), class),
+        || compute_protocol_materialization(db, env, class),
+    )
+}
+fn compute_protocol_materialization<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    class: ProtocolClass<'db>,
+) -> bool {
+    let protocol = ProtocolInstanceType::from_class(class);
+    with_protocol_query(
+        db,
+        env,
+        (
+            Type::ProtocolInstance(protocol),
+            ProtocolQuery::Materialization,
+            Type::object(),
+        ),
+        |_| false,
+        || {
+            protocol_materialization_is_noop_by_inspection(db, env, protocol)
+                || protocol_materialization_is_noop_with_type_parameters(db, env, class)
+        },
+    )
+}
+
+crate::types::source_query! {
+    fn ProtocolMaterializationIsNoop<'db, 'input>(
         db: &'db dyn Db,
         source_operation: &SourceTypeQuery<'db>,
         program: crate::Program<'db>,
         class: ProtocolClass<'db>,
     ) -> bool {
         let env = source_operation.operations(ProgramEnvironment::from_program(program));
-        compute(db, &env, class)
+        compute_protocol_materialization(db, &env, class)
     }
-
-    fn compute<'db>(db: &'db dyn Db, env: &TypeOperations<'db>, class: ProtocolClass<'db>) -> bool {
-        let protocol = ProtocolInstanceType::from_class(class);
-        with_protocol_query(
-            db,
-            env,
-            (
-                Type::ProtocolInstance(protocol),
-                ProtocolQuery::Materialization,
-                Type::object(),
-            ),
-            |_| false,
-            || {
-                protocol_materialization_is_noop_by_inspection(db, env, protocol)
-                    || protocol_materialization_is_noop_with_type_parameters(db, env, class)
-            },
-        )
-    }
-
-    env.cached_query(
-        || cached(db, env.program(db), class),
-        || compute(db, env, class),
-    )
 }
 
 /// Prove by inspecting its member types that materialization leaves `protocol` unchanged.
@@ -1634,53 +1636,10 @@ fn non_recursive_protocol_constraints<'db>(
         source: ProtocolInstanceType<'db>,
         target: ProtocolInterfaceView<'db>,
     ) -> OwnedConstraintSet<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::NonRecursiveProtocolConstraints>(
             db,
             (source, target),
-            |db, source_operation, (source, target)| {
-                cached_from_source(db, source_operation, source, target)
-            },
         )
-    }
-
-    fn cached_from_source<'db>(
-        db: &'db dyn Db,
-        source_operation: &SourceTypeQuery<'db>,
-        source: ProtocolInstanceType<'db>,
-        target: ProtocolInterfaceView<'db>,
-    ) -> OwnedConstraintSet<'db> {
-        let env = source_operation
-            .operations(ProgramEnvironment::from_program(target.base().program(db)));
-        compute(db, &env, source, target)
-    }
-
-    fn compute<'db>(
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-        source: ProtocolInstanceType<'db>,
-        target: ProtocolInterfaceView<'db>,
-    ) -> OwnedConstraintSet<'db> {
-        let constraints = ConstraintSetBuilder::new();
-        constraints.into_owned(|constraints| {
-            let relation_visitor = HasRelationToVisitor::default(constraints);
-            let disjointness_visitor = IsDisjointVisitor::default(constraints);
-            let signature_relation_visitor = SignatureRelationVisitor::default();
-            let materialization_visitor = ApplyTypeMappingVisitor::new(env);
-            let checker = TypeRelationChecker::constraint_set_assignability(
-                env,
-                constraints,
-                &relation_visitor,
-                &disjointness_visitor,
-                &signature_relation_visitor,
-                &materialization_visitor,
-            );
-            checker.check_protocol_interface_pair(
-                db,
-                Type::ProtocolInstance(source),
-                source.interface(db, env),
-                target,
-            )
-        })
     }
 
     env.cached_query(
@@ -1695,10 +1654,51 @@ fn non_recursive_protocol_constraints<'db>(
                     Type::ProtocolInstance(target_protocol),
                 ),
                 |_| OwnedConstraintSet::always(),
-                || compute(db, env, source, target),
+                || compute_non_recursive_protocol_constraints(db, env, source, target),
             ))
         },
     )
+}
+fn compute_non_recursive_protocol_constraints<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    source: ProtocolInstanceType<'db>,
+    target: ProtocolInterfaceView<'db>,
+) -> OwnedConstraintSet<'db> {
+    let constraints = ConstraintSetBuilder::new();
+    constraints.into_owned(|constraints| {
+        let relation_visitor = HasRelationToVisitor::default(constraints);
+        let disjointness_visitor = IsDisjointVisitor::default(constraints);
+        let signature_relation_visitor = SignatureRelationVisitor::default();
+        let materialization_visitor = ApplyTypeMappingVisitor::new(env);
+        let checker = TypeRelationChecker::constraint_set_assignability(
+            env,
+            constraints,
+            &relation_visitor,
+            &disjointness_visitor,
+            &signature_relation_visitor,
+            &materialization_visitor,
+        );
+        checker.check_protocol_interface_pair(
+            db,
+            Type::ProtocolInstance(source),
+            source.interface(db, env),
+            target,
+        )
+    })
+}
+
+crate::types::source_query! {
+    fn NonRecursiveProtocolConstraints<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source: ProtocolInstanceType<'db>,
+        target: ProtocolInterfaceView<'db>,
+    ) -> OwnedConstraintSet<'db> {
+        let env =
+            source_operation.operations(ProgramEnvironment::from_program(target.base().program(db)));
+        compute_non_recursive_protocol_constraints(db, &env, source, target)
+    }
 }
 
 impl<'c, 'db> DisjointnessChecker<'_, 'c, 'db> {
@@ -2116,59 +2116,9 @@ impl<'db> ProtocolInstanceType<'db> {
             protocol: ProtocolInstanceType<'db>,
             _: (),
         ) -> bool {
-            SourceTypeQuery::run(
-                db,
-                (program, protocol, ()),
-                |db, source_operation, (program, protocol, ())| {
-                    cached_from_source(db, source_operation, program, protocol, ())
-                },
-            )
-        }
-
-        fn cached_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            program: crate::Program<'db>,
-            protocol: ProtocolInstanceType<'db>,
-            _: (),
-        ) -> bool {
-            let env = source_operation.operations(ProgramEnvironment::from_program(program));
-            compute(db, &env, protocol)
-        }
-
-        fn compute<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            protocol: ProtocolInstanceType<'db>,
-        ) -> bool {
-            let interface = protocol.interface(db, env);
-
-            // Neither hashability nor instance-dictionary storage is guaranteed for every object.
-            // Subclasses can replace `object.__hash__` with `None`, while slotted instances can
-            // omit the `__dict__` that typeshed broadly declares on `object`.
-            if interface.includes_member(db, "__hash__")
-                || interface.includes_member(db, "__dict__")
-            {
-                return false;
-            }
-
-            let constraints = ConstraintSetBuilder::new();
-            let relation_visitor = HasRelationToVisitor::default(&constraints);
-            let disjointness_visitor = IsDisjointVisitor::default(&constraints);
-            let signature_relation_visitor = SignatureRelationVisitor::default();
-            let materialization_visitor = ApplyTypeMappingVisitor::new(env);
-            let checker = TypeRelationChecker::subtyping(
-                env,
-                &constraints,
-                TypeVarSet::None,
-                &relation_visitor,
-                &disjointness_visitor,
-                &signature_relation_visitor,
-                &materialization_visitor,
-            );
-            checker
-                .check_type_satisfies_protocol(db, Type::object(), protocol)
-                .is_always_satisfied(db, env, TypeVarSet::None)
+            SourceTypeQuery::run::<
+                crate::types::source_queries::ProtocolInstanceTypeIsEquivalentToObject,
+            >(db, (program, protocol, ()))
         }
 
         env.cached_query(
@@ -2183,7 +2133,7 @@ impl<'db> ProtocolInstanceType<'db> {
                         Type::ProtocolInstance(self),
                     ),
                     |kind| kind == CycleKind::Exact,
-                    || compute(db, env, self),
+                    || compute_protocol_object_equivalence(db, env, self),
                 )
             },
         )
@@ -2340,6 +2290,51 @@ impl<'db> ProtocolInstanceType<'db> {
             target,
             target_view,
         ))
+    }
+}
+fn compute_protocol_object_equivalence<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    protocol: ProtocolInstanceType<'db>,
+) -> bool {
+    let interface = protocol.interface(db, env);
+
+    // Neither hashability nor instance-dictionary storage is guaranteed for every object.
+    // Subclasses can replace `object.__hash__` with `None`, while slotted instances can
+    // omit the `__dict__` that typeshed broadly declares on `object`.
+    if interface.includes_member(db, "__hash__") || interface.includes_member(db, "__dict__") {
+        return false;
+    }
+
+    let constraints = ConstraintSetBuilder::new();
+    let relation_visitor = HasRelationToVisitor::default(&constraints);
+    let disjointness_visitor = IsDisjointVisitor::default(&constraints);
+    let signature_relation_visitor = SignatureRelationVisitor::default();
+    let materialization_visitor = ApplyTypeMappingVisitor::new(env);
+    let checker = TypeRelationChecker::subtyping(
+        env,
+        &constraints,
+        TypeVarSet::None,
+        &relation_visitor,
+        &disjointness_visitor,
+        &signature_relation_visitor,
+        &materialization_visitor,
+    );
+    checker
+        .check_type_satisfies_protocol(db, Type::object(), protocol)
+        .is_always_satisfied(db, env, TypeVarSet::None)
+}
+
+crate::types::source_query! {
+    fn ProtocolInstanceTypeIsEquivalentToObject<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: crate::Program<'db>,
+        protocol: ProtocolInstanceType<'db>,
+        _input_2: (),
+    ) -> bool {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
+        compute_protocol_object_equivalence(db, &env, protocol)
     }
 }
 

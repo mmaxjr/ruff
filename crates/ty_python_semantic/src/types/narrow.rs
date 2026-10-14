@@ -140,22 +140,25 @@ fn all_narrowing_constraints_for_pattern<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
-    SourceTypeQuery::run(db, (pattern,), |db, source_operation, (pattern,)| {
-        all_narrowing_constraints_for_pattern_from_source(db, source_operation, pattern)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::AllNarrowingConstraintsForPattern>(
+        db,
+        (pattern,),
+    )
 }
 
-fn all_narrowing_constraints_for_pattern_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    pattern: PatternPredicate<'db>,
-) -> Option<FrozenNarrowingConstraints<'db>> {
-    let program_file = pattern.program_file(db);
-    let python_file = program_file.python_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    let module = parsed_module(db, python_file).load(db);
-    NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), true)
-        .finish()
+crate::types::source_query! {
+    fn AllNarrowingConstraintsForPattern<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        pattern: PatternPredicate<'db>,
+    ) -> Option<FrozenNarrowingConstraints<'db>> {
+        let program_file = pattern.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let module = parsed_module(db, python_file).load(db);
+        NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), true)
+            .finish()
+    }
 }
 
 #[salsa::tracked(
@@ -167,35 +170,38 @@ fn all_narrowing_constraints_for_expression<'db>(
     db: &'db dyn Db,
     expression: Expression<'db>,
 ) -> ExpressionNarrowingConstraints<'db> {
-    SourceTypeQuery::run(db, (expression,), |db, source_operation, (expression,)| {
-        all_narrowing_constraints_for_expression_from_source(db, source_operation, expression)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::AllNarrowingConstraintsForExpression>(
+        db,
+        (expression,),
+    )
 }
 
-fn all_narrowing_constraints_for_expression_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    expression: Expression<'db>,
-) -> ExpressionNarrowingConstraints<'db> {
-    let program_file = expression.program_file(db);
-    let python_file = program_file.python_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    let module = parsed_module(db, python_file).load(db);
-    let predicate = PredicateNode::Expression {
-        expression,
-        truthiness_from_type: false,
-    };
-    let mut positive = NarrowingConstraintsBuilder::new(db, &env, &module, predicate, true);
-    let positive_constraints = positive.finish();
-    let mut negative = NarrowingConstraintsBuilder::new(db, &env, &module, predicate, false);
-    let negative_constraints = negative.finish();
+crate::types::source_query! {
+    fn AllNarrowingConstraintsForExpression<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        expression: Expression<'db>,
+    ) -> ExpressionNarrowingConstraints<'db> {
+        let program_file = expression.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let module = parsed_module(db, python_file).load(db);
+        let predicate = PredicateNode::Expression {
+            expression,
+            truthiness_from_type: false,
+        };
+        let mut positive = NarrowingConstraintsBuilder::new(db, &env, &module, predicate, true);
+        let positive_constraints = positive.finish();
+        let mut negative = NarrowingConstraintsBuilder::new(db, &env, &module, predicate, false);
+        let negative_constraints = negative.finish();
 
-    if positive.is_provisional || negative.is_provisional {
-        ExpressionNarrowingConstraints::Provisional
-    } else {
-        ExpressionNarrowingConstraints::Inferred {
-            positive: positive_constraints,
-            negative: negative_constraints,
+        if positive.is_provisional || negative.is_provisional {
+            ExpressionNarrowingConstraints::Provisional
+        } else {
+            ExpressionNarrowingConstraints::Inferred {
+                positive: positive_constraints,
+                negative: negative_constraints,
+            }
         }
     }
 }
@@ -209,22 +215,25 @@ fn all_negative_narrowing_constraints_for_pattern<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
-    SourceTypeQuery::run(db, (pattern,), |db, source_operation, (pattern,)| {
-        all_negative_narrowing_constraints_for_pattern_from_source(db, source_operation, pattern)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::AllNegativeNarrowingConstraintsForPattern>(
+        db,
+        (pattern,),
+    )
 }
 
-fn all_negative_narrowing_constraints_for_pattern_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    pattern: PatternPredicate<'db>,
-) -> Option<FrozenNarrowingConstraints<'db>> {
-    let program_file = pattern.program_file(db);
-    let python_file = program_file.python_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    let module = parsed_module(db, python_file).load(db);
-    NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), false)
-        .finish()
+crate::types::source_query! {
+    fn AllNegativeNarrowingConstraintsForPattern<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        pattern: PatternPredicate<'db>,
+    ) -> Option<FrozenNarrowingConstraints<'db>> {
+        let program_file = pattern.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let module = parsed_module(db, python_file).load(db);
+        NarrowingConstraintsBuilder::new(db, &env, &module, PredicateNode::Pattern(pattern), false)
+            .finish()
+    }
 }
 
 #[salsa::tracked(
@@ -237,38 +246,31 @@ fn all_narrowing_constraints_for_subject_element_pattern<'db>(
     pattern: PatternPredicate<'db>,
     target: ExpressionNodeKey,
 ) -> Option<FrozenNarrowingConstraints<'db>> {
-    SourceTypeQuery::run(
-        db,
-        (pattern, target),
-        |db, source_operation, (pattern, target)| {
-            all_narrowing_constraints_for_subject_element_pattern_from_source(
-                db,
-                source_operation,
-                pattern,
-                target,
-            )
-        },
-    )
+    SourceTypeQuery::run::<
+        crate::types::source_queries::AllNarrowingConstraintsForSubjectElementPattern,
+    >(db, (pattern, target))
 }
 
-fn all_narrowing_constraints_for_subject_element_pattern_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    pattern: PatternPredicate<'db>,
-    target: ExpressionNodeKey,
-) -> Option<FrozenNarrowingConstraints<'db>> {
-    let program_file = pattern.program_file(db);
-    let python_file = program_file.python_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    let module = parsed_module(db, python_file).load(db);
-    NarrowingConstraintsBuilder::new(
-        db,
-        &env,
-        &module,
-        PredicateNode::SubjectElementPattern(SubjectElementPatternPredicate { pattern, target }),
-        true,
-    )
-    .finish()
+crate::types::source_query! {
+    fn AllNarrowingConstraintsForSubjectElementPattern<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        pattern: PatternPredicate<'db>,
+        target: ExpressionNodeKey,
+    ) -> Option<FrozenNarrowingConstraints<'db>> {
+        let program_file = pattern.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let module = parsed_module(db, python_file).load(db);
+        NarrowingConstraintsBuilder::new(
+            db,
+            &env,
+            &module,
+            PredicateNode::SubjectElementPattern(SubjectElementPatternPredicate { pattern, target }),
+            true,
+        )
+        .finish()
+    }
 }
 
 /// The types produced when a match pattern succeeds.
@@ -529,43 +531,55 @@ pub(super) struct PatternSuccessAnalyzer<'db, 'pattern> {
 #[salsa::tracked(
     returns(ref),
     cycle_initial=|_, id, _| PatternSuccessTypes::cycle_initial(Type::divergent(id)),
-    cycle_fn=|db: &'db dyn Db, cycle, previous: &PatternSuccessTypes<'db>, result: PatternSuccessTypes<'db>, pattern: PatternPredicate<'db>| SourceTypeQuery::run(db, (cycle, previous, result, pattern), |db, source_operation, (cycle, previous, result, pattern)| {
-        let env = source_operation.operations(ProgramEnvironment::from_scope(pattern.subject(db).scope(db)));
-        result.cycle_normalized(db, &env, previous, cycle)
-    }),
+    cycle_fn=|db: &'db dyn Db, cycle, previous: &PatternSuccessTypes<'db>, result: PatternSuccessTypes<'db>, pattern: PatternPredicate<'db>| SourceTypeQuery::run::<crate::types::source_queries::PatternSuccessTypesRecovery>(db, (cycle, previous, result, pattern,)),
     heap_size=ruff_memory_usage::heap_size
 )]
 pub(crate) fn pattern_success_types<'db>(
     db: &'db dyn Db,
     pattern: PatternPredicate<'db>,
 ) -> PatternSuccessTypes<'db> {
-    SourceTypeQuery::run(db, (pattern,), |db, source_operation, (pattern,)| {
-        pattern_success_types_from_source(db, source_operation, pattern)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::PatternSuccessTypes>(db, (pattern,))
+}
+crate::types::source_query! {
+    fn PatternSuccessTypesRecovery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input PatternSuccessTypes<'db>,
+        result: PatternSuccessTypes<'db>,
+        pattern: PatternPredicate<'db>,
+    ) -> PatternSuccessTypes<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(
+            pattern.subject(db).scope(db),
+        ));
+        result.cycle_normalized(db, &env, previous, cycle)
+    }
 }
 
-fn pattern_success_types_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    pattern: PatternPredicate<'db>,
-) -> PatternSuccessTypes<'db> {
-    let subject = pattern.subject(db);
-    let env = source_operation.operations(ProgramEnvironment::from_scope(subject.scope(db)));
-    let incoming_subject_ty =
-        type_narrowed_by_previous_patterns(db, pattern, PatternSubjectExpansion::Raw);
-    let mut analyzer = PatternSuccessAnalyzer::new(db, &env, pattern.scope(db));
-    let result = analyzer.analyze_successful_pattern(pattern.kind(db), incoming_subject_ty);
-    PatternSuccessTypes {
-        bindings: result
-            .bindings
-            .into_iter()
-            .map(|(place, binding)| (place, binding.ty(db, &env)))
-            .collect(),
-        missing_binding_ty: if result.matched_subject_ty.is_never() {
-            Type::Never
-        } else {
-            Type::unknown()
-        },
+crate::types::source_query! {
+    fn PatternSuccessTypes<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        pattern: PatternPredicate<'db>,
+    ) -> PatternSuccessTypes<'db> {
+        let subject = pattern.subject(db);
+        let env = source_operation.operations(ProgramEnvironment::from_scope(subject.scope(db)));
+        let incoming_subject_ty =
+            type_narrowed_by_previous_patterns(db, pattern, PatternSubjectExpansion::Raw);
+        let mut analyzer = PatternSuccessAnalyzer::new(db, &env, pattern.scope(db));
+        let result = analyzer.analyze_successful_pattern(pattern.kind(db), incoming_subject_ty);
+        PatternSuccessTypes {
+            bindings: result
+                .bindings
+                .into_iter()
+                .map(|(place, binding)| (place, binding.ty(db, &env)))
+                .collect(),
+            missing_binding_ty: if result.matched_subject_ty.is_never() {
+                Type::Never
+            } else {
+                Type::unknown()
+            },
+        }
     }
 }
 
@@ -1482,7 +1496,7 @@ impl<'db> PatternNarrowingResult<'db> {
 }
 
 #[derive(PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-enum ExpressionNarrowingConstraints<'db> {
+pub(crate) enum ExpressionNarrowingConstraints<'db> {
     Inferred {
         positive: Option<FrozenNarrowingConstraints<'db>>,
         negative: Option<FrozenNarrowingConstraints<'db>>,

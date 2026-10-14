@@ -1211,34 +1211,17 @@ impl KnownClass {
         #[salsa::tracked(
             returns(copy),
             cycle_initial=|_, id, _| Type::divergent(id),
-            cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, argument: KnownClassArgument<'db>| SourceTypeQuery::run(db, (cycle, previous, result, argument), |db, source_operation, (cycle, previous, result, argument)| {
-                let env = source_operation.operations(ProgramEnvironment::from_program(argument.program(db)));
-                result.cycle_normalized(db, &env, *previous, cycle)
-            }),
+            cycle_fn=|db, cycle, previous: &Type<'db>, result: Type<'db>, argument: KnownClassArgument<'db>| SourceTypeQuery::run::<crate::types::source_queries::KnownClassKnownClassToInstanceRecovery>(db, (cycle, previous, result, argument,)),
             heap_size=ruff_memory_usage::heap_size,
         )]
         fn known_class_to_instance<'db>(
             db: &'db dyn Db,
             argument: KnownClassArgument<'db>,
         ) -> Type<'db> {
-            SourceTypeQuery::run(db, (argument,), |db, source_operation, (argument,)| {
-                known_class_to_instance_from_source(db, source_operation, argument)
-            })
-        }
-
-        fn known_class_to_instance_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            argument: KnownClassArgument<'db>,
-        ) -> Type<'db> {
-            let env = &source_operation
-                .operations(ProgramEnvironment::from_program(argument.program(db)));
-            argument
-                .class(db)
-                .to_class_literal(db, env)
-                .to_class_type(db, env)
-                .map(|class| Type::instance(db, env, class))
-                .unwrap_or_else(Type::unknown)
+            SourceTypeQuery::run::<crate::types::source_queries::KnownClassKnownClassToInstance>(
+                db,
+                (argument,),
+            )
         }
 
         known_class_to_instance(db, KnownClassArgument::new(db, self, env.program(db)))
@@ -1360,61 +1343,10 @@ impl KnownClass {
             db: &'db dyn Db,
             argument: KnownClassArgument<'db>,
         ) -> Result<Option<StaticClassLiteral<'db>>, KnownClassLookupError<'db>> {
-            SourceTypeQuery::run(db, (argument,), |db, source_operation, (argument,)| {
-                known_class_to_class_literal_from_source(db, source_operation, argument)
-            })
-        }
-
-        fn known_class_to_class_literal_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            argument: KnownClassArgument<'db>,
-        ) -> Result<Option<StaticClassLiteral<'db>>, KnownClassLookupError<'db>> {
-            let program = argument.program(db);
-            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
-            let python_version = env.python_version(db);
-            let class = argument.class(db);
-            let module = class.canonical_module(python_version);
-            let third_party = module.is_third_party();
-            let symbol = known_module_symbol(db, env, module, class.name(python_version)).place;
-            let result = match symbol {
-                Place::Defined(DefinedPlace {
-                    ty: Type::ClassLiteral(ClassLiteral::Static(class_literal)),
-                    definedness: Definedness::AlwaysDefined,
-                    ..
-                }) => Ok(Some(class_literal)),
-                Place::Defined(DefinedPlace {
-                    ty: Type::ClassLiteral(ClassLiteral::Static(class_literal)),
-                    definedness: Definedness::PossiblyUndefined,
-                    ..
-                }) => Err(KnownClassLookupError::ClassPossiblyUnbound {
-                    class_literal,
-                    third_party,
-                }),
-                Place::Defined(DefinedPlace { ty: found_type, .. }) => {
-                    Err(KnownClassLookupError::SymbolNotAClass {
-                        found_type,
-                        third_party,
-                    })
-                }
-                Place::Undefined => Err(KnownClassLookupError::ClassNotFound { third_party }),
-            };
-
-            if let Err(lookup_error) = result {
-                if matches!(
-                    lookup_error,
-                    KnownClassLookupError::ClassPossiblyUnbound { .. }
-                ) {
-                    tracing::info!("{}", lookup_error.display(db, env, class));
-                } else {
-                    tracing::info!(
-                        "{}. Falling back to `Unknown` for the symbol instead.",
-                        lookup_error.display(db, env, class)
-                    );
-                }
-            }
-
-            result
+            SourceTypeQuery::run::<crate::types::source_queries::KnownClassKnownClassToClassLiteral>(
+                db,
+                (argument,),
+            )
         }
 
         known_class_to_class_literal(db, KnownClassArgument::new(db, self, env.program(db)))
@@ -2178,9 +2110,92 @@ impl KnownClass {
         }
     }
 }
+crate::types::source_query! {
+    fn KnownClassKnownClassToInstanceRecovery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input Type<'db>,
+        result: Type<'db>,
+        argument: KnownClassArgument<'db>,
+    ) -> Type<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(argument.program(db)));
+        result.cycle_normalized(db, &env, *previous, cycle)
+    }
+}
+
+crate::types::source_query! {
+    fn KnownClassKnownClassToClassLiteral<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        argument: KnownClassArgument<'db>,
+    ) -> Result<Option<StaticClassLiteral<'db>>, KnownClassLookupError<'db>> {
+        let program = argument.program(db);
+        let env = &source_operation.operations(ProgramEnvironment::from_program(program));
+        let python_version = env.python_version(db);
+        let class = argument.class(db);
+        let module = class.canonical_module(python_version);
+        let third_party = module.is_third_party();
+        let symbol = known_module_symbol(db, env, module, class.name(python_version)).place;
+        let result = match symbol {
+            Place::Defined(DefinedPlace {
+                ty: Type::ClassLiteral(ClassLiteral::Static(class_literal)),
+                definedness: Definedness::AlwaysDefined,
+                ..
+            }) => Ok(Some(class_literal)),
+            Place::Defined(DefinedPlace {
+                ty: Type::ClassLiteral(ClassLiteral::Static(class_literal)),
+                definedness: Definedness::PossiblyUndefined,
+                ..
+            }) => Err(KnownClassLookupError::ClassPossiblyUnbound {
+                class_literal,
+                third_party,
+            }),
+            Place::Defined(DefinedPlace { ty: found_type, .. }) => {
+                Err(KnownClassLookupError::SymbolNotAClass {
+                    found_type,
+                    third_party,
+                })
+            }
+            Place::Undefined => Err(KnownClassLookupError::ClassNotFound { third_party }),
+        };
+
+        if let Err(lookup_error) = result {
+            if matches!(
+                lookup_error,
+                KnownClassLookupError::ClassPossiblyUnbound { .. }
+            ) {
+                tracing::info!("{}", lookup_error.display(db, env, class));
+            } else {
+                tracing::info!(
+                    "{}. Falling back to `Unknown` for the symbol instead.",
+                    lookup_error.display(db, env, class)
+                );
+            }
+        }
+
+        result
+    }
+}
+
+crate::types::source_query! {
+    fn KnownClassKnownClassToInstance<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        argument: KnownClassArgument<'db>,
+    ) -> Type<'db> {
+        let env = &source_operation.operations(ProgramEnvironment::from_program(argument.program(db)));
+        argument
+            .class(db)
+            .to_class_literal(db, env)
+            .to_class_type(db, env)
+            .map(|class| Type::instance(db, env, class))
+            .unwrap_or_else(Type::unknown)
+    }
+}
 
 #[salsa::interned(heap_size=ruff_memory_usage::heap_size)]
-struct KnownClassArgument {
+pub(crate) struct KnownClassArgument {
     #[returns(copy)]
     class: KnownClass,
 

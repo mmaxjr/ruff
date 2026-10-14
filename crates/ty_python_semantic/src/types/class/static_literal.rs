@@ -209,7 +209,7 @@ struct InheritedFrozenDataclassFields<'db> {
 ///
 /// Here, `required` is a constructor field and `value` masks an inherited `Base.value` field.
 #[derive(Clone, Debug, Default, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-struct OwnClassFields<'db> {
+pub(crate) struct OwnClassFields<'db> {
     fields: FxIndexMap<Name, Field<'db>>,
     class_variables: Box<[Name]>,
 }
@@ -442,28 +442,9 @@ impl<'db> StaticClassLiteral<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> Option<GenericContext<'db>> {
-            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-                inherited_legacy_generic_context_inner_from_source(db, source_operation, class)
-            })
-        }
-
-        fn inherited_legacy_generic_context_inner_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            class: StaticClassLiteral<'db>,
-        ) -> Option<GenericContext<'db>> {
-            let env =
-                source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
-            GenericContext::from_base_classes(
-                db,
-                &env,
-                class.definition(db),
-                class
-                    .explicit_bases(db)
-                    .iter()
-                    .copied()
-                    .filter(|ty| matches!(ty, Type::GenericAlias(_))),
-            )
+            SourceTypeQuery::run::<
+                crate::types::source_queries::StaticClassLiteralInheritedLegacyGenericContextInner,
+            >(db, (class,))
         }
 
         if !self.has_explicit_bases(db) {
@@ -517,9 +498,9 @@ impl<'db> StaticClassLiteral<'db> {
         self,
         db: &'db dyn Db,
     ) -> FxIndexSet<BoundTypeVarInstance<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.typevars_referenced_in_bases_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<
+            crate::types::source_queries::StaticClassLiteralTypevarsReferencedInBases,
+        >(db, (self,))
     }
 
     fn typevars_referenced_in_bases_from_source(
@@ -911,19 +892,14 @@ impl<'db> StaticClassLiteral<'db> {
 
     #[salsa::tracked(
         returns(as_ref),
-        cycle_initial=|db, _, self_: StaticClassLiteral<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| {
-            let env = source_operation.operations(ProgramEnvironment::from_scope(self_.body_scope(db)));
-            Err(Box::new(StaticMroError::cycle(
-                db, &env,
-                self_.apply_optional_specialization(db, &env, None),
-            )))
-        }),
+        cycle_initial=|db, _, self_: StaticClassLiteral<'db>| SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralTryMroUnspecializedInitial>(db, (self_,)),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn try_mro_unspecialized(self, db: &'db dyn Db) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.try_mro_unspecialized_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralTryMroUnspecialized>(
+            db,
+            (self,),
+        )
     }
 
     fn try_mro_unspecialized_from_source(
@@ -987,9 +963,9 @@ impl<'db> StaticClassLiteral<'db> {
     /// ```
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| true, heap_size=ruff_memory_usage::heap_size)]
     fn has_own_custom_getattribute(self, db: &'db dyn Db) -> bool {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.has_own_custom_getattribute_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<
+            crate::types::source_queries::StaticClassLiteralHasOwnCustomGetattribute,
+        >(db, (self,))
     }
 
     fn has_own_custom_getattribute_from_source(
@@ -1039,40 +1015,10 @@ impl<'db> StaticClassLiteral<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> ClassInstanceFlags {
-            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-                instance_flags_inner_from_source(db, source_operation, class)
-            })
-        }
-
-        fn instance_flags_inner_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            class: StaticClassLiteral<'db>,
-        ) -> ClassInstanceFlags {
-            let env =
-                &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
-            let mut flags = ClassInstanceFlags::empty();
-            for base in class.iter_mro(db, env) {
-                match base {
-                    ClassBase::Any => flags.insert(
-                        ClassInstanceFlags::INHERITS_FROM_EXPLICIT_ANY
-                            | ClassInstanceFlags::HAS_DYNAMIC_GETATTRIBUTE,
-                    ),
-                    ClassBase::Dynamic(_) | ClassBase::Divergent(_) => {
-                        flags.insert(ClassInstanceFlags::HAS_DYNAMIC_GETATTRIBUTE);
-                    }
-                    ClassBase::TypedDict(_) => flags.insert(ClassInstanceFlags::TYPED_DICT),
-                    ClassBase::Class(class)
-                        if class
-                            .static_class_literal(db)
-                            .is_none_or(|(class, _)| class.has_own_custom_getattribute(db)) =>
-                    {
-                        flags.insert(ClassInstanceFlags::HAS_CUSTOM_GETATTRIBUTE);
-                    }
-                    ClassBase::Class(_) | ClassBase::Generic | ClassBase::Protocol => {}
-                }
-            }
-            flags
+            SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralInstanceFlagsInner>(
+                db,
+                (class,),
+            )
         }
 
         let mut flags = if let Some(known) = self.known(db) {
@@ -1097,9 +1043,10 @@ impl<'db> StaticClassLiteral<'db> {
     /// Return the module defining the `TypedDict` base of this class.
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn typed_dict_module(self, db: &'db dyn Db) -> Option<TypingModule> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.typed_dict_module_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralTypedDictModule>(
+            db,
+            (self,),
+        )
     }
 
     fn typed_dict_module_from_source(
@@ -1130,9 +1077,9 @@ impl<'db> StaticClassLiteral<'db> {
     /// `NamedTuple("X", ...)`).
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| false, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn has_named_tuple_class_in_mro(self, db: &'db dyn Db) -> bool {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.has_named_tuple_class_in_mro_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<
+            crate::types::source_queries::StaticClassLiteralHasNamedTupleClassInMro,
+        >(db, (self,))
     }
 
     fn has_named_tuple_class_in_mro_from_source(
@@ -1340,180 +1287,10 @@ impl<'db> StaticClassLiteral<'db> {
             class: StaticClassLiteral<'db>,
         ) -> Result<(ClassMetaclass<'db>, Option<MetaclassTransformInfo<'db>>), MetaclassError<'db>>
         {
-            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-                try_metaclass_inner_from_source(db, source_operation, class)
-            })
-        }
-
-        fn try_metaclass_inner_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            class: StaticClassLiteral<'db>,
-        ) -> Result<(ClassMetaclass<'db>, Option<MetaclassTransformInfo<'db>>), MetaclassError<'db>>
-        {
-            let program_file = class.program_file(db);
-            let python_file = program_file.python_file(db);
-            let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-            tracing::trace!("StaticClassLiteral::try_metaclass: {}", class.name(db));
-
-            // Identify the class's own metaclass (or take the first base class's metaclass).
-            let mut base_classes = class.metaclass_bases(db, &env).peekable();
-
-            if (base_classes.peek().is_some() && class.inheritance_cycle(db).is_some())
-                || class
-                    .try_mro(db, &env, None)
-                    .is_err_and(|error| error.is_cycle())
-            {
-                // We emit diagnostics for cyclic class definitions elsewhere.
-                // Avoid attempting to infer the metaclass if the class is cyclically defined.
-                return Ok((
-                    ClassMetaclass::Selected(SubclassOfType::subclass_of_unknown()),
-                    None,
-                ));
-            }
-
-            let module = parsed_module(db, python_file).load(db);
-
-            let explicit_metaclass = class.explicit_metaclass(db, &module);
-
-            // Generic metaclasses parameterized by type variables are not supported.
-            // `metaclass=Meta[int]` is fine, but `metaclass=Meta[T]` is not.
-            // See: https://typing.python.org/en/latest/spec/generics.html#generic-metaclasses
-            if let Some(Type::GenericAlias(alias)) = explicit_metaclass {
-                let specialization_has_typevars = alias
-                    .specialization(db)
-                    .types(db)
-                    .iter()
-                    .any(|ty| ty.has_typevar_or_typevar_instance(db, &env));
-                if specialization_has_typevars {
-                    return Err(MetaclassError {
-                        kind: MetaclassErrorKind::GenericMetaclass,
-                    });
-                }
-            }
-
-            let mut has_protocol_fallback = false;
-            let mut base_metaclasses = base_classes.filter_map(|base| {
-                match base.inferred_metaclass(db, &env, ClassLiteral::Static(class)) {
-                    ClassMetaclass::Selected(metaclass) => Some((base, metaclass)),
-                    ClassMetaclass::ProtocolFallback => {
-                        has_protocol_fallback = true;
-                        None
-                    }
-                }
-            });
-            let (metaclass, base) = if let Some(metaclass) = explicit_metaclass {
-                (metaclass, None)
-            } else if let Some((base_class, metaclass)) = base_metaclasses.next() {
-                (metaclass, Some(base_class))
-            } else {
-                (KnownClass::Type.to_class_literal(db, &env), None)
-            };
-
-            let mut candidate = if let Some(metaclass_ty) = metaclass.to_class_type(db, &env) {
-                MetaclassCandidate {
-                    metaclass: metaclass_ty,
-                    base,
-                }
-            } else {
-                let name = Type::string_literal(db, class.name(db));
-                let bases = Type::heterogeneous_tuple(db, &env, class.explicit_bases(db));
-                let namespace = KnownClass::Dict.to_specialized_instance(
-                    db,
-                    &env,
-                    &[KnownClass::Str.to_instance(db, &env), Type::any()],
-                );
-
-                // TODO: Other keyword arguments?
-                let arguments = CallArguments::positional([name, bases, namespace]);
-
-                let return_ty_result = match metaclass.try_call(db, &env, &arguments) {
-                    Ok(bindings) => Ok(bindings.return_type(db, &env)),
-
-                    Err(CallError(CallErrorKind::NotCallable, bindings)) => Err(MetaclassError {
-                        kind: MetaclassErrorKind::NotCallable(bindings.callable_type()),
-                    }),
-
-                    // TODO we should also check for binding errors that would indicate the metaclass
-                    // does not accept the right arguments
-                    Err(CallError(CallErrorKind::BindingError, bindings)) => {
-                        Ok(bindings.return_type(db, &env))
-                    }
-
-                    Err(CallError(CallErrorKind::PossiblyNotCallable, _)) => Err(MetaclassError {
-                        kind: MetaclassErrorKind::PartlyNotCallable(metaclass),
-                    }),
-                };
-
-                return return_ty_result
-                    .map(|ty| (ClassMetaclass::Selected(ty.to_meta_type(db, &env)), None));
-            };
-
-            // Reconcile all base classes' metaclasses with the candidate metaclass.
-            //
-            // See:
-            // - https://docs.python.org/3/reference/datamodel.html#determining-the-appropriate-metaclass
-            // - https://github.com/python/cpython/blob/83ba8c2bba834c0b92de669cac16fcda17485e0e/Objects/typeobject.c#L3629-L3663
-            for (base_class, metaclass) in base_metaclasses {
-                if metaclass == SubclassOfType::subclass_of_unknown() {
-                    return Ok((ClassMetaclass::Selected(metaclass), None));
-                }
-                let Some(metaclass) = metaclass.to_class_type(db, &env) else {
-                    continue;
-                };
-                if let Some(selected) = candidate
-                    .metaclass
-                    .most_derived_metaclass(db, &env, metaclass)
-                {
-                    let Some(metaclass) = selected.to_class_type(db, &env) else {
-                        return Ok((ClassMetaclass::Selected(selected), None));
-                    };
-                    if metaclass == candidate.metaclass {
-                        continue;
-                    }
-                    candidate = MetaclassCandidate {
-                        metaclass,
-                        base: Some(base_class),
-                    };
-                    continue;
-                }
-                return Err(MetaclassError {
-                    kind: MetaclassErrorKind::Conflict {
-                        candidate,
-                        base_metaclass: metaclass,
-                        base: base_class,
-                        explicit_metaclass: explicit_metaclass
-                            .and_then(|metaclass| metaclass.to_class_type(db, &env)),
-                    },
-                });
-            }
-
-            let transform_info = candidate
-                .metaclass
-                .static_class_literal(db)
-                .and_then(|(metaclass_literal, specialization)| {
-                    metaclass_literal.inherited_dataclass_transformer_params(
-                        db,
-                        &env,
-                        specialization,
-                    )
-                })
-                .map(|params| MetaclassTransformInfo {
-                    params,
-                    from_explicit_metaclass: candidate.base.is_none(),
-                });
-            let use_protocol_fallback = has_protocol_fallback
-                && !class
-                    .known(db)
-                    .is_some_and(|known| known.has_known_type_metaclass(env.python_version(db)));
-            Ok((
-                ClassMetaclass::with_protocol_fallback(
-                    db,
-                    candidate.metaclass.into(),
-                    use_protocol_fallback,
-                ),
-                transform_info,
-            ))
+            SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralTryMetaclassInner>(
+                db,
+                (class,),
+            )
         }
 
         if !self.has_explicit_bases(db) && !self.has_explicit_metaclass(db) {
@@ -2593,17 +2370,9 @@ impl<'db> StaticClassLiteral<'db> {
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
     ) -> FxIndexMap<Name, Field<'db>> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralFieldsInner>(
             db,
             (self, specialization, field_policy),
-            |db, source_operation, (source_self, specialization, field_policy)| {
-                source_self.fields_inner_from_source(
-                    db,
-                    source_operation,
-                    specialization,
-                    field_policy,
-                )
-            },
         )
     }
 
@@ -2845,17 +2614,9 @@ impl<'db> StaticClassLiteral<'db> {
         specialization: Option<Specialization<'db>>,
         field_policy: CodeGeneratorKind<'db>,
     ) -> OwnClassFields<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralOwnFieldsInner>(
             db,
             (self, specialization, field_policy),
-            |db, source_operation, (source_self, specialization, field_policy)| {
-                source_self.own_fields_inner_from_source(
-                    db,
-                    source_operation,
-                    specialization,
-                    field_policy,
-                )
-            },
         )
     }
 
@@ -3555,6 +3316,314 @@ impl<'db> StaticClassLiteral<'db> {
         class_node.name.range()
     }
 }
+crate::types::source_query! {
+    fn StaticClassLiteralTryMroUnspecializedInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        self_: StaticClassLiteral<'db>,
+    ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(self_.body_scope(db)));
+        Err(Box::new(StaticMroError::cycle(
+            db,
+            &env,
+            self_.apply_optional_specialization(db, &env, None),
+        )))
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralOwnFieldsInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+        specialization: Option<Specialization<'db>>,
+        field_policy: CodeGeneratorKind<'db>,
+    ) -> OwnClassFields<'db> {
+        source_self.own_fields_inner_from_source(db, source_operation, specialization, field_policy)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralFieldsInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+        specialization: Option<Specialization<'db>>,
+        field_policy: CodeGeneratorKind<'db>,
+    ) -> FxIndexMap<Name, Field<'db>> {
+        source_self.fields_inner_from_source(db, source_operation, specialization, field_policy)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralHasNamedTupleClassInMro<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+    ) -> bool {
+        source_self.has_named_tuple_class_in_mro_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralTypedDictModule<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+    ) -> Option<TypingModule> {
+        source_self.typed_dict_module_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralHasOwnCustomGetattribute<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+    ) -> bool {
+        source_self.has_own_custom_getattribute_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralTryMroUnspecialized<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+    ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
+        source_self.try_mro_unspecialized_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralTypevarsReferencedInBases<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+    ) -> FxIndexSet<BoundTypeVarInstance<'db>> {
+        source_self.typevars_referenced_in_bases_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralTryMetaclassInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> Result<(ClassMetaclass<'db>, Option<MetaclassTransformInfo<'db>>), MetaclassError<'db>> {
+        let program_file = class.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        tracing::trace!("StaticClassLiteral::try_metaclass: {}", class.name(db));
+
+        // Identify the class's own metaclass (or take the first base class's metaclass).
+        let mut base_classes = class.metaclass_bases(db, &env).peekable();
+
+        if (base_classes.peek().is_some() && class.inheritance_cycle(db).is_some())
+            || class
+                .try_mro(db, &env, None)
+                .is_err_and(|error| error.is_cycle())
+        {
+            // We emit diagnostics for cyclic class definitions elsewhere.
+            // Avoid attempting to infer the metaclass if the class is cyclically defined.
+            return Ok((
+                ClassMetaclass::Selected(SubclassOfType::subclass_of_unknown()),
+                None,
+            ));
+        }
+
+        let module = parsed_module(db, python_file).load(db);
+
+        let explicit_metaclass = class.explicit_metaclass(db, &module);
+
+        // Generic metaclasses parameterized by type variables are not supported.
+        // `metaclass=Meta[int]` is fine, but `metaclass=Meta[T]` is not.
+        // See: https://typing.python.org/en/latest/spec/generics.html#generic-metaclasses
+        if let Some(Type::GenericAlias(alias)) = explicit_metaclass {
+            let specialization_has_typevars = alias
+                .specialization(db)
+                .types(db)
+                .iter()
+                .any(|ty| ty.has_typevar_or_typevar_instance(db, &env));
+            if specialization_has_typevars {
+                return Err(MetaclassError {
+                    kind: MetaclassErrorKind::GenericMetaclass,
+                });
+            }
+        }
+
+        let mut has_protocol_fallback = false;
+        let mut base_metaclasses = base_classes.filter_map(|base| {
+            match base.inferred_metaclass(db, &env, ClassLiteral::Static(class)) {
+                ClassMetaclass::Selected(metaclass) => Some((base, metaclass)),
+                ClassMetaclass::ProtocolFallback => {
+                    has_protocol_fallback = true;
+                    None
+                }
+            }
+        });
+        let (metaclass, base) = if let Some(metaclass) = explicit_metaclass {
+            (metaclass, None)
+        } else if let Some((base_class, metaclass)) = base_metaclasses.next() {
+            (metaclass, Some(base_class))
+        } else {
+            (KnownClass::Type.to_class_literal(db, &env), None)
+        };
+
+        let mut candidate = if let Some(metaclass_ty) = metaclass.to_class_type(db, &env) {
+            MetaclassCandidate {
+                metaclass: metaclass_ty,
+                base,
+            }
+        } else {
+            let name = Type::string_literal(db, class.name(db));
+            let bases = Type::heterogeneous_tuple(db, &env, class.explicit_bases(db));
+            let namespace = KnownClass::Dict.to_specialized_instance(
+                db,
+                &env,
+                &[KnownClass::Str.to_instance(db, &env), Type::any()],
+            );
+
+            // TODO: Other keyword arguments?
+            let arguments = CallArguments::positional([name, bases, namespace]);
+
+            let return_ty_result = match metaclass.try_call(db, &env, &arguments) {
+                Ok(bindings) => Ok(bindings.return_type(db, &env)),
+
+                Err(CallError(CallErrorKind::NotCallable, bindings)) => Err(MetaclassError {
+                    kind: MetaclassErrorKind::NotCallable(bindings.callable_type()),
+                }),
+
+                // TODO we should also check for binding errors that would indicate the metaclass
+                // does not accept the right arguments
+                Err(CallError(CallErrorKind::BindingError, bindings)) => {
+                    Ok(bindings.return_type(db, &env))
+                }
+
+                Err(CallError(CallErrorKind::PossiblyNotCallable, _)) => Err(MetaclassError {
+                    kind: MetaclassErrorKind::PartlyNotCallable(metaclass),
+                }),
+            };
+
+            return return_ty_result
+                .map(|ty| (ClassMetaclass::Selected(ty.to_meta_type(db, &env)), None));
+        };
+
+        // Reconcile all base classes' metaclasses with the candidate metaclass.
+        //
+        // See:
+        // - https://docs.python.org/3/reference/datamodel.html#determining-the-appropriate-metaclass
+        // - https://github.com/python/cpython/blob/83ba8c2bba834c0b92de669cac16fcda17485e0e/Objects/typeobject.c#L3629-L3663
+        for (base_class, metaclass) in base_metaclasses {
+            if metaclass == SubclassOfType::subclass_of_unknown() {
+                return Ok((ClassMetaclass::Selected(metaclass), None));
+            }
+            let Some(metaclass) = metaclass.to_class_type(db, &env) else {
+                continue;
+            };
+            if let Some(selected) = candidate
+                .metaclass
+                .most_derived_metaclass(db, &env, metaclass)
+            {
+                let Some(metaclass) = selected.to_class_type(db, &env) else {
+                    return Ok((ClassMetaclass::Selected(selected), None));
+                };
+                if metaclass == candidate.metaclass {
+                    continue;
+                }
+                candidate = MetaclassCandidate {
+                    metaclass,
+                    base: Some(base_class),
+                };
+                continue;
+            }
+            return Err(MetaclassError {
+                kind: MetaclassErrorKind::Conflict {
+                    candidate,
+                    base_metaclass: metaclass,
+                    base: base_class,
+                    explicit_metaclass: explicit_metaclass
+                        .and_then(|metaclass| metaclass.to_class_type(db, &env)),
+                },
+            });
+        }
+
+        let transform_info = candidate
+            .metaclass
+            .static_class_literal(db)
+            .and_then(|(metaclass_literal, specialization)| {
+                metaclass_literal.inherited_dataclass_transformer_params(db, &env, specialization)
+            })
+            .map(|params| MetaclassTransformInfo {
+                params,
+                from_explicit_metaclass: candidate.base.is_none(),
+            });
+        let use_protocol_fallback = has_protocol_fallback
+            && !class
+                .known(db)
+                .is_some_and(|known| known.has_known_type_metaclass(env.python_version(db)));
+        Ok((
+            ClassMetaclass::with_protocol_fallback(
+                db,
+                candidate.metaclass.into(),
+                use_protocol_fallback,
+            ),
+            transform_info,
+        ))
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralInstanceFlagsInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> ClassInstanceFlags {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
+        let mut flags = ClassInstanceFlags::empty();
+        for base in class.iter_mro(db, env) {
+            match base {
+                ClassBase::Any => flags.insert(
+                    ClassInstanceFlags::INHERITS_FROM_EXPLICIT_ANY
+                        | ClassInstanceFlags::HAS_DYNAMIC_GETATTRIBUTE,
+                ),
+                ClassBase::Dynamic(_) | ClassBase::Divergent(_) => {
+                    flags.insert(ClassInstanceFlags::HAS_DYNAMIC_GETATTRIBUTE);
+                }
+                ClassBase::TypedDict(_) => flags.insert(ClassInstanceFlags::TYPED_DICT),
+                ClassBase::Class(class)
+                    if class
+                        .static_class_literal(db)
+                        .is_none_or(|(class, _)| class.has_own_custom_getattribute(db)) =>
+                {
+                    flags.insert(ClassInstanceFlags::HAS_CUSTOM_GETATTRIBUTE);
+                }
+                ClassBase::Class(_) | ClassBase::Generic | ClassBase::Protocol => {}
+            }
+        }
+        flags
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralInheritedLegacyGenericContextInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> Option<GenericContext<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
+        GenericContext::from_base_classes(
+            db,
+            &env,
+            class.definition(db),
+            class
+                .explicit_bases(db)
+                .iter()
+                .copied()
+                .filter(|ty| matches!(ty, Type::GenericAlias(_))),
+        )
+    }
+}
 
 /// A single semantic class-base entry after expanding starred tuple bases.
 #[derive(Clone, Copy)]
@@ -3644,36 +3713,30 @@ fn expanded_fixed_length_starred_class_base_tuple<'db>(
     class_definition: Definition<'db>,
     base_node: &ast::Expr,
 ) -> Option<FixedLengthTuple<Type<'db>>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::ExpandedFixedLengthStarredClassBaseTuple>(
         db,
         (class_definition, base_node),
-        |db, source_operation, (class_definition, base_node)| {
-            expanded_fixed_length_starred_class_base_tuple_from_source(
-                db,
-                source_operation,
-                class_definition,
-                base_node,
-            )
-        },
     )
 }
 
-fn expanded_fixed_length_starred_class_base_tuple_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class_definition: Definition<'db>,
-    base_node: &ast::Expr,
-) -> Option<FixedLengthTuple<Type<'db>>> {
-    let ast::Expr::Starred(starred) = base_node else {
-        return None;
-    };
+crate::types::source_query! {
+    fn ExpandedFixedLengthStarredClassBaseTuple<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class_definition: Definition<'db>,
+        base_node: &'input ast::Expr,
+    ) -> Option<FixedLengthTuple<Type<'db>>> {
+        let ast::Expr::Starred(starred) = base_node else {
+            return None;
+        };
 
-    let starred_ty = definition_expression_type(db, class_definition, &starred.value);
-    let env = source_operation.operations(ProgramEnvironment::from_definition(class_definition));
-    let Tuple::Fixed(tuple) = starred_ty.tuple_instance_spec(db, &env)?.into_owned() else {
-        return None;
-    };
-    Some(tuple)
+        let starred_ty = definition_expression_type(db, class_definition, &starred.value);
+        let env = source_operation.operations(ProgramEnvironment::from_definition(class_definition));
+        let Tuple::Fixed(tuple) = starred_ty.tuple_instance_spec(db, &env)?.into_owned() else {
+            return None;
+        };
+        Some(tuple)
+    }
 }
 
 impl<'db> VarianceInferable<'db> for StaticClassLiteral<'db> {
@@ -3698,12 +3761,9 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralVarianceEquation>(
             db,
             (self, typevar),
-            |db, source_operation, (source_self, typevar)| {
-                source_self.variance_equation_from_source(db, source_operation, typevar)
-            },
         )
     }
 
@@ -3888,6 +3948,16 @@ impl<'db> StaticClassLiteral<'db> {
         VarianceTerm::join(db, attribute_variances.chain(explicit_bases_variances))
     }
 }
+crate::types::source_query! {
+    fn StaticClassLiteralVarianceEquation<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        source_self.variance_equation_from_source(db, source_operation, typevar)
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, get_size2::GetSize)]
 pub(crate) enum InheritanceCycle {
@@ -3925,45 +3995,37 @@ fn explicit_bases_cycle_fn<'db>(
     current: Box<[Type<'db>]>,
     literal: StaticClassLiteral<'db>,
 ) -> Box<[Type<'db>]> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::ExplicitBasesCycleFn>(
         db,
         (cycle, previous, current, literal),
-        |db, source_operation, (cycle, previous, current, literal)| {
-            explicit_bases_cycle_fn_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous,
-                current,
-                literal,
-            )
-        },
     )
 }
 
-fn explicit_bases_cycle_fn_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous: &[Type<'db>],
-    current: Box<[Type<'db>]>,
-    literal: StaticClassLiteral<'db>,
-) -> Box<[Type<'db>]> {
-    if previous.len() == current.len() {
-        let env =
-            source_operation.operations(ProgramEnvironment::from_scope(literal.body_scope(db)));
-        // As long as the length of bases hasn't changed, use the same "monotonic widening"
-        // strategy that we use with most types, to avoid oscillations.
-        current
-            .iter()
-            .zip(previous.iter())
-            .map(|(curr, prev)| curr.cycle_normalized(db, &env, *prev, cycle))
-            .collect()
-    } else {
-        // The length of bases has changed, presumably because we expanded a starred expression. We
-        // don't do "monotonic widening" here, because we don't want to make assumptions about
-        // which previous entries correspond to which current ones. An oscillation here would be
-        // unfortunate, but maybe only pathological programs can trigger such a thing.
-        current
+crate::types::source_query! {
+    fn ExplicitBasesCycleFn<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input [Type<'db>],
+        current: Box<[Type<'db>]>,
+        literal: StaticClassLiteral<'db>,
+    ) -> Box<[Type<'db>]> {
+        if previous.len() == current.len() {
+            let env =
+                source_operation.operations(ProgramEnvironment::from_scope(literal.body_scope(db)));
+            // As long as the length of bases hasn't changed, use the same "monotonic widening"
+            // strategy that we use with most types, to avoid oscillations.
+            current
+                .iter()
+                .zip(previous.iter())
+                .map(|(curr, prev)| curr.cycle_normalized(db, &env, *prev, cycle))
+                .collect()
+        } else {
+            // The length of bases has changed, presumably because we expanded a starred expression. We
+            // don't do "monotonic widening" here, because we don't want to make assumptions about
+            // which previous entries correspond to which current ones. An oscillation here would be
+            // unfortunate, but maybe only pathological programs can trigger such a thing.
+            current
+        }
     }
 }

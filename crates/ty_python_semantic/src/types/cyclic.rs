@@ -208,7 +208,7 @@ impl<'db> RecursiveType<'db> {
 
 /// A source whose type parameters can flow through recursive references.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-enum RecursiveDefinition<'db> {
+pub(crate) enum RecursiveDefinition<'db> {
     TypeAlias(TypeAliasType<'db>),
     Protocol(StaticClassLiteral<'db>),
     TypedDict(StaticClassLiteral<'db>),
@@ -304,7 +304,7 @@ enum DefinitionUse<'db> {
 /// the initial arguments and reset types by normalized set operations, so the expansions reach an
 /// exact repetition and the cycle detectors can rely on exact type identities.
 #[derive(Default)]
-struct SpecializationFlowGraph<'db> {
+pub(crate) struct SpecializationFlowGraph<'db> {
     edges: FxHashSet<FlowEdge<'db>>,
     /// Definition references used to decide whether an unresolved flow can return to the root.
     definition_edges: Vec<(RecursiveOrigin<'db>, RecursiveOrigin<'db>)>,
@@ -590,38 +590,10 @@ impl<'db> DefinitionUse<'db> {
 
 impl<'db> SpecializationFlowGraph<'db> {
     fn build(db: &'db dyn Db, root: RecursiveDefinition<'db>) -> Self {
-        SourceTypeQuery::run(db, root, |db, source_operation, root| {
-            let env = source_operation.operations(root.environment(db));
-            let mut graph = Self::default();
-            let mut pending = vec![root];
-            let mut visited = FxHashSet::default();
-
-            while let Some(source) = pending.pop() {
-                let source_definition = source.origin(db);
-                if !visited.insert(source_definition) {
-                    continue;
-                }
-                let Some(visitor) = SpecializationFlowVisitor::new(db, &env, source) else {
-                    graph.inconclusive = true;
-                    continue;
-                };
-                if !visitor.visit_definition_body(db, source) {
-                    graph.inconclusive = true;
-                }
-                let (edges, referenced_definitions, inconclusive) = visitor.finish();
-                graph.edges.extend(edges);
-                if inconclusive {
-                    graph.inconclusive_definitions.insert(source_definition);
-                }
-                graph.definition_edges.extend(
-                    referenced_definitions
-                        .iter()
-                        .map(|target| (source_definition, target.origin(db))),
-                );
-                pending.extend(referenced_definitions);
-            }
-            graph
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::SpecializationFlowGraphBuild>(
+            db,
+            (root,),
+        )
     }
 
     fn root_may_have_unbounded_specialization(
@@ -781,6 +753,44 @@ impl<'db> SpecializationFlowGraph<'db> {
             }
         }
         visited
+    }
+}
+crate::types::source_query! {
+    fn SpecializationFlowGraphBuild<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        root: RecursiveDefinition<'db>,
+    ) -> SpecializationFlowGraph<'db> {
+        let env = source_operation.operations(root.environment(db));
+        let mut graph = SpecializationFlowGraph::default();
+        let mut pending = vec![root];
+        let mut visited = FxHashSet::default();
+
+        while let Some(source) = pending.pop() {
+            let source_definition = source.origin(db);
+            if !visited.insert(source_definition) {
+                continue;
+            }
+            let Some(visitor) = SpecializationFlowVisitor::new(db, &env, source) else {
+                graph.inconclusive = true;
+                continue;
+            };
+            if !visitor.visit_definition_body(db, source) {
+                graph.inconclusive = true;
+            }
+            let (edges, referenced_definitions, inconclusive) = visitor.finish();
+            graph.edges.extend(edges);
+            if inconclusive {
+                graph.inconclusive_definitions.insert(source_definition);
+            }
+            graph.definition_edges.extend(
+                referenced_definitions
+                    .iter()
+                    .map(|target| (source_definition, target.origin(db))),
+            );
+            pending.extend(referenced_definitions);
+        }
+        graph
     }
 }
 

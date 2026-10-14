@@ -247,32 +247,10 @@ impl<'db> Type<'db> {
             op: ast::Operator,
             right_ty: Type<'db>,
         ) -> Option<BinaryOperationResult<'db>> {
-            SourceTypeQuery::run(
+            SourceTypeQuery::run::<crate::types::source_queries::TypeTryCallBinOpResultImpl>(
                 db,
                 (program, left_ty, op, right_ty),
-                |db, source_operation, (program, left_ty, op, right_ty)| {
-                    try_call_bin_op_result_impl_from_source(
-                        db,
-                        source_operation,
-                        program,
-                        left_ty,
-                        op,
-                        right_ty,
-                    )
-                },
             )
-        }
-
-        fn try_call_bin_op_result_impl_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            program: Program<'db>,
-            left_ty: Type<'db>,
-            op: ast::Operator,
-            right_ty: Type<'db>,
-        ) -> Option<BinaryOperationResult<'db>> {
-            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
-            Type::compute_binary_operation_result(db, env, left_ty, op, right_ty)
         }
 
         env.cached_query(
@@ -431,6 +409,19 @@ impl<'db> Type<'db> {
                 )?)
             }
         })
+    }
+}
+crate::types::source_query! {
+    fn TypeTryCallBinOpResultImpl<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        left_ty: Type<'db>,
+        op: ast::Operator,
+        right_ty: Type<'db>,
+    ) -> Option<BinaryOperationResult<'db>> {
+        let env = &source_operation.operations(ProgramEnvironment::from_program(program));
+        Type::compute_binary_operation_result(db, env, left_ty, op, right_ty)
     }
 }
 

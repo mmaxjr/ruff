@@ -16,7 +16,7 @@ use crate::{Db, FxIndexSet, ProgramEnvironment};
 
 /// The information that can be recovered from a class's own `__slots__` assignment.
 #[derive(Debug, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-enum SlotDefinition {
+pub(crate) enum SlotDefinition {
     /// Every declared slot name is statically known.
     Names(Box<[Name]>),
     /// The declaration is definitely nonempty, but at least one name is unknown.
@@ -200,7 +200,7 @@ impl InstanceDictionary {
 
 /// The slots and dictionary storage inherited by instances of a class.
 #[derive(Debug, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-struct InstanceLayout {
+pub(crate) struct InstanceLayout {
     slots: Box<[Name]>,
     dictionary: InstanceDictionary,
 }
@@ -285,9 +285,10 @@ impl<'db> StaticClassLiteral<'db> {
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn slot_definition(self, db: &'db dyn Db) -> SlotDefinition {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.slot_definition_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralSlotDefinition>(
+            db,
+            (self,),
+        )
     }
 
     fn slot_definition_from_source(
@@ -458,9 +459,10 @@ impl<'db> StaticClassLiteral<'db> {
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn instance_layout(self, db: &'db dyn Db) -> InstanceLayout {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.instance_layout_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralInstanceLayout>(
+            db,
+            (self,),
+        )
     }
 
     fn instance_layout_from_source(
@@ -593,5 +595,24 @@ impl<'db> StaticClassLiteral<'db> {
             .unwrap_or_else(Type::unknown);
 
         Type::SlotDescriptor(SlotDescriptorType::new(db, value_ty))
+    }
+}
+crate::types::source_query! {
+    fn StaticClassLiteralInstanceLayout<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+    ) -> InstanceLayout {
+        source_self.instance_layout_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn StaticClassLiteralSlotDefinition<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: StaticClassLiteral<'db>,
+    ) -> SlotDefinition {
+        source_self.slot_definition_from_source(db, source_operation)
     }
 }

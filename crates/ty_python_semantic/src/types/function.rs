@@ -420,9 +420,10 @@ impl<'db> OverloadLiteral<'db> {
     /// Returns the overload immediately before this one in the AST. Returns `None` if there is no
     /// previous overload.
     fn previous_overload(self, db: &'db dyn Db) -> Option<FunctionLiteral<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.previous_overload_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::OverloadLiteralPreviousOverload>(
+            db,
+            (self,),
+        )
     }
 
     fn previous_overload_from_source(
@@ -494,9 +495,7 @@ impl<'db> OverloadLiteral<'db> {
     /// a cross-module dependency directly on the full AST which will lead to cache
     /// over-invalidation.
     pub(crate) fn signature(self, db: &'db dyn Db) -> Signature<'db> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.signature_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::OverloadLiteralSignature>(db, (self,))
     }
 
     fn signature_from_source(
@@ -571,16 +570,9 @@ impl<'db> OverloadLiteral<'db> {
         db: &'db dyn Db,
         return_callable_typevar_scope: ReturnCallableTypeVarScope,
     ) -> Signature<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::OverloadLiteralRawSignature>(
             db,
             (self, return_callable_typevar_scope),
-            |db, source_operation, (source_self, return_callable_typevar_scope)| {
-                source_self.raw_signature_from_source(
-                    db,
-                    source_operation,
-                    return_callable_typevar_scope,
-                )
-            },
         )
     }
 
@@ -796,6 +788,36 @@ impl<'db> OverloadLiteral<'db> {
         }
     }
 }
+crate::types::source_query! {
+    fn OverloadLiteralRawSignature<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: OverloadLiteral<'db>,
+        return_callable_typevar_scope: ReturnCallableTypeVarScope,
+    ) -> Signature<'db> {
+        source_self.raw_signature_from_source(db, source_operation, return_callable_typevar_scope)
+    }
+}
+
+crate::types::source_query! {
+    fn OverloadLiteralSignature<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: OverloadLiteral<'db>,
+    ) -> Signature<'db> {
+        source_self.signature_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn OverloadLiteralPreviousOverload<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: OverloadLiteral<'db>,
+    ) -> Option<FunctionLiteral<'db>> {
+        source_self.previous_overload_from_source(db, source_operation)
+    }
+}
 
 /// Representation of a function definition in the AST, along with any previous overloads of the
 /// function. Each overload can be separately generic or not, and each generic overload uses
@@ -949,9 +971,7 @@ impl<'db> FunctionLiteral<'db> {
     /// a cross-module dependency directly on the full AST which will lead to cache
     /// over-invalidation.
     fn signature(self, db: &'db dyn Db) -> CallableSignature<'db> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.signature_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::FunctionLiteralSignature>(db, (self,))
     }
 
     fn signature_from_source(
@@ -1066,30 +1086,9 @@ impl<'db> FunctionLiteral<'db> {
             db: &'db dyn Db,
             implementation: OverloadLiteral<'db>,
         ) -> FunctionBodyKind {
-            SourceTypeQuery::run(
-                db,
-                (implementation,),
-                |db, source_operation, (implementation,)| {
-                    implementation_body_kind_from_source(db, source_operation, implementation)
-                },
-            )
-        }
-
-        fn implementation_body_kind_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            implementation: OverloadLiteral<'db>,
-        ) -> FunctionBodyKind {
-            let definition = implementation.definition(db);
-            let program_file = definition.program_file(db);
-            let python_file = program_file.python_file(db);
-            let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-            let file = python_file.file(db);
-            let module = parsed_module(db, python_file).load(db);
-            let node = implementation.node(db, file, &module);
-            function_body_kind(db, &env, node, |expr| {
-                definition_expression_type(db, definition, expr)
-            })
+            SourceTypeQuery::run::<
+                crate::types::source_queries::FunctionLiteralImplementationBodyKind,
+            >(db, (implementation,))
         }
 
         let (_, implementation) = self.overloads_and_implementation(db);
@@ -1112,6 +1111,34 @@ impl<'db> FunctionLiteral<'db> {
                 self.body_kind(db),
                 FunctionBodyKind::Stub | FunctionBodyKind::AlwaysRaisesNotImplementedError
             )
+    }
+}
+crate::types::source_query! {
+    fn FunctionLiteralSignature<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: FunctionLiteral<'db>,
+    ) -> CallableSignature<'db> {
+        source_self.signature_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn FunctionLiteralImplementationBodyKind<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        implementation: OverloadLiteral<'db>,
+    ) -> FunctionBodyKind {
+        let definition = implementation.definition(db);
+        let program_file = definition.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let file = python_file.file(db);
+        let module = parsed_module(db, python_file).load(db);
+        let node = implementation.node(db, file, &module);
+        function_body_kind(db, &env, node, |expr| {
+            definition_expression_type(db, definition, expr)
+        })
     }
 }
 
@@ -1701,18 +1728,8 @@ impl<'db> FunctionType<'db> {
     /// computed signature changes. Updated signatures are already stored on the interned function.
     #[salsa::tracked(
         returns(ref),
-        cycle_initial=|db, id, function: FunctionType<'db>| SourceTypeQuery::run(db, (id, function), |db, source_operation, (id, function)| {
-            let env = source_operation.operations(ProgramEnvironment::from_scope(
-                function.literal(db).last_definition.body_scope(db),
-            ));
-            CallableSignature::cycle_initial(db, &env, id)
-        }),
-        cycle_fn=|db, cycle, previous, value: CallableSignature<'db>, function: FunctionType<'db>| SourceTypeQuery::run(db, (cycle, previous, value, function), |db, source_operation, (cycle, previous, value, function)| {
-            let env = source_operation.operations(ProgramEnvironment::from_scope(
-                function.literal(db).last_definition.body_scope(db),
-            ));
-            value.cycle_normalized(db, &env, previous, cycle)
-        }),
+        cycle_initial=|db, id, function: FunctionType<'db>| SourceTypeQuery::run::<crate::types::source_queries::FunctionTypeLiteralSignatureInitial>(db, (id, function,)),
+        cycle_fn=|db, cycle, previous, value: CallableSignature<'db>, function: FunctionType<'db>| SourceTypeQuery::run::<crate::types::source_queries::FunctionTypeLiteralSignatureRecovery>(db, (cycle, previous, value, function,)),
         heap_size=ruff_memory_usage::heap_size,
     )]
     fn literal_signature(self, db: &'db dyn Db) -> CallableSignature<'db> {
@@ -1740,12 +1757,9 @@ impl<'db> FunctionType<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::FunctionTypeVarianceEquation>(
             db,
             (self, typevar),
-            |db, source_operation, (source_self, typevar)| {
-                source_self.variance_equation_from_source(db, source_operation, typevar)
-            },
         )
     }
 
@@ -1920,6 +1934,46 @@ impl<'db> FunctionType<'db> {
         self.literal(db).as_abstract_method(db, enclosing_class)
     }
 }
+crate::types::source_query! {
+    fn FunctionTypeLiteralSignatureRecovery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input CallableSignature<'db>,
+        value: CallableSignature<'db>,
+        function: FunctionType<'db>,
+    ) -> CallableSignature<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(
+            function.literal(db).last_definition.body_scope(db),
+        ));
+        value.cycle_normalized(db, &env, previous, cycle)
+    }
+}
+
+crate::types::source_query! {
+    fn FunctionTypeLiteralSignatureInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        id: salsa::Id,
+        function: FunctionType<'db>,
+    ) -> CallableSignature<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(
+            function.literal(db).last_definition.body_scope(db),
+        ));
+        CallableSignature::cycle_initial(db, &env, id)
+    }
+}
+
+crate::types::source_query! {
+    fn FunctionTypeVarianceEquation<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: FunctionType<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        source_self.variance_equation_from_source(db, source_operation, typevar)
+    }
+}
 
 impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
     pub(super) fn check_function_pair(
@@ -1996,7 +2050,7 @@ pub(super) fn function_body_kind<'db>(
 
 /// Classification of function body kinds.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(super) enum FunctionBodyKind {
+pub(crate) enum FunctionBodyKind {
     /// The function body only consists of `...`, `pass`, and/or a docstring.
     Stub,
     /// The function body consists of a single `raise NotImplementedError` statement,

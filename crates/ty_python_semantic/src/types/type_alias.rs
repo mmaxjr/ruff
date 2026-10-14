@@ -44,7 +44,7 @@ impl<'db> Type<'db> {
 /// An alias's cycles and the type variables exposed outside containers and other enclosing types.
 /// Only arguments substituted for these variables can introduce an unguarded cycle.
 #[derive(Clone, Debug, Default, PartialEq, Eq, salsa::SalsaValue, get_size2::GetSize)]
-pub(super) struct AliasCycleSummary<'db> {
+pub(crate) struct AliasCycleSummary<'db> {
     /// The divergent marker or unbound reference that closes an unguarded cycle.
     pub(super) cycle: Option<Type<'db>>,
     typevars: Box<[BoundTypeVarInstance<'db>]>,
@@ -222,10 +222,7 @@ impl<'db> PEP695TypeAliasType<'db> {
     #[salsa::tracked(
         returns(copy),
         cycle_initial=|_, id, _| Type::divergent_alias(id),
-        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: PEP695TypeAliasType<'db>| SourceTypeQuery::run(db, (cycle, previous, value, alias), |db, source_operation, (cycle, previous, value, alias)| {
-            let env = source_operation.operations(ProgramEnvironment::from_scope(alias.rhs_scope(db)));
-            value.cycle_normalized(db, &env, *previous, cycle)
-        }),
+        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: PEP695TypeAliasType<'db>| SourceTypeQuery::run::<crate::types::source_queries::PEP695TypeAliasTypeRawValueTypeRecovery>(db, (cycle, previous, value, alias,)),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
@@ -284,6 +281,19 @@ impl<'db> PEP695TypeAliasType<'db> {
             })
     }
 }
+crate::types::source_query! {
+    fn PEP695TypeAliasTypeRawValueTypeRecovery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input Type<'db>,
+        value: Type<'db>,
+        alias: PEP695TypeAliasType<'db>,
+    ) -> Type<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(alias.rhs_scope(db)));
+        value.cycle_normalized(db, &env, *previous, cycle)
+    }
+}
 
 /// A PEP 695 `types.TypeAliasType` created by manually calling the constructor.
 ///
@@ -319,10 +329,7 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
     #[salsa::tracked(
         returns(copy),
         cycle_initial=|_, id, _| Type::divergent_alias(id),
-        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: ManualPEP695TypeAliasType<'db>| SourceTypeQuery::run(db, (cycle, previous, value, alias), |db, source_operation, (cycle, previous, value, alias)| {
-            let env = source_operation.operations(ProgramEnvironment::from_definition(alias.definition(db)));
-            value.cycle_normalized(db, &env, *previous, cycle)
-        }),
+        cycle_fn=|db: &'db dyn Db, cycle, previous: &Type<'db>, value: Type<'db>, alias: ManualPEP695TypeAliasType<'db>| SourceTypeQuery::run::<crate::types::source_queries::ManualPEP695TypeAliasTypeRawValueTypeRecovery>(db, (cycle, previous, value, alias,)),
         heap_size=ruff_memory_usage::heap_size
     )]
     fn raw_value_type(self, db: &'db dyn Db) -> Type<'db> {
@@ -363,9 +370,10 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
 
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| None, heap_size=ruff_memory_usage::heap_size)]
     pub(crate) fn generic_context(self, db: &'db dyn Db) -> Option<GenericContext<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.generic_context_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::ManualPEP695TypeAliasTypeGenericContext>(
+            db,
+            (self,),
+        )
     }
 
     fn generic_context_from_source(
@@ -409,6 +417,30 @@ impl<'db> ManualPEP695TypeAliasType<'db> {
         }
 
         (!variables.is_empty()).then(|| GenericContext::from_typevar_instances(db, &env, variables))
+    }
+}
+crate::types::source_query! {
+    fn ManualPEP695TypeAliasTypeRawValueTypeRecovery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input Type<'db>,
+        value: Type<'db>,
+        alias: ManualPEP695TypeAliasType<'db>,
+    ) -> Type<'db> {
+        let env =
+            source_operation.operations(ProgramEnvironment::from_definition(alias.definition(db)));
+        value.cycle_normalized(db, &env, *previous, cycle)
+    }
+}
+
+crate::types::source_query! {
+    fn ManualPEP695TypeAliasTypeGenericContext<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: ManualPEP695TypeAliasType<'db>,
+    ) -> Option<GenericContext<'db>> {
+        source_self.generic_context_from_source(db, source_operation)
     }
 }
 
@@ -513,11 +545,10 @@ impl<'db> TypeAliasType<'db> {
             alias: TypeAliasType<'db>,
             (): (),
         ) -> AliasCycleSummary<'db> {
-            SourceTypeQuery::run(db, alias, |db, source, alias| {
-                let env =
-                    source.operations(ProgramEnvironment::from_definition(alias.definition(db)));
-                AliasCycleSummary::from_type(db, &env, alias.raw_value_type(db))
-            })
+            SourceTypeQuery::run::<crate::types::source_queries::TypeAliasTypeCycleSummary>(
+                db,
+                (alias,),
+            )
         }
 
         cycle_summary(db, self.unspecialized(db), ())
@@ -759,6 +790,16 @@ impl<'db> TypeAliasType<'db> {
         QualifiedTypeAliasName::new(db, self.definition(db), self.name(db))
     }
 }
+crate::types::source_query! {
+    fn TypeAliasTypeCycleSummary<'db, 'input>(
+        db: &'db dyn Db,
+        source: &SourceTypeQuery<'db>,
+        alias: TypeAliasType<'db>,
+    ) -> AliasCycleSummary<'db> {
+        let env = source.operations(ProgramEnvironment::from_definition(alias.definition(db)));
+        AliasCycleSummary::from_type(db, &env, alias.raw_value_type(db))
+    }
+}
 
 impl<'db> VarianceInferable<'db> for TypeAliasType<'db> {
     fn variance_of(
@@ -786,12 +827,9 @@ impl<'db> TypeAliasType<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::TypeAliasTypeVarianceEquation>(
             db,
             (self, typevar),
-            |db, source_operation, (source_self, typevar)| {
-                source_self.variance_equation_from_source(db, source_operation, typevar)
-            },
         )
     }
 
@@ -831,6 +869,16 @@ impl<'db> TypeAliasType<'db> {
                     .compose_thunk(db, || argument_ty.variance_of(db, &env, typevar))
             });
         VarianceTerm::join(db, variances)
+    }
+}
+crate::types::source_query! {
+    fn TypeAliasTypeVarianceEquation<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: TypeAliasType<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        source_self.variance_equation_from_source(db, source_operation, typevar)
     }
 }
 

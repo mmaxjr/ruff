@@ -75,7 +75,7 @@ pub(super) struct UnsatisfiableBound;
 
 /// One condition that can be checked by an interior node in a constraint set BDD
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) enum Constraint<'db> {
+pub(crate) enum Constraint<'db> {
     ConcreteLower(ConcreteLowerBound<'db>),
     ConcreteUpper(ConcreteUpperBound<'db>),
     ConcreteEquivalence(ConcreteEquivalenceBound<'db>),
@@ -633,7 +633,7 @@ pub(super) trait ProvidesTypeVarEquivalenceBound<'db>:
 /// The bound will never be a union type, since union lower bounds can be broken apart into
 /// separate constraints for each union element.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ConcreteLowerBound<'db> {
+pub(crate) struct ConcreteLowerBound<'db> {
     pub(super) provenance: ConstraintProvenance,
     pub(super) typevar: BoundTypeVarInstance<'db>,
     pub(super) bound: Type<'db>,
@@ -751,7 +751,7 @@ impl<'db> ProvidesConcreteLowerBound<'db> for ConcreteLowerBound<'db> {
 /// The bound will never be an intersection type, since intersection upper bounds can be broken
 /// apart into separate constraints for each intersection element.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ConcreteUpperBound<'db> {
+pub(crate) struct ConcreteUpperBound<'db> {
     pub(super) provenance: ConstraintProvenance,
     pub(super) typevar: BoundTypeVarInstance<'db>,
     pub(super) bound: Type<'db>,
@@ -866,7 +866,7 @@ impl<'db> ProvidesConcreteUpperBound<'db> for ConcreteUpperBound<'db> {
 /// not a bare typevar. [`TypeVarEquivalenceBound`] is used to model an equivalence relationship
 /// between two typevars.)
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ConcreteEquivalenceBound<'db> {
+pub(crate) struct ConcreteEquivalenceBound<'db> {
     pub(super) provenance: ConstraintProvenance,
     pub(super) typevar: BoundTypeVarInstance<'db>,
     pub(super) bound: Type<'db>,
@@ -997,7 +997,7 @@ impl<'db> ProvidesConcreteUpperBound<'db> for ConcreteEquivalenceBound<'db> {
 /// Restricts two typevars so that `left` must be assignable to `right`. Both typevars must have
 /// the same domain.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct TypeVarRangeBound<'db> {
+pub(crate) struct TypeVarRangeBound<'db> {
     pub(super) provenance: ConstraintProvenance,
     pub(super) left: BoundTypeVarInstance<'db>,
     pub(super) right: BoundTypeVarInstance<'db>,
@@ -1102,7 +1102,7 @@ impl<'db> ProvidesTypeVarRangeBound<'db> for TypeVarRangeBound<'db> {}
 /// with a consistent typevar ordering across the process. This does _not_ affect the BDD variable
 /// ordering assigned to this constraint in a particular builder.)
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct TypeVarEquivalenceBound<'db> {
+pub(crate) struct TypeVarEquivalenceBound<'db> {
     pub(super) provenance: ConstraintProvenance,
     pub(super) left: BoundTypeVarInstance<'db>,
     pub(super) right: BoundTypeVarInstance<'db>,

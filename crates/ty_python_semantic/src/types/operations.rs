@@ -11,8 +11,48 @@ use super::cyclic::GuardToken;
 use super::{ApplyTypeMappingVisitor, TypeRecursionState};
 use crate::{Db, ProgramEnvironment};
 
-/// Starts an independent source computation with explicit inputs. The function cannot capture
-/// an active operation, and neither its inputs nor its result can contain operation state.
+mod sealed {
+    pub(crate) trait SourceQuery {}
+}
+
+/// A registered source computation whose result depends only on its explicit inputs.
+/// Implementations receive an owner, but callers cannot supply their own computation.
+pub(crate) trait SourceQuery<'db, 'input>: sealed::SourceQuery {
+    type Input: Send + Sync;
+    type Output: Send + Sync;
+
+    fn compute(db: &'db dyn Db, source: &SourceTypeQuery<'db>, input: Self::Input) -> Self::Output;
+}
+
+/// Declare a registered query beside the source facts it computes.
+macro_rules! source_query {
+    (fn $query:ident<$db:lifetime, $input:lifetime>(
+        $database:ident: $database_type:ty,
+        $source:ident: $source_type:ty,
+        $($argument:ident: $argument_type:ty),* $(,)?
+    ) -> $output:ty $body:block) => {
+        impl<$db: $input, $input> $crate::types::SourceQuery<$db, $input>
+            for $crate::types::source_queries::$query
+        {
+            type Input = ($($argument_type,)*);
+            type Output = $output;
+
+            fn compute(
+                $database: $database_type,
+                $source: $source_type,
+                ($($argument,)*): Self::Input,
+            ) -> Self::Output $body
+        }
+    };
+}
+
+pub(crate) use source_query;
+
+pub(crate) mod registered;
+pub(crate) use registered as source_queries;
+
+/// Starts a registered source computation with explicit inputs. Neither its inputs nor its
+/// result can contain operation state, and callers cannot substitute another computation.
 /// All environments created within the computation share this root's recursion guards.
 pub(crate) struct SourceTypeQuery<'db> {
     db: &'db dyn Db,
@@ -27,12 +67,11 @@ impl<'db> SourceTypeQuery<'db> {
         }
     }
 
-    pub(crate) fn run<Input: Send + Sync, Output: Send + Sync>(
+    pub(crate) fn run<'input, Q: SourceQuery<'db, 'input>>(
         db: &'db dyn Db,
-        input: Input,
-        compute: fn(&'db dyn Db, &Self, Input) -> Output,
-    ) -> Output {
-        compute(db, &Self::new(db), input)
+        input: Q::Input,
+    ) -> Q::Output {
+        Q::compute(db, &Self::new(db), input)
     }
 
     pub(crate) fn operations(&self, env: ProgramEnvironment<'db>) -> TypeOperations<'db> {

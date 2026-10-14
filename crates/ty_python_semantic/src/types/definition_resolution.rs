@@ -171,30 +171,29 @@ pub(crate) fn definitions_for_name<'db>(
     name: &str,
     alias_resolution: ImportAliasResolution,
 ) -> Vec<ResolvedDefinition<'db>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::DefinitionsForName>(
         db,
         (scope, name, alias_resolution),
-        |db, source_operation, (scope, name, alias_resolution)| {
-            definitions_for_name_from_source(db, source_operation, scope, name, alias_resolution)
-        },
     )
 }
 
-fn definitions_for_name_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    scope: ScopeId<'db>,
-    name: &str,
-    alias_resolution: ImportAliasResolution,
-) -> Vec<ResolvedDefinition<'db>> {
-    let definitions = scoped_definitions_for_name(db, scope, name, alias_resolution);
-    if !definitions.is_empty() {
-        return definitions;
+crate::types::source_query! {
+    fn DefinitionsForName<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        scope: ScopeId<'db>,
+        name: &'input str,
+        alias_resolution: ImportAliasResolution,
+    ) -> Vec<ResolvedDefinition<'db>> {
+        let definitions = scoped_definitions_for_name(db, scope, name, alias_resolution);
+        if !definitions.is_empty() {
+            return definitions;
+        }
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
+        implicit_builtins_symbol_scope(db, &env, name)
+            .map(|scope| definitions_for_builtin(db, scope, name))
+            .unwrap_or_default()
     }
-    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
-    implicit_builtins_symbol_scope(db, &env, name)
-        .map(|scope| definitions_for_builtin(db, scope, name))
-        .unwrap_or_default()
 }
 
 /// Resolves definitions in visible scopes, without falling back to implicit builtins.
@@ -204,131 +203,124 @@ pub(crate) fn scoped_definitions_for_name<'db>(
     name_str: &str,
     alias_resolution: ImportAliasResolution,
 ) -> Vec<ResolvedDefinition<'db>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::ScopedDefinitionsForName>(
         db,
         (scope, name_str, alias_resolution),
-        |db, source_operation, (scope, name_str, alias_resolution)| {
-            scoped_definitions_for_name_from_source(
-                db,
-                source_operation,
-                scope,
-                name_str,
-                alias_resolution,
-            )
-        },
     )
 }
 
-fn scoped_definitions_for_name_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    scope: ScopeId<'db>,
-    name_str: &str,
-    alias_resolution: ImportAliasResolution,
-) -> Vec<ResolvedDefinition<'db>> {
-    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
-    let file = scope.program_file(db);
-    let index = semantic_index(db, file);
-    let file_scope = scope.file_scope_id(db);
+crate::types::source_query! {
+    fn ScopedDefinitionsForName<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        scope: ScopeId<'db>,
+        name_str: &'input str,
+        alias_resolution: ImportAliasResolution,
+    ) -> Vec<ResolvedDefinition<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
+        let file = scope.program_file(db);
+        let index = semantic_index(db, file);
+        let file_scope = scope.file_scope_id(db);
 
-    let mut all_definitions = FxIndexSet::default();
+        let mut all_definitions = FxIndexSet::default();
 
-    // Search through the scope hierarchy: start from the current scope and
-    // traverse up through parent scopes to find definitions
-    for (scope_id, _scope) in index.visible_ancestor_scopes(file_scope) {
-        let place_table = index.place_table(scope_id);
+        // Search through the scope hierarchy: start from the current scope and
+        // traverse up through parent scopes to find definitions
+        for (scope_id, _scope) in index.visible_ancestor_scopes(file_scope) {
+            let place_table = index.place_table(scope_id);
 
-        let Some(symbol_id) = place_table.symbol_id(name_str) else {
-            continue; // Name not found in this scope, try parent scope
-        };
+            let Some(symbol_id) = place_table.symbol_id(name_str) else {
+                continue; // Name not found in this scope, try parent scope
+            };
 
-        let use_def_map = index.use_def_map(scope_id);
+            let use_def_map = index.use_def_map(scope_id);
 
-        // Check if this place is marked as global or nonlocal
-        let place_expr = place_table.symbol(symbol_id);
-        let is_global = place_expr.is_global();
-        let is_nonlocal = place_expr.is_nonlocal();
+            // Check if this place is marked as global or nonlocal
+            let place_expr = place_table.symbol(symbol_id);
+            let is_global = place_expr.is_global();
+            let is_nonlocal = place_expr.is_nonlocal();
 
-        if is_global || is_nonlocal {
-            // Assignments in a forwarding scope remain valid navigation targets, including eager
-            // walrus bindings exported from comprehensions.
+            if is_global || is_nonlocal {
+                // Assignments in a forwarding scope remain valid navigation targets, including eager
+                // walrus bindings exported from comprehensions.
+                all_definitions.extend(user_visible_definitions(
+                    db,
+                    use_def_map
+                        .reachable_symbol_bindings(symbol_id)
+                        .filter_map(|binding| binding.binding.definition())
+                        .filter(|definition| match definition.kind(db) {
+                            DefinitionKind::NamedExpression(_) => true,
+                            DefinitionKind::NestedBindings(nested) => {
+                                nested.execution == NestedBindingExecution::Eager
+                            }
+                            _ => false,
+                        }),
+                ));
+            }
+
+            // TODO: The current algorithm doesn't return definitions or bindings
+            // for other scopes that are outside of this scope hierarchy that target
+            // this name using a nonlocal or global binding. The semantic analyzer
+            // doesn't appear to track these in a way that we can easily access
+            // them from here without walking all scopes in the module.
+
+            // If marked as global, skip to global scope
+            if is_global {
+                let global_scope_id = global_scope(db, file);
+                let global_place_table = ty_python_core::place_table(db, global_scope_id);
+
+                if let Some(global_symbol_id) = global_place_table.symbol_id(name_str) {
+                    let global_use_def_map = ty_python_core::use_def_map(db, global_scope_id);
+                    all_definitions.extend(user_visible_definitions(
+                        db,
+                        global_use_def_map
+                            .reachable_symbol_bindings(global_symbol_id)
+                            .filter_map(|binding| binding.binding.definition())
+                            .chain(
+                                global_use_def_map
+                                    .reachable_symbol_declarations(global_symbol_id)
+                                    .filter_map(|declaration| declaration.declaration.definition()),
+                            ),
+                    ));
+                }
+                break;
+            }
+
+            // If marked as nonlocal, skip current scope and search in ancestor scopes
+            if is_nonlocal {
+                // Continue searching in parent scopes, but skip the current scope
+                continue;
+            }
+
+            // Get all definitions (both bindings and declarations) for this place
             all_definitions.extend(user_visible_definitions(
                 db,
                 use_def_map
                     .reachable_symbol_bindings(symbol_id)
                     .filter_map(|binding| binding.binding.definition())
-                    .filter(|definition| match definition.kind(db) {
-                        DefinitionKind::NamedExpression(_) => true,
-                        DefinitionKind::NestedBindings(nested) => {
-                            nested.execution == NestedBindingExecution::Eager
-                        }
-                        _ => false,
-                    }),
+                    .chain(
+                        use_def_map
+                            .reachable_symbol_declarations(symbol_id)
+                            .filter_map(|declaration| declaration.declaration.definition()),
+                    ),
             ));
-        }
 
-        // TODO: The current algorithm doesn't return definitions or bindings
-        // for other scopes that are outside of this scope hierarchy that target
-        // this name using a nonlocal or global binding. The semantic analyzer
-        // doesn't appear to track these in a way that we can easily access
-        // them from here without walking all scopes in the module.
-
-        // If marked as global, skip to global scope
-        if is_global {
-            let global_scope_id = global_scope(db, file);
-            let global_place_table = ty_python_core::place_table(db, global_scope_id);
-
-            if let Some(global_symbol_id) = global_place_table.symbol_id(name_str) {
-                let global_use_def_map = ty_python_core::use_def_map(db, global_scope_id);
-                all_definitions.extend(user_visible_definitions(
-                    db,
-                    global_use_def_map
-                        .reachable_symbol_bindings(global_symbol_id)
-                        .filter_map(|binding| binding.binding.definition())
-                        .chain(
-                            global_use_def_map
-                                .reachable_symbol_declarations(global_symbol_id)
-                                .filter_map(|declaration| declaration.declaration.definition()),
-                        ),
-                ));
+            // If we found definitions in this scope, we can stop searching
+            if !all_definitions.is_empty() {
+                break;
             }
-            break;
         }
 
-        // If marked as nonlocal, skip current scope and search in ancestor scopes
-        if is_nonlocal {
-            // Continue searching in parent scopes, but skip the current scope
-            continue;
+        // Resolve import definitions to their targets
+        let mut resolved_definitions = Vec::new();
+
+        for definition in &all_definitions {
+            let resolved = resolve_definition(db, &env, *definition, Some(name_str), alias_resolution);
+            resolved_definitions.extend(resolved);
         }
 
-        // Get all definitions (both bindings and declarations) for this place
-        all_definitions.extend(user_visible_definitions(
-            db,
-            use_def_map
-                .reachable_symbol_bindings(symbol_id)
-                .filter_map(|binding| binding.binding.definition())
-                .chain(
-                    use_def_map
-                        .reachable_symbol_declarations(symbol_id)
-                        .filter_map(|declaration| declaration.declaration.definition()),
-                ),
-        ));
-
-        // If we found definitions in this scope, we can stop searching
-        if !all_definitions.is_empty() {
-            break;
-        }
+        resolved_definitions
     }
-
-    // Resolve import definitions to their targets
-    let mut resolved_definitions = Vec::new();
-
-    for definition in &all_definitions {
-        let resolved = resolve_definition(db, &env, *definition, Some(name_str), alias_resolution);
-        resolved_definitions.extend(resolved);
-    }
-
-    resolved_definitions
 }
 
 /// Resolves a symbol in an implicit builtins scope.
@@ -337,31 +329,31 @@ pub(crate) fn definitions_for_builtin<'db>(
     scope: ScopeId<'db>,
     name: &str,
 ) -> Vec<ResolvedDefinition<'db>> {
-    SourceTypeQuery::run(db, (scope, name), |db, source_operation, (scope, name)| {
-        definitions_for_builtin_from_source(db, source_operation, scope, name)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::DefinitionsForBuiltin>(db, (scope, name))
 }
 
-fn definitions_for_builtin_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    scope: ScopeId<'db>,
-    name: &str,
-) -> Vec<ResolvedDefinition<'db>> {
-    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
-    find_symbol_in_scope(db, scope, name)
-        .into_iter()
-        .filter(|def| def.is_reexported(db))
-        .flat_map(|def| {
-            resolve_definition(
-                db,
-                &env,
-                def,
-                Some(name),
-                ImportAliasResolution::ResolveAliases,
-            )
-        })
-        .collect()
+crate::types::source_query! {
+    fn DefinitionsForBuiltin<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        scope: ScopeId<'db>,
+        name: &'input str,
+    ) -> Vec<ResolvedDefinition<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
+        find_symbol_in_scope(db, scope, name)
+            .into_iter()
+            .filter(|def| def.is_reexported(db))
+            .flat_map(|def| {
+                resolve_definition(
+                    db,
+                    &env,
+                    def,
+                    Some(name),
+                    ImportAliasResolution::ResolveAliases,
+                )
+            })
+            .collect()
+    }
 }
 
 /// Returns source definitions for a member of an already-inferred receiver type.

@@ -30,7 +30,7 @@ use crate::{Db, Program, ProgramEnvironment};
 /// A constraint can occur in many cached pairs and their derived sequents. Intern it once instead
 /// of retaining a full copy in every query key and sequent.
 #[salsa::interned(debug, heap_size = ruff_memory_usage::heap_size)]
-pub(super) struct InternedSequentConstraint<'db> {
+pub(crate) struct InternedSequentConstraint<'db> {
     #[returns(copy)]
     pub(super) constraint: Constraint<'db>,
 }
@@ -56,7 +56,7 @@ impl get_size2::GetSize for InternedSequentConstraint<'_> {}
 /// retain that operation's recursion guards and remain local to it. `PathAssignments` invokes
 /// these methods when it encounters a new constraint, then merges the sequents into its own map.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct SequentMap<'db> {
+pub(crate) struct SequentMap<'db> {
     /// The sequents that were discovered while creating this sequent map. Some of those sequents
     /// will be "grouped", so that [`PathAssignments`][super::paths::PathAssignments] can add them
     /// to a [`ConstraintSetBuilder`] in a way that respects the builder's typevar ordering.
@@ -404,38 +404,10 @@ impl<'db> SequentMap<'db> {
             program: Program<'db>,
             constraint: InternedSequentConstraint<'db>,
         ) -> SequentMap<'db> {
-            SourceTypeQuery::run(
+            SourceTypeQuery::run::<crate::types::source_queries::SequentMapForConstraintInner>(
                 db,
                 (program, constraint),
-                |db, source_operation, (program, constraint)| {
-                    for_constraint_inner_from_source(db, source_operation, program, constraint)
-                },
             )
-        }
-
-        fn for_constraint_inner_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            program: Program<'db>,
-            constraint: InternedSequentConstraint<'db>,
-        ) -> SequentMap<'db> {
-            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
-            compute(db, env, constraint.constraint(db))
-        }
-
-        fn compute<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            constraint: Constraint<'db>,
-        ) -> SequentMap<'db> {
-            tracing::trace!(
-                target: "ty_python_semantic::types::constraints::SequentMap",
-                constraint = %constraint.display(db, env, Some(true)),
-                "add sequents for constraint",
-            );
-            let mut map = SequentMapBuilder::new(db);
-            constraint.add_sequents(db, env, &mut map);
-            map.finish()
         }
 
         let interned = InternedSequentConstraint::new(db, constraint);
@@ -446,7 +418,7 @@ impl<'db> SequentMap<'db> {
                     env,
                     &(env.program(db), interned.as_id(), None),
                     Self::default,
-                    || compute(db, env, constraint),
+                    || compute_constraint_sequents(db, env, constraint),
                 ))
             },
         ))
@@ -498,47 +470,10 @@ impl<'db> SequentMap<'db> {
             left: InternedSequentConstraint<'db>,
             right: InternedSequentConstraint<'db>,
         ) -> SequentMap<'db> {
-            SourceTypeQuery::run(
+            SourceTypeQuery::run::<crate::types::source_queries::SequentMapForConstraintPairInner>(
                 db,
                 (program, left, right),
-                |db, source_operation, (program, left, right)| {
-                    for_constraint_pair_inner_from_source(
-                        db,
-                        source_operation,
-                        program,
-                        left,
-                        right,
-                    )
-                },
             )
-        }
-
-        fn for_constraint_pair_inner_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            program: Program<'db>,
-            left: InternedSequentConstraint<'db>,
-            right: InternedSequentConstraint<'db>,
-        ) -> SequentMap<'db> {
-            let env = &source_operation.operations(ProgramEnvironment::from_program(program));
-            compute(db, env, left.constraint(db), right.constraint(db))
-        }
-
-        fn compute<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            left: Constraint<'db>,
-            right: Constraint<'db>,
-        ) -> SequentMap<'db> {
-            tracing::trace!(
-                target: "ty_python_semantic::types::constraints::SequentMap",
-                left = %left.display(db, env, Some(true)),
-                right = %right.display(db, env, Some(true)),
-                "add sequents for constraint pair",
-            );
-            let mut map = SequentMapBuilder::new(db);
-            left.add_sequents_with(db, env, &mut map, right);
-            map.finish()
         }
 
         let interned_left = InternedSequentConstraint::new(db, left);
@@ -561,10 +496,66 @@ impl<'db> SequentMap<'db> {
                         Some(interned_right.as_id()),
                     ),
                     Self::default,
-                    || compute(db, env, left, right),
+                    || compute_constraint_pair_sequents(db, env, left, right),
                 ))
             },
         ))
+    }
+}
+fn compute_constraint_pair_sequents<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    left: Constraint<'db>,
+    right: Constraint<'db>,
+) -> SequentMap<'db> {
+    tracing::trace!(
+        target: "ty_python_semantic::types::constraints::SequentMap",
+        left = %left.display(db, env, Some(true)),
+        right = %right.display(db, env, Some(true)),
+        "add sequents for constraint pair",
+    );
+    let mut map = SequentMapBuilder::new(db);
+    left.add_sequents_with(db, env, &mut map, right);
+    map.finish()
+}
+
+crate::types::source_query! {
+    fn SequentMapForConstraintPairInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        left: InternedSequentConstraint<'db>,
+        right: InternedSequentConstraint<'db>,
+    ) -> SequentMap<'db> {
+        let env = &source_operation.operations(ProgramEnvironment::from_program(program));
+        compute_constraint_pair_sequents(db, env, left.constraint(db), right.constraint(db))
+    }
+}
+
+fn compute_constraint_sequents<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    constraint: Constraint<'db>,
+) -> SequentMap<'db> {
+    tracing::trace!(
+        target: "ty_python_semantic::types::constraints::SequentMap",
+        constraint = %constraint.display(db, env, Some(true)),
+        "add sequents for constraint",
+    );
+    let mut map = SequentMapBuilder::new(db);
+    constraint.add_sequents(db, env, &mut map);
+    map.finish()
+}
+
+crate::types::source_query! {
+    fn SequentMapForConstraintInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        constraint: InternedSequentConstraint<'db>,
+    ) -> SequentMap<'db> {
+        let env = &source_operation.operations(ProgramEnvironment::from_program(program));
+        compute_constraint_sequents(db, env, constraint.constraint(db))
     }
 }
 

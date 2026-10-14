@@ -1294,7 +1294,7 @@ fn method_override_types<'db>(
 
 /// Whether an attribute declaration is a class variable or an instance variable.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, get_size2::GetSize)]
-pub(super) enum VariableKind {
+pub(crate) enum VariableKind {
     /// A variable annotated with `ClassVar`.
     Class,
     /// An instance variable, including an unannotated class-body assignment.
@@ -1336,13 +1336,20 @@ pub(super) fn effective_superclass_variable_kind<'db>(
     superclass: ClassType<'db>,
     name: Name,
 ) -> Option<VariableKind> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::EffectiveSuperclassVariableKind>(
         db,
         (superclass, name),
-        |db, source_operation, (superclass, name)| {
-            effective_superclass_variable_kind_from_source(db, source_operation, superclass, &name)
-        },
     )
+}
+crate::types::source_query! {
+    fn EffectiveSuperclassVariableKind<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        superclass: ClassType<'db>,
+        name: Name,
+    ) -> Option<VariableKind> {
+        effective_superclass_variable_kind_from_source(db, source_operation, superclass, &name)
+    }
 }
 
 fn effective_superclass_variable_kind_from_source<'db>(

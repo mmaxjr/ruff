@@ -308,23 +308,9 @@ impl<'db> BoundMethodType<'db> {
             db: &'db dyn Db,
             method: BoundMethodType<'db>,
         ) -> Option<CallableTypes<'db>> {
-            SourceTypeQuery::run(db, (method,), |db, source_operation, (method,)| {
-                cached_from_source(db, source_operation, method)
-            })
-        }
-
-        fn cached_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            method: BoundMethodType<'db>,
-        ) -> Option<CallableTypes<'db>> {
-            let env =
-                source_operation.operations(ProgramEnvironment::from_program(method.program(db)));
-            method.callables_with_receiver(
+            SourceTypeQuery::run::<crate::types::source_queries::BoundMethodTypeCallables>(
                 db,
-                &env,
-                method.signature_receiver(db),
-                method.typing_self_type(db, &env),
+                (method,),
             )
         }
 
@@ -388,6 +374,21 @@ impl<'db> BoundMethodType<'db> {
                 ty.recursive_type_normalized_impl(db, env, div, true)
             })?,
         ))
+    }
+}
+crate::types::source_query! {
+    fn BoundMethodTypeCallables<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        method: BoundMethodType<'db>,
+    ) -> Option<CallableTypes<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(method.program(db)));
+        method.callables_with_receiver(
+            db,
+            &env,
+            method.signature_receiver(db),
+            method.typing_self_type(db, &env),
+        )
     }
 }
 

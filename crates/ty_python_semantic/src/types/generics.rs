@@ -2696,20 +2696,9 @@ impl<'db> TypeVarInference<'db> {
             db: &'db dyn Db,
             inference: TypeVarInference<'db>,
         ) -> Specialization<'db> {
-            SourceTypeQuery::run(db, (inference,), |db, source_operation, (inference,)| {
-                merged_specialization_inner_from_source(db, source_operation, inference)
-            })
-        }
-
-        fn merged_specialization_inner_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            inference: TypeVarInference<'db>,
-        ) -> Specialization<'db> {
-            let env = source_operation.operations(ProgramEnvironment::from_program(
-                inference.generic_context(db).program(db),
-            ));
-            inference.merged_specialization_with(db, &env, |_, _| None)
+            SourceTypeQuery::run::<
+                crate::types::source_queries::TypeVarInferenceMergedSpecializationInner,
+            >(db, (inference,))
         }
 
         env.cached_query(
@@ -2738,6 +2727,18 @@ impl<'db> TypeVarInference<'db> {
 
         self.generic_context(db)
             .specialize_recursive(db, env, types)
+    }
+}
+crate::types::source_query! {
+    fn TypeVarInferenceMergedSpecializationInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        inference: TypeVarInference<'db>,
+    ) -> Specialization<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(
+            inference.generic_context(db).program(db),
+        ));
+        inference.merged_specialization_with(db, &env, |_, _| None)
     }
 }
 

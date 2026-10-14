@@ -589,21 +589,21 @@ pub(in crate::types) fn constructor_fields_are_keyword_only(
 
 #[salsa::tracked(returns(copy), heap_size=ruff_memory_usage::heap_size)]
 fn is_root_model<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> bool {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        is_root_model_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::IsRootModel>(db, (class,))
 }
 
-fn is_root_model_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: StaticClassLiteral<'db>,
-) -> bool {
-    let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
-    class
-        .iter_mro(db, env)
-        .filter_map(ClassBase::into_class)
-        .any(|base| base.is_known(db, KnownClass::PydanticRootModel))
+crate::types::source_query! {
+    fn IsRootModel<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> bool {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
+        class
+            .iter_mro(db, env)
+            .filter_map(ClassBase::into_class)
+            .any(|base| base.is_known(db, KnownClass::PydanticRootModel))
+    }
 }
 
 /// Return `true` if fields are optional constructor parameters for `class`.
@@ -671,51 +671,51 @@ pub(in crate::types) fn extend_settings_constructor_parameters<'db>(
     heap_size=ruff_memory_usage::heap_size,
 )]
 fn model_config<'db>(db: &'db dyn Db, class: StaticClassLiteral<'db>) -> ModelConfig {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        model_config_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::ModelConfig>(db, (class,))
 }
 
-fn model_config_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: StaticClassLiteral<'db>,
-) -> ModelConfig {
-    let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
-    let mut config = ModelConfig::default();
+crate::types::source_query! {
+    fn ModelConfig<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> ModelConfig {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
+        let mut config = ModelConfig::default();
 
-    // Pydantic merges the effective config from each direct base from left to right. A later base
-    // therefore takes precedence over an earlier base.
-    for base in class.explicit_bases(db) {
-        if matches!(
-            base,
-            Type::KnownInstance(KnownInstanceType::SubscriptedGeneric(_))
-        ) {
-            continue;
+        // Pydantic merges the effective config from each direct base from left to right. A later base
+        // therefore takes precedence over an earlier base.
+        for base in class.explicit_bases(db) {
+            if matches!(
+                base,
+                Type::KnownInstance(KnownInstanceType::SubscriptedGeneric(_))
+            ) {
+                continue;
+            }
+
+            let Some(base) = base.class_literal_or_origin(db) else {
+                config = ModelConfig::unknown();
+                continue;
+            };
+            let base_literal = base;
+            let Some(base) = base_literal.as_static() else {
+                config.merge(ModelConfig::unknown());
+                continue;
+            };
+
+            if is_model(db, env, base) {
+                config.merge(model_config(db, base));
+            } else if let Some(base_config) = inherited_model_config(db, env, base) {
+                config.merge(base_config);
+            }
         }
 
-        let Some(base) = base.class_literal_or_origin(db) else {
-            config = ModelConfig::unknown();
-            continue;
-        };
-        let base_literal = base;
-        let Some(base) = base_literal.as_static() else {
-            config.merge(ModelConfig::unknown());
-            continue;
-        };
-
-        if is_model(db, env, base) {
-            config.merge(model_config(db, base));
-        } else if let Some(base_config) = inherited_model_config(db, env, base) {
-            config.merge(base_config);
+        if let Some(own_config) = own_model_config(db, class) {
+            config.merge(own_config);
         }
+        config.merge(class_keyword_config(db, class));
+        config
     }
-
-    if let Some(own_config) = own_model_config(db, class) {
-        config.merge(own_config);
-    }
-    config.merge(class_keyword_config(db, class));
-    config
 }
 
 fn inherited_model_config<'db>(
@@ -947,58 +947,57 @@ pub(in crate::types) fn has_before_or_plain_field_validator<'db>(
     class: StaticClassLiteral<'db>,
     field_name: Name,
 ) -> bool {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::HasBeforeOrPlainFieldValidator>(
         db,
         (class, field_name),
-        |db, source_operation, (class, field_name)| {
-            has_before_or_plain_field_validator_from_source(db, source_operation, class, field_name)
-        },
     )
 }
 
-fn has_before_or_plain_field_validator_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: StaticClassLiteral<'db>,
-    field_name: Name,
-) -> bool {
-    let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
-    let field_name = CharStr::from(field_name);
+crate::types::source_query! {
+    fn HasBeforeOrPlainFieldValidator<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+        field_name: Name,
+    ) -> bool {
+        let env = &source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
+        let field_name = CharStr::from(field_name);
 
-    // Pydantic inherits validators unless a subclass defines a symbol with the same method name.
-    let mut shadowed_symbols = FxHashSet::default();
+        // Pydantic inherits validators unless a subclass defines a symbol with the same method name.
+        let mut shadowed_symbols = FxHashSet::default();
 
-    for base in class.iter_mro(db, env).filter_map(ClassBase::into_class) {
-        if base.is_known(db, KnownClass::PydanticBaseModel) {
-            break;
-        }
-        let Some((base, _)) = base.static_class_literal(db) else {
-            continue;
-        };
-        let body_scope = base.body_scope(db);
-        let use_def = use_def_map(db, body_scope);
-        let table = place_table(db, body_scope);
-
-        for (symbol_id, declarations) in use_def.all_end_of_scope_symbol_declarations() {
-            let name = table.symbol(symbol_id).name().clone();
-            if !shadowed_symbols.insert(name) {
+        for base in class.iter_mro(db, env).filter_map(ClassBase::into_class) {
+            if base.is_known(db, KnownClass::PydanticBaseModel) {
+                break;
+            }
+            let Some((base, _)) = base.static_class_literal(db) else {
                 continue;
-            }
-            if declarations.any_reachable(db, |declaration| {
-                declaration.is_defined_and(|definition| {
-                    function_has_before_or_plain_field_validator(
-                        db,
-                        definition,
-                        field_name.as_str(),
-                    )
-                })
-            }) {
-                return true;
+            };
+            let body_scope = base.body_scope(db);
+            let use_def = use_def_map(db, body_scope);
+            let table = place_table(db, body_scope);
+
+            for (symbol_id, declarations) in use_def.all_end_of_scope_symbol_declarations() {
+                let name = table.symbol(symbol_id).name().clone();
+                if !shadowed_symbols.insert(name) {
+                    continue;
+                }
+                if declarations.any_reachable(db, |declaration| {
+                    declaration.is_defined_and(|definition| {
+                        function_has_before_or_plain_field_validator(
+                            db,
+                            definition,
+                            field_name.as_str(),
+                        )
+                    })
+                }) {
+                    return true;
+                }
             }
         }
-    }
 
-    false
+        false
+    }
 }
 
 fn function_has_before_or_plain_field_validator<'db>(

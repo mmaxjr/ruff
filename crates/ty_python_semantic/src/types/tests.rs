@@ -317,32 +317,24 @@ fn oscillating_generic_alias_cycle_recover<'db>(
     current: Type<'db>,
     program: Program<'db>,
 ) -> Type<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::OscillatingGenericAliasCycleRecover>(
         db,
         (cycle, previous, current, program),
-        |db, source_operation, (cycle, previous, current, program)| {
-            oscillating_generic_alias_cycle_recover_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous,
-                current,
-                program,
-            )
-        },
     )
 }
 
-fn oscillating_generic_alias_cycle_recover_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous: &Type<'db>,
-    current: Type<'db>,
-    program: Program<'db>,
-) -> Type<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_program(program));
-    current.cycle_normalized(db, &env, *previous, cycle)
+crate::types::source_query! {
+    fn OscillatingGenericAliasCycleRecover<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input Type<'db>,
+        current: Type<'db>,
+        program: Program<'db>,
+    ) -> Type<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
+        current.cycle_normalized(db, &env, *previous, cycle)
+    }
 }
 
 #[salsa::tracked(
@@ -351,27 +343,27 @@ fn oscillating_generic_alias_cycle_recover_from_source<'db>(
     cycle_fn=oscillating_generic_alias_cycle_recover,
 )]
 fn oscillating_generic_alias<'db>(db: &'db dyn Db, program: Program<'db>) -> Type<'db> {
-    SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
-        oscillating_generic_alias_from_source(db, source_operation, program)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::OscillatingGenericAlias>(db, (program,))
 }
 
-fn oscillating_generic_alias_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    program: Program<'db>,
-) -> Type<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_program(program));
-    let previous = oscillating_generic_alias(db, program);
-    let argument = if let Type::GenericAlias(alias) = previous
-        && alias.specialization(db).types(db) == [Type::unknown()]
-    {
-        KnownClass::Int.to_instance(db, &env)
-    } else {
-        Type::unknown()
-    };
+crate::types::source_query! {
+    fn OscillatingGenericAlias<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+    ) -> Type<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
+        let previous = oscillating_generic_alias(db, program);
+        let argument = if let Type::GenericAlias(alias) = previous
+            && alias.specialization(db).types(db) == [Type::unknown()]
+        {
+            KnownClass::Int.to_instance(db, &env)
+        } else {
+            Type::unknown()
+        };
 
-    list_alias(db, &env, argument).into()
+        list_alias(db, &env, argument).into()
+    }
 }
 
 #[test]

@@ -240,9 +240,7 @@ impl<'db> VarianceVariable<'db> {
     /// ordinary evaluation and declaration validation.
     #[salsa::tracked(returns(copy), cycle_initial=|_, _, _| VarianceTerm::BIVARIANT, heap_size=ruff_memory_usage::heap_size)]
     fn equation(self, db: &'db dyn Db) -> VarianceTerm<'db> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.equation_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::VarianceVariableEquation>(db, (self,))
     }
 
     fn equation_from_source(
@@ -289,6 +287,15 @@ impl<'db> VarianceVariable<'db> {
         self.equation(db)
             .visit_live_variables(db, |dependency| dependencies.push(dependency));
         dependencies.into_boxed_slice()
+    }
+}
+crate::types::source_query! {
+    fn VarianceVariableEquation<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: VarianceVariable<'db>,
+    ) -> VarianceTerm<'db> {
+        source_self.equation_from_source(db, source_operation)
     }
 }
 

@@ -60,7 +60,7 @@ impl<'db> ClassType<'db> {
 
 /// Representation of a single `Protocol` class definition.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ProtocolClass<'db>(ClassType<'db>);
+pub(crate) struct ProtocolClass<'db>(ClassType<'db>);
 
 impl<'db> ProtocolClass<'db> {
     pub(super) fn map_recursive_references(
@@ -268,12 +268,9 @@ impl<'db> ProtocolClass<'db> {
     ///     __doc__: str
     /// ```
     pub(super) fn has_member_declaration(self, db: &'db dyn Db, name: &str) -> bool {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::ProtocolClassHasMemberDeclaration>(
             db,
             (self, name),
-            |db, source_operation, (source_self, name)| {
-                source_self.has_member_declaration_from_source(db, source_operation, name)
-            },
         )
     }
 
@@ -440,6 +437,16 @@ impl<'db> ProtocolClass<'db> {
         ))
     }
 }
+crate::types::source_query! {
+    fn ProtocolClassHasMemberDeclaration<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: ProtocolClass<'db>,
+        name: &'input str,
+    ) -> bool {
+        source_self.has_member_declaration_from_source(db, source_operation, name)
+    }
+}
 
 impl<'db> Deref for ProtocolClass<'db> {
     type Target = ClassType<'db>;
@@ -457,7 +464,7 @@ impl<'db> From<ProtocolClass<'db>> for Type<'db> {
 
 /// The interface of a protocol: the members of that protocol, and the types of those members.
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
-pub(super) struct ProtocolInterface<'db> {
+pub(crate) struct ProtocolInterface<'db> {
     #[returns(copy)]
     pub(super) program: Program<'db>,
 
@@ -472,7 +479,7 @@ impl get_size2::GetSize for ProtocolInterface<'_> {}
 /// The original interface remains shared. A member's readable and writable types are
 /// materialized only when that member is accessed or compared.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ProtocolInterfaceView<'db> {
+pub(crate) struct ProtocolInterfaceView<'db> {
     interface: ProtocolInterface<'db>,
     materialization: Option<MaterializationKind>,
 }
@@ -1769,7 +1776,7 @@ fn cycle_normalized_optional_type<'db>(
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Hash, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ProtocolMemberData<'db> {
+pub(crate) struct ProtocolMemberData<'db> {
     kind: ProtocolMemberKind<'db>,
     qualifiers: TypeQualifiers,
     definition: Option<Definition<'db>>,
@@ -3367,27 +3374,27 @@ impl<'db> ProtocolMemberCandidate<'db> {
 /// Cache `object` member names so missing protocol members can be rejected without member lookup.
 #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
 fn object_member_names<'db>(db: &'db dyn Db, program: Program<'db>) -> FxHashSet<Name> {
-    SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
-        object_member_names_from_source(db, source_operation, program)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::ObjectMemberNames>(db, (program,))
 }
 
-fn object_member_names_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    program: Program<'db>,
-) -> FxHashSet<Name> {
-    let env = source_operation.operations(ProgramEnvironment::from_program(program));
-    let Some((object, _)) = ClassType::object(db, &env).static_class_literal(db) else {
-        return FxHashSet::default();
-    };
+crate::types::source_query! {
+    fn ObjectMemberNames<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+    ) -> FxHashSet<Name> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
+        let Some((object, _)) = ClassType::object(db, &env).static_class_literal(db) else {
+            return FxHashSet::default();
+        };
 
-    let mut names = place_table(db, object.body_scope(db))
-        .symbols()
-        .map(|symbol| symbol.name().clone())
-        .collect::<FxHashSet<_>>();
-    names.shrink_to_fit();
-    names
+        let mut names = place_table(db, object.body_scope(db))
+            .symbols()
+            .map(|symbol| symbol.name().clone())
+            .collect::<FxHashSet<_>>();
+        names.shrink_to_fit();
+        names
+    }
 }
 
 /// Count protocol requirements that cannot be supplied by inherited `object` members.
@@ -3418,46 +3425,49 @@ fn supports_protocol_variance_inference<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> bool {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        supports_protocol_variance_inference_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::SupportsProtocolVarianceInference>(
+        db,
+        (class,),
+    )
 }
 
-fn supports_protocol_variance_inference_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: StaticClassLiteral<'db>,
-) -> bool {
-    let Some(protocol) = class.identity_specialization(db).into_protocol_class(db) else {
-        return false;
-    };
-    let env = source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
-    let interface = protocol.interface(db, &env);
-    if interface.members(db).any(|member| {
-        matches!(
-            member.data.kind,
-            ProtocolMemberKind::Property {
-                write: Some(ProtocolMemberWrite::Descriptor { domain: None, .. }),
-                ..
-            }
-        )
-    }) {
-        return false;
-    }
-
-    interface.variance_types(db, &env).all(|(ty, _)| {
-        if let Type::Callable(callable) = ty {
-            // Bound receivers constrain when a method can be called, but they are not input
-            // or output positions in variance inference. Match `Signature::variance_of`.
-            callable
-                .inspect_signatures_root(db, &env, |_, signatures| {
-                    signatures.supports_protocol_variance_inference(db)
-                })
-                .unwrap_or(false)
-        } else {
-            supports_protocol_variance_type(db, &env, ty)
+crate::types::source_query! {
+    fn SupportsProtocolVarianceInference<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> bool {
+        let Some(protocol) = class.identity_specialization(db).into_protocol_class(db) else {
+            return false;
+        };
+        let env = source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
+        let interface = protocol.interface(db, &env);
+        if interface.members(db).any(|member| {
+            matches!(
+                member.data.kind,
+                ProtocolMemberKind::Property {
+                    write: Some(ProtocolMemberWrite::Descriptor { domain: None, .. }),
+                    ..
+                }
+            )
+        }) {
+            return false;
         }
-    })
+
+        interface.variance_types(db, &env).all(|(ty, _)| {
+            if let Type::Callable(callable) = ty {
+                // Bound receivers constrain when a method can be called, but they are not input
+                // or output positions in variance inference. Match `Signature::variance_of`.
+                callable
+                    .inspect_signatures_root(db, &env, |_, signatures| {
+                        signatures.supports_protocol_variance_inference(db)
+                    })
+                    .unwrap_or(false)
+            } else {
+                supports_protocol_variance_type(db, &env, ty)
+            }
+        })
+    }
 }
 
 /// Inner Salsa query for [`ProtocolClass::interface`].
@@ -3471,20 +3481,20 @@ fn cached_protocol_interface<'db>(
     db: &'db dyn Db,
     class: ClassType<'db>,
 ) -> ProtocolInterface<'db> {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        cached_protocol_interface_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::CachedProtocolInterface>(db, (class,))
 }
 
-fn cached_protocol_interface_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: ClassType<'db>,
-) -> ProtocolInterface<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_file(
-        class.class_literal(db).program_file(db),
-    ));
-    compute_protocol_interface(db, &env, class)
+crate::types::source_query! {
+    fn CachedProtocolInterface<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassType<'db>,
+    ) -> ProtocolInterface<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            class.class_literal(db).program_file(db),
+        ));
+        compute_protocol_interface(db, &env, class)
+    }
 }
 
 fn compute_protocol_interface<'db>(
@@ -3558,22 +3568,25 @@ fn protocol_interface_cycle_initial<'db>(
     _id: salsa::Id,
     class: ClassType<'db>,
 ) -> ProtocolInterface<'db> {
-    SourceTypeQuery::run(db, class, |db, source_operation, class| {
-        protocol_interface_cycle_initial_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::ProtocolInterfaceCycleInitial>(
+        db,
+        (class,),
+    )
 }
 
-fn protocol_interface_cycle_initial_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: ClassType<'db>,
-) -> ProtocolInterface<'db> {
-    ProtocolInterface::empty(
-        db,
-        &source_operation.operations(ProgramEnvironment::from_file(
-            class.class_literal(db).program_file(db),
-        )),
-    )
+crate::types::source_query! {
+    fn ProtocolInterfaceCycleInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassType<'db>,
+    ) -> ProtocolInterface<'db> {
+        ProtocolInterface::empty(
+            db,
+            &source_operation.operations(ProgramEnvironment::from_file(
+                class.class_literal(db).program_file(db),
+            )),
+        )
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -3584,34 +3597,26 @@ fn proto_interface_cycle_recover<'db>(
     value: ProtocolInterface<'db>,
     class: ClassType<'db>,
 ) -> ProtocolInterface<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::ProtoInterfaceCycleRecover>(
         db,
         (cycle, *previous, value, class),
-        |db, source_operation, (cycle, previous, value, class)| {
-            proto_interface_cycle_recover_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous,
-                value,
-                class,
-            )
-        },
     )
 }
 
-fn proto_interface_cycle_recover_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous: ProtocolInterface<'db>,
-    value: ProtocolInterface<'db>,
-    class: ClassType<'db>,
-) -> ProtocolInterface<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_file(
-        class.class_literal(db).program_file(db),
-    ));
-    value.cycle_normalized(db, &env, previous, cycle)
+crate::types::source_query! {
+    fn ProtoInterfaceCycleRecover<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: ProtocolInterface<'db>,
+        value: ProtocolInterface<'db>,
+        class: ClassType<'db>,
+    ) -> ProtocolInterface<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            class.class_literal(db).program_file(db),
+        ));
+        value.cycle_normalized(db, &env, previous, cycle)
+    }
 }
 
 /// Bind `self` unless this is a `Callable[P, R]` dunder, and *also* discard the functionlike-ness
@@ -3637,16 +3642,32 @@ fn protocol_bind_self<'db>(
         callable: CallableType<'db>,
         self_type: Option<Type<'db>>,
     ) -> CallableType<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::ProtocolBindSelf>(
             db,
             (program, callable, self_type),
-            |db, source_operation, (program, callable, self_type)| {
-                cached_from_source(db, source_operation, program, callable, self_type)
-            },
         )
     }
 
-    fn cached_from_source<'db>(
+    env.cached_query(
+        || cached(db, env.program(db), callable, self_type),
+        || bind_protocol_self_in_operation(db, env, callable, self_type),
+    )
+}
+fn bind_protocol_self_in_operation<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    callable: CallableType<'db>,
+    self_type: Option<Type<'db>>,
+) -> CallableType<'db> {
+    if callable.is_dunder_paramspec(db) {
+        return callable.into_regular(db);
+    }
+
+    callable.bind_protocol_receiver(db, env, self_type)
+}
+
+crate::types::source_query! {
+    fn ProtocolBindSelf<'db, 'input>(
         db: &'db dyn Db,
         source_operation: &SourceTypeQuery<'db>,
         program: Program<'db>,
@@ -3654,25 +3675,8 @@ fn protocol_bind_self<'db>(
         self_type: Option<Type<'db>>,
     ) -> CallableType<'db> {
         let env = source_operation.operations(ProgramEnvironment::from_program(program));
-        compute(db, &env, callable, self_type)
+        bind_protocol_self_in_operation(db, &env, callable, self_type)
     }
-
-    fn compute<'db>(
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-        callable: CallableType<'db>,
-        self_type: Option<Type<'db>>,
-    ) -> CallableType<'db> {
-        if callable.is_dunder_paramspec(db) {
-            return callable.into_regular(db);
-        }
-
-        callable.bind_protocol_receiver(db, env, self_type)
-    }
-    env.cached_query(
-        || cached(db, env.program(db), callable, self_type),
-        || compute(db, env, callable, self_type),
-    )
 }
 
 /// Cache receiver and `Self` binding only for protocol-member compatibility checks.
@@ -3695,23 +3699,29 @@ fn protocol_apply_self_with_receiver<'db>(
         receiver_type: Type<'db>,
         self_type: Type<'db>,
     ) -> CallableType<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::ProtocolApplySelfWithReceiver>(
             db,
             (program, callable, receiver_type, self_type),
-            |db, source_operation, (program, callable, receiver_type, self_type)| {
-                cached_from_source(
-                    db,
-                    source_operation,
-                    program,
-                    callable,
-                    receiver_type,
-                    self_type,
-                )
-            },
         )
     }
 
-    fn cached_from_source<'db>(
+    env.cached_query(
+        || cached(db, env.program(db), callable, receiver_type, self_type),
+        || apply_protocol_self_in_operation(db, env, callable, receiver_type, self_type),
+    )
+}
+fn apply_protocol_self_in_operation<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    callable: CallableType<'db>,
+    receiver_type: Type<'db>,
+    self_type: Type<'db>,
+) -> CallableType<'db> {
+    callable.apply_self_with_receiver(db, env, receiver_type, self_type)
+}
+
+crate::types::source_query! {
+    fn ProtocolApplySelfWithReceiver<'db, 'input>(
         db: &'db dyn Db,
         source_operation: &SourceTypeQuery<'db>,
         program: Program<'db>,
@@ -3720,22 +3730,8 @@ fn protocol_apply_self_with_receiver<'db>(
         self_type: Type<'db>,
     ) -> CallableType<'db> {
         let env = source_operation.operations(ProgramEnvironment::from_program(program));
-        compute(db, &env, callable, receiver_type, self_type)
+        apply_protocol_self_in_operation(db, &env, callable, receiver_type, self_type)
     }
-
-    fn compute<'db>(
-        db: &'db dyn Db,
-        env: &TypeOperations<'db>,
-        callable: CallableType<'db>,
-        receiver_type: Type<'db>,
-        self_type: Type<'db>,
-    ) -> CallableType<'db> {
-        callable.apply_self_with_receiver(db, env, receiver_type, self_type)
-    }
-    env.cached_query(
-        || cached(db, env.program(db), callable, receiver_type, self_type),
-        || compute(db, env, callable, receiver_type, self_type),
-    )
 }
 
 /// Protocol compatibility can only succeed if every required member is present.

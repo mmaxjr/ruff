@@ -231,35 +231,35 @@ fn declared_typed_dict_openness<'db>(
     db: &'db dyn Db,
     class: StaticClassLiteral<'db>,
 ) -> Option<TypedDictOpenness<'db>> {
-    SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-        declared_typed_dict_openness_from_source(db, source_operation, class)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::DeclaredTypedDictOpenness>(db, (class,))
 }
 
-fn declared_typed_dict_openness_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    class: StaticClassLiteral<'db>,
-) -> Option<TypedDictOpenness<'db>> {
-    let file = class.program_file(db);
-    let module = parsed_module(db, file.python_file(db)).load(db);
-    let arguments = class.node(db, &module).arguments.as_ref()?;
-    let definition = class.definition(db);
-    if let Some(extra_items) = arguments.find_keyword("extra_items") {
-        let annotation = definition_expression_annotation(db, definition, &extra_items.value);
-        return Some(TypedDictOpenness::Extra(TypedDictExtraItems {
-            declared_ty: annotation.inner_type(),
-            is_read_only: annotation.qualifiers().contains(TypeQualifiers::READ_ONLY),
-        }));
+crate::types::source_query! {
+    fn DeclaredTypedDictOpenness<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> Option<TypedDictOpenness<'db>> {
+        let file = class.program_file(db);
+        let module = parsed_module(db, file.python_file(db)).load(db);
+        let arguments = class.node(db, &module).arguments.as_ref()?;
+        let definition = class.definition(db);
+        if let Some(extra_items) = arguments.find_keyword("extra_items") {
+            let annotation = definition_expression_annotation(db, definition, &extra_items.value);
+            return Some(TypedDictOpenness::Extra(TypedDictExtraItems {
+                declared_ty: annotation.inner_type(),
+                is_read_only: annotation.qualifiers().contains(TypeQualifiers::READ_ONLY),
+            }));
+        }
+        let closed = arguments.find_keyword("closed")?;
+        let env = source_operation.operations(ProgramEnvironment::from_file(file));
+        let closed_ty = definition_expression_type(db, definition, &closed.value);
+        Some(if closed_ty.bool(db, &env).is_always_true() {
+            TypedDictOpenness::Closed
+        } else {
+            TypedDictOpenness::ImplicitlyOpen
+        })
     }
-    let closed = arguments.find_keyword("closed")?;
-    let env = source_operation.operations(ProgramEnvironment::from_file(file));
-    let closed_ty = definition_expression_type(db, definition, &closed.value);
-    Some(if closed_ty.bool(db, &env).is_always_true() {
-        TypedDictOpenness::Closed
-    } else {
-        TypedDictOpenness::ImplicitlyOpen
-    })
 }
 
 /// Type that represents the set of all inhabitants (`dict` instances) that conform to
@@ -381,87 +381,10 @@ impl<'db> TypedDictType<'db> {
             db: &'db dyn Db,
             class: ClassType<'db>,
         ) -> TypedDictOpenness<'db> {
-            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-                class_based_openness_from_source(db, source_operation, class)
-            })
-        }
-
-        fn class_based_openness_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            class: ClassType<'db>,
-        ) -> TypedDictOpenness<'db> {
-            let env = source_operation.operations(ProgramEnvironment::from_file(
-                class.class_literal(db).program_file(db),
-            ));
-            compute(db, &env, class)
-        }
-
-        fn compute<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            class: ClassType<'db>,
-        ) -> TypedDictOpenness<'db> {
-            let (class_literal, specialization) = class.class_literal_and_specialization(db);
-            let static_class = match class_literal {
-                ClassLiteral::Static(static_class) => static_class,
-                ClassLiteral::DynamicTypedDict(dynamic) => {
-                    return dynamic.openness(db);
-                }
-                ClassLiteral::Dynamic(_)
-                | ClassLiteral::DynamicNamedTuple(_)
-                | ClassLiteral::DynamicEnum(_) => {
-                    // A `TypedDictType::Class` is only constructed from classes known to be TypedDicts.
-                    unreachable!("non-TypedDict dynamic class wrapped in `TypedDictType`")
-                }
-            };
-
-            let program_file = static_class.program_file(db);
-            let env = env.in_environment(ProgramEnvironment::from_file(program_file));
-
-            // The extra-item type is part of the schema being constructed. Comparing its union
-            // elements here can ask for another specialization of this same schema.
-            let visitor = ApplyTypeMappingVisitor::new_without_union_normalization(&env);
-            let specialize = |ty: Type<'db>| {
-                specialization.map_or(ty, |specialization| {
-                    ty.apply_type_mapping_impl(
-                        db,
-                        &TypeMapping::from_specialization(db, specialization, false),
-                        TypeContext::default(),
-                        &visitor,
-                    )
-                })
-            };
-
-            if let Some(declared) = declared_typed_dict_openness(db, static_class) {
-                return match declared {
-                    TypedDictOpenness::Extra(extra) => TypedDictOpenness::extra(
-                        db,
-                        &env,
-                        specialize(extra.declared_ty),
-                        extra.is_read_only(),
-                    ),
-                    declared => declared,
-                };
-            }
-
-            for base in static_class.explicit_bases(db) {
-                let base = specialize(*base);
-                let base_class = match base {
-                    Type::ClassLiteral(base) => ClassType::NonGeneric(base),
-                    Type::GenericAlias(base) => ClassType::Generic(base),
-                    _ => continue,
-                };
-
-                if base_class.class_literal(db).is_typed_dict(db) {
-                    let openness = TypedDictType::new(base_class).openness(db, &env);
-                    if !openness.is_implicitly_open() {
-                        return openness;
-                    }
-                }
-            }
-
-            TypedDictOpenness::ImplicitlyOpen
+            SourceTypeQuery::run::<crate::types::source_queries::TypedDictTypeClassBasedOpenness>(
+                db,
+                (class,),
+            )
         }
 
         match self {
@@ -472,7 +395,7 @@ impl<'db> TypedDictType<'db> {
                         env,
                         &self,
                         || TypedDictOpenness::ImplicitlyOpen,
-                        || compute(db, env, defining_class),
+                        || compute_typed_dict_openness(db, env, defining_class),
                     )
                 },
             ),
@@ -717,53 +640,10 @@ impl<'db> TypedDictType<'db> {
             heap_size=ruff_memory_usage::heap_size
         )]
         fn class_based_items<'db>(db: &'db dyn Db, class: ClassType<'db>) -> TypedDictSchema<'db> {
-            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-                class_based_items_from_source(db, source_operation, class)
-            })
-        }
-
-        fn class_based_items_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            class: ClassType<'db>,
-        ) -> TypedDictSchema<'db> {
-            let env = source_operation.operations(ProgramEnvironment::from_file(
-                class.class_literal(db).program_file(db),
-            ));
-            compute(db, &env, class)
-        }
-
-        fn compute<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            class: ClassType<'db>,
-        ) -> TypedDictSchema<'db> {
-            let Some((class_literal, specialization)) = class.static_class_literal(db) else {
-                return TypedDictSchema::default();
-            };
-            class_literal
-                .fields(db, env, specialization, CodeGeneratorKind::TypedDict)
-                .iter()
-                .map(|(name, field)| {
-                    let field = match field {
-                        Field {
-                            first_declaration,
-                            declared_ty,
-                            kind:
-                                FieldKind::TypedDict {
-                                    is_required,
-                                    is_read_only,
-                                },
-                        } => TypedDictFieldBuilder::new(*declared_ty)
-                            .required(*is_required)
-                            .read_only(*is_read_only)
-                            .first_declaration(*first_declaration)
-                            .build(),
-                        _ => unreachable!("TypedDict field expected"),
-                    };
-                    (name.clone(), field)
-                })
-                .collect()
+            SourceTypeQuery::run::<crate::types::source_queries::TypedDictTypeClassBasedItems>(
+                db,
+                (class,),
+            )
         }
 
         match self {
@@ -775,7 +655,7 @@ impl<'db> TypedDictType<'db> {
 
                 env.cached_query(
                     || Cow::Borrowed(class_based_items(db, defining_class)),
-                    || Cow::Owned(compute(db, env, defining_class)),
+                    || Cow::Owned(compute_typed_dict_items(db, env, defining_class)),
                 )
             }
             Self::Synthesized(synthesized) => Cow::Borrowed(synthesized.items(db)),
@@ -907,6 +787,131 @@ impl<'db> TypedDictType<'db> {
             TypedDictType::Class(defining_class) => defining_class.type_definition(db),
             TypedDictType::Synthesized(_) => None,
         }
+    }
+}
+fn compute_typed_dict_items<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    class: ClassType<'db>,
+) -> TypedDictSchema<'db> {
+    let Some((class_literal, specialization)) = class.static_class_literal(db) else {
+        return TypedDictSchema::default();
+    };
+    class_literal
+        .fields(db, env, specialization, CodeGeneratorKind::TypedDict)
+        .iter()
+        .map(|(name, field)| {
+            let field = match field {
+                Field {
+                    first_declaration,
+                    declared_ty,
+                    kind:
+                        FieldKind::TypedDict {
+                            is_required,
+                            is_read_only,
+                        },
+                } => TypedDictFieldBuilder::new(*declared_ty)
+                    .required(*is_required)
+                    .read_only(*is_read_only)
+                    .first_declaration(*first_declaration)
+                    .build(),
+                _ => unreachable!("TypedDict field expected"),
+            };
+            (name.clone(), field)
+        })
+        .collect()
+}
+
+crate::types::source_query! {
+    fn TypedDictTypeClassBasedItems<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassType<'db>,
+    ) -> TypedDictSchema<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            class.class_literal(db).program_file(db),
+        ));
+        compute_typed_dict_items(db, &env, class)
+    }
+}
+
+fn compute_typed_dict_openness<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    class: ClassType<'db>,
+) -> TypedDictOpenness<'db> {
+    let (class_literal, specialization) = class.class_literal_and_specialization(db);
+    let static_class = match class_literal {
+        ClassLiteral::Static(static_class) => static_class,
+        ClassLiteral::DynamicTypedDict(dynamic) => {
+            return dynamic.openness(db);
+        }
+        ClassLiteral::Dynamic(_)
+        | ClassLiteral::DynamicNamedTuple(_)
+        | ClassLiteral::DynamicEnum(_) => {
+            // A `TypedDictType::Class` is only constructed from classes known to be TypedDicts.
+            unreachable!("non-TypedDict dynamic class wrapped in `TypedDictType`")
+        }
+    };
+
+    let program_file = static_class.program_file(db);
+    let env = env.in_environment(ProgramEnvironment::from_file(program_file));
+
+    // The extra-item type is part of the schema being constructed. Comparing its union
+    // elements here can ask for another specialization of this same schema.
+    let visitor = ApplyTypeMappingVisitor::new_without_union_normalization(&env);
+    let specialize = |ty: Type<'db>| {
+        specialization.map_or(ty, |specialization| {
+            ty.apply_type_mapping_impl(
+                db,
+                &TypeMapping::from_specialization(db, specialization, false),
+                TypeContext::default(),
+                &visitor,
+            )
+        })
+    };
+
+    if let Some(declared) = declared_typed_dict_openness(db, static_class) {
+        return match declared {
+            TypedDictOpenness::Extra(extra) => TypedDictOpenness::extra(
+                db,
+                &env,
+                specialize(extra.declared_ty),
+                extra.is_read_only(),
+            ),
+            declared => declared,
+        };
+    }
+
+    for base in static_class.explicit_bases(db) {
+        let base = specialize(*base);
+        let base_class = match base {
+            Type::ClassLiteral(base) => ClassType::NonGeneric(base),
+            Type::GenericAlias(base) => ClassType::Generic(base),
+            _ => continue,
+        };
+
+        if base_class.class_literal(db).is_typed_dict(db) {
+            let openness = TypedDictType::new(base_class).openness(db, &env);
+            if !openness.is_implicitly_open() {
+                return openness;
+            }
+        }
+    }
+
+    TypedDictOpenness::ImplicitlyOpen
+}
+
+crate::types::source_query! {
+    fn TypedDictTypeClassBasedOpenness<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: ClassType<'db>,
+    ) -> TypedDictOpenness<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(
+            class.class_literal(db).program_file(db),
+        ));
+        compute_typed_dict_openness(db, &env, class)
     }
 }
 
@@ -1652,62 +1657,65 @@ pub(super) fn deferred_functional_typed_dict_schema<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> TypedDictSchema<'db> {
-    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-        deferred_functional_typed_dict_schema_from_source(db, source_operation, definition)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::DeferredFunctionalTypedDictSchema>(
+        db,
+        (definition,),
+    )
 }
 
-fn deferred_functional_typed_dict_schema_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-) -> TypedDictSchema<'db> {
-    let program_file = definition.program_file(db);
-    let python_file = program_file.python_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    let module = parsed_module(db, python_file).load(db);
-    let node = definition
-        .kind(db)
-        .value(&module)
-        .expect("Expected `TypedDict` definition to be an assignment")
-        .as_call_expr()
-        .expect("Expected `TypedDict` definition r.h.s. to be a call expression");
+crate::types::source_query! {
+    fn DeferredFunctionalTypedDictSchema<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> TypedDictSchema<'db> {
+        let program_file = definition.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let module = parsed_module(db, python_file).load(db);
+        let node = definition
+            .kind(db)
+            .value(&module)
+            .expect("Expected `TypedDict` definition to be an assignment")
+            .as_call_expr()
+            .expect("Expected `TypedDict` definition r.h.s. to be a call expression");
 
-    let deferred_inference = infer_deferred_types(db, definition);
+        let deferred_inference = infer_deferred_types(db, definition);
 
-    let total = node.arguments.find_keyword("total").is_none_or(|total_kw| {
-        let total_ty = definition_expression_type(db, definition, &total_kw.value);
-        !total_ty.bool(db, &env).is_always_false()
-    });
+        let total = node.arguments.find_keyword("total").is_none_or(|total_kw| {
+            let total_ty = definition_expression_type(db, definition, &total_kw.value);
+            !total_ty.bool(db, &env).is_always_false()
+        });
 
-    let mut schema = TypedDictSchema::default();
+        let mut schema = TypedDictSchema::default();
 
-    if let Some(fields_arg) = node.arguments.args.get(1) {
-        let ast::Expr::Dict(dict_expr) = fields_arg else {
-            return schema;
-        };
-
-        for item in &dict_expr.items {
-            let Some(key) = &item.key else {
-                return TypedDictSchema::default();
+        if let Some(fields_arg) = node.arguments.args.get(1) {
+            let ast::Expr::Dict(dict_expr) = fields_arg else {
+                return schema;
             };
 
-            let key_ty = definition_expression_type(db, definition, key);
-            let Some(key_lit) = key_ty.as_string_literal() else {
-                return TypedDictSchema::default();
-            };
+            for item in &dict_expr.items {
+                let Some(key) = &item.key else {
+                    return TypedDictSchema::default();
+                };
 
-            let field_ty = deferred_inference.expression_type(&item.value);
-            let qualifiers = deferred_inference.qualifiers(&item.value);
+                let key_ty = definition_expression_type(db, definition, key);
+                let Some(key_lit) = key_ty.as_string_literal() else {
+                    return TypedDictSchema::default();
+                };
 
-            schema.insert(
-                Name::new(key_lit.value(db)),
-                functional_typed_dict_field(field_ty, qualifiers, total),
-            );
+                let field_ty = deferred_inference.expression_type(&item.value);
+                let qualifiers = deferred_inference.qualifiers(&item.value);
+
+                schema.insert(
+                    Name::new(key_lit.value(db)),
+                    functional_typed_dict_field(field_ty, qualifiers, total),
+                );
+            }
         }
-    }
 
-    schema
+        schema
+    }
 }
 
 /// Resolves the undeclared-item policy of a functional `TypedDict` definition.
@@ -1727,47 +1735,50 @@ pub(super) fn deferred_functional_typed_dict_openness<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> TypedDictOpenness<'db> {
-    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-        deferred_functional_typed_dict_openness_from_source(db, source_operation, definition)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::DeferredFunctionalTypedDictOpenness>(
+        db,
+        (definition,),
+    )
 }
 
-fn deferred_functional_typed_dict_openness_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-) -> TypedDictOpenness<'db> {
-    let program_file = definition.program_file(db);
-    let python_file = program_file.python_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    let module = parsed_module(db, python_file).load(db);
-    let node = definition
-        .kind(db)
-        .value(&module)
-        .expect("Expected `TypedDict` definition to be an assignment")
-        .as_call_expr()
-        .expect("Expected `TypedDict` definition r.h.s. to be a call expression");
+crate::types::source_query! {
+    fn DeferredFunctionalTypedDictOpenness<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> TypedDictOpenness<'db> {
+        let program_file = definition.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let module = parsed_module(db, python_file).load(db);
+        let node = definition
+            .kind(db)
+            .value(&module)
+            .expect("Expected `TypedDict` definition to be an assignment")
+            .as_call_expr()
+            .expect("Expected `TypedDict` definition r.h.s. to be a call expression");
 
-    if let Some(extra_items) = node.arguments.find_keyword("extra_items") {
-        let deferred_inference = infer_deferred_types(db, definition);
-        return TypedDictOpenness::extra(
-            db,
-            &env,
-            deferred_inference.expression_type(&extra_items.value),
-            deferred_inference
-                .qualifiers(&extra_items.value)
-                .contains(TypeQualifiers::READ_ONLY),
-        );
-    }
-
-    if let Some(closed) = node.arguments.find_keyword("closed") {
-        let closed_ty = definition_expression_type(db, definition, &closed.value);
-        if closed_ty.bool(db, &env).is_always_true() {
-            return TypedDictOpenness::Closed;
+        if let Some(extra_items) = node.arguments.find_keyword("extra_items") {
+            let deferred_inference = infer_deferred_types(db, definition);
+            return TypedDictOpenness::extra(
+                db,
+                &env,
+                deferred_inference.expression_type(&extra_items.value),
+                deferred_inference
+                    .qualifiers(&extra_items.value)
+                    .contains(TypeQualifiers::READ_ONLY),
+            );
         }
-    }
 
-    TypedDictOpenness::ImplicitlyOpen
+        if let Some(closed) = node.arguments.find_keyword("closed") {
+            let closed_ty = definition_expression_type(db, definition, &closed.value);
+            if closed_ty.bool(db, &env).is_always_true() {
+                return TypedDictOpenness::Closed;
+            }
+        }
+
+        TypedDictOpenness::ImplicitlyOpen
+    }
 }
 
 pub(super) fn typed_dict_params_from_class_def(class_stmt: &StmtClassDef) -> TypedDictParams {

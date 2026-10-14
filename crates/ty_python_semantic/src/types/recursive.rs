@@ -1749,6 +1749,7 @@ pub(super) enum TypeVisitorKey<'db> {
     EnumDomain,
     BinaryComparison,
     BinaryExpression,
+    Subscript(ruff_python_ast::ExprContext),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -1765,6 +1766,7 @@ impl From<ruff_python_ast::Operator> for TypeVisitorOperator {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 struct TypeVisitorContext<'db> {
+    program: Program<'db>,
     operation: TypeVisitorKey<'db>,
     operator: Option<TypeVisitorOperator>,
 }
@@ -1788,6 +1790,12 @@ impl<'db> TypeVisitorItem<'db> for Type<'db> {
     }
 }
 
+impl<'db> TypeVisitorItem<'db> for (Type<'db>, Type<'db>) {
+    fn operands(&self) -> (Type<'db>, Option<TypeVisitorOperator>, Type<'db>) {
+        (self.0, None, self.1)
+    }
+}
+
 impl<'db, O: Copy + Into<TypeVisitorOperator>> TypeVisitorItem<'db> for (Type<'db>, O, Type<'db>) {
     fn operands(&self) -> (Type<'db>, Option<TypeVisitorOperator>, Type<'db>) {
         (self.0, Some(self.1.into()), self.2)
@@ -1806,6 +1814,10 @@ pub(super) struct TypeVisitorState<'env, 'db, T, R> {
 }
 
 impl<'env, 'db, T, R> TypeVisitorState<'env, 'db, T, R> {
+    pub(super) fn mapping(&self) -> &ApplyTypeMappingVisitor<'env, 'db> {
+        &self.mapping
+    }
+
     pub(super) fn new(
         env: &'env TypeOperations<'db>,
         key: TypeVisitorKey<'db>,
@@ -1836,6 +1848,7 @@ where
         let key = (
             left,
             TypeVisitorContext {
+                program: self.mapping.env.program(db),
                 operation: self.key,
                 operator,
             },
@@ -1870,6 +1883,7 @@ where
         let key = (
             left,
             TypeVisitorContext {
+                program: self.mapping.env.program(db),
                 operation: self.key,
                 operator,
             },
@@ -3175,25 +3189,10 @@ impl<'db> RecursiveType<'db> {
             recursive: RecursiveType<'db>,
             (): (),
         ) -> AliasCycleSummary<'db> {
-            SourceTypeQuery::run(db, recursive, |db, source, recursive| {
-                let env = source.operations(ProgramEnvironment::from_definition(
-                    recursive.definition(db),
-                ));
-                let body = match recursive.body(db) {
-                    RecursiveBody::Type(body) => body,
-                    RecursiveBody::TypedDictValues(class) => {
-                        TypedDictType::new(class.identity_specialization(db))
-                            .unfold_value_type(db, &env)
-                    }
-                };
-                let mut summary = AliasCycleSummary::from_type(db, &env, body);
-                // Nested bodies can refer to an enclosing binder. Close only the cycle marker,
-                // so recovery never exposes an unbound variable as a standalone type.
-                if let Some(Type::RecursiveVar(variable)) = summary.cycle {
-                    summary.cycle = Some(Type::divergent_alias(variable.cycle(db).id()));
-                }
-                summary
-            })
+            SourceTypeQuery::run::<crate::types::source_queries::RecursiveTypeCycleSummary>(
+                db,
+                (recursive,),
+            )
         }
 
         cycle_summary_impl(db, self.constructor(db), ())
@@ -3545,6 +3544,30 @@ impl<'db> RecursiveType<'db> {
         self.unfold(db, &ApplyTypeMappingVisitor::new(&env))
             .map(|unfolded| unfolded.variance_of(db, &env, typevar))
             .unwrap_or(VarianceTerm::BIVARIANT)
+    }
+}
+crate::types::source_query! {
+    fn RecursiveTypeCycleSummary<'db, 'input>(
+        db: &'db dyn Db,
+        source: &SourceTypeQuery<'db>,
+        recursive: RecursiveType<'db>,
+    ) -> AliasCycleSummary<'db> {
+        let env = source.operations(ProgramEnvironment::from_definition(
+            recursive.definition(db),
+        ));
+        let body = match recursive.body(db) {
+            RecursiveBody::Type(body) => body,
+            RecursiveBody::TypedDictValues(class) => {
+                TypedDictType::new(class.identity_specialization(db)).unfold_value_type(db, &env)
+            }
+        };
+        let mut summary = AliasCycleSummary::from_type(db, &env, body);
+        // Nested bodies can refer to an enclosing binder. Close only the cycle marker,
+        // so recovery never exposes an unbound variable as a standalone type.
+        if let Some(Type::RecursiveVar(variable)) = summary.cycle {
+            summary.cycle = Some(Type::divergent_alias(variable.cycle(db).id()));
+        }
+        summary
     }
 }
 

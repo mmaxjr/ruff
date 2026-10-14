@@ -1722,7 +1722,7 @@ fn evaluate_container_element_equality<'db>(
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
-pub(super) enum ComparisonOperator {
+pub(crate) enum ComparisonOperator {
     Equality,
     Inequality,
 }

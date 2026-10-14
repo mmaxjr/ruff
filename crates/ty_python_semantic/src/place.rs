@@ -522,21 +522,21 @@ pub(crate) fn global_symbol<'db>(
     file: ProgramFile<'db>,
     name: &str,
 ) -> PlaceAndQualifiers<'db> {
-    SourceTypeQuery::run(db, (file, name), |db, source_operation, (file, name)| {
-        global_symbol_from_source(db, source_operation, file, name)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::GlobalSymbol>(db, (file, name))
 }
 
-fn global_symbol_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    file: ProgramFile<'db>,
-    name: &str,
-) -> PlaceAndQualifiers<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_file(file));
-    explicit_global_symbol(db, file, name).or_fall_back_to(db, &env, || {
-        module_type_implicit_global_symbol(db, file, name)
-    })
+crate::types::source_query! {
+    fn GlobalSymbol<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        file: ProgramFile<'db>,
+        name: &'input str,
+    ) -> PlaceAndQualifiers<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_file(file));
+        explicit_global_symbol(db, file, name).or_fall_back_to(db, &env, || {
+            module_type_implicit_global_symbol(db, file, name)
+        })
+    }
 }
 
 /// Infers the public type of an imported symbol.
@@ -1281,10 +1281,7 @@ impl<'db> From<Place<'db>> for PlaceAndQualifiers<'db> {
 #[salsa::tracked(
     returns(copy),
     cycle_initial=|_, id, _, _, _, _| Place::bound(Type::divergent(id)).into(),
-    cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, place: PlaceAndQualifiers<'db>, scope: ScopeId<'db>, _, _, _| SourceTypeQuery::run(db, (cycle, previous, place, scope), |db, source_operation, (cycle, previous, place, scope)| {
-        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
-        place.cycle_normalized(db, &env, *previous, cycle)
-    }),
+    cycle_fn=|db, cycle, previous: &PlaceAndQualifiers<'db>, place: PlaceAndQualifiers<'db>, scope: ScopeId<'db>, _, _, _| SourceTypeQuery::run::<crate::types::source_queries::PlaceByIdRecovery>(db, (cycle, previous, place, scope,)),
     heap_size=ruff_memory_usage::heap_size
 )]
 pub(crate) fn place_by_id<'db>(
@@ -1294,7 +1291,7 @@ pub(crate) fn place_by_id<'db>(
     requires_explicit_reexport: RequiresExplicitReExport,
     considered_definitions: ConsideredDefinitions,
 ) -> PlaceAndQualifiers<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::PlaceById>(
         db,
         (
             scope,
@@ -1302,39 +1299,42 @@ pub(crate) fn place_by_id<'db>(
             requires_explicit_reexport,
             considered_definitions,
         ),
-        |db,
-         source_operation,
-         (scope, place_id, requires_explicit_reexport, considered_definitions)| {
-            place_by_id_from_source(
-                db,
-                source_operation,
-                scope,
-                place_id,
-                requires_explicit_reexport,
-                considered_definitions,
-            )
-        },
     )
 }
+crate::types::source_query! {
+    fn PlaceByIdRecovery<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input PlaceAndQualifiers<'db>,
+        place: PlaceAndQualifiers<'db>,
+        scope: ScopeId<'db>,
+    ) -> PlaceAndQualifiers<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
+        place.cycle_normalized(db, &env, *previous, cycle)
+    }
+}
 
-fn place_by_id_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    scope: ScopeId<'db>,
-    place_id: ScopedPlaceId,
-    requires_explicit_reexport: RequiresExplicitReExport,
-    considered_definitions: ConsideredDefinitions,
-) -> PlaceAndQualifiers<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
-    place_by_id_with_context(
-        db,
-        &env,
-        scope,
-        place_id,
-        requires_explicit_reexport,
-        considered_definitions,
-        |definition| binding_type(db, definition),
-    )
+crate::types::source_query! {
+    fn PlaceById<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        scope: ScopeId<'db>,
+        place_id: ScopedPlaceId,
+        requires_explicit_reexport: RequiresExplicitReExport,
+        considered_definitions: ConsideredDefinitions,
+    ) -> PlaceAndQualifiers<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(scope));
+        place_by_id_with_context(
+            db,
+            &env,
+            scope,
+            place_id,
+            requires_explicit_reexport,
+            considered_definitions,
+            |definition| binding_type(db, definition),
+        )
+    }
 }
 
 /// Resolve a place with the binding types supplied by its enclosing inference context.
@@ -2546,23 +2546,26 @@ pub(crate) mod implicit_globals {
         db: &'db dyn Db,
         program: Program<'db>,
     ) -> Option<ScopeId<'db>> {
-        SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
-            module_type_body_scope_inner_from_source(db, source_operation, program)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::ModuleTypeBodyScopeInner>(
+            db,
+            (program,),
+        )
     }
 
-    fn module_type_body_scope_inner_from_source<'db>(
-        db: &'db dyn Db,
-        source_operation: &SourceTypeQuery<'db>,
-        program: Program<'db>,
-    ) -> Option<ScopeId<'db>> {
-        let env = source_operation.operations(ProgramEnvironment::from_program(program));
-        let module_scope = core_module_scope(db, &env, KnownModule::Types)?;
-        try_vendored_class_scope(db, module_scope, "ModuleType").or_else(|| {
-            KnownClass::ModuleType
-                .try_to_class_literal(db, &env)
-                .map(|class| class.body_scope(db))
-        })
+    crate::types::source_query! {
+        fn ModuleTypeBodyScopeInner<'db, 'input>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            program: Program<'db>,
+        ) -> Option<ScopeId<'db>> {
+            let env = source_operation.operations(ProgramEnvironment::from_program(program));
+            let module_scope = core_module_scope(db, &env, KnownModule::Types)?;
+            try_vendored_class_scope(db, module_scope, "ModuleType").or_else(|| {
+                KnownClass::ModuleType
+                    .try_to_class_literal(db, &env)
+                    .map(|class| class.body_scope(db))
+            })
+        }
     }
 
     pub(crate) fn module_type_implicit_global_declaration<'db>(
@@ -2610,91 +2613,89 @@ pub(crate) mod implicit_globals {
         file: ProgramFile<'db>,
         name: &str,
     ) -> PlaceAndQualifiers<'db> {
-        SourceTypeQuery::run(db, (file, name), |db, source_operation, (file, name)| {
-            module_type_implicit_global_symbol_from_source(db, source_operation, file, name)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::ModuleTypeImplicitGlobalSymbol>(
+            db,
+            (file, name),
+        )
     }
 
-    fn module_type_implicit_global_symbol_from_source<'db>(
-        db: &'db dyn Db,
-        source_operation: &SourceTypeQuery<'db>,
-        file: ProgramFile<'db>,
-        name: &str,
-    ) -> PlaceAndQualifiers<'db> {
-        let env = source_operation.operations(ProgramEnvironment::from_file(file));
-        match name {
-            // We special-case `__file__` here because we know that for an internal implicit global
-            // lookup in a Python module, it is always a string, even though typeshed says `str |
-            // None`.
-            "__file__" => Place::bound(KnownClass::Str.to_instance(db, &env)).into(),
+    crate::types::source_query! {
+        fn ModuleTypeImplicitGlobalSymbol<'db, 'input>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            file: ProgramFile<'db>,
+            name: &'input str,
+        ) -> PlaceAndQualifiers<'db> {
+            let env = source_operation.operations(ProgramEnvironment::from_file(file));
+            match name {
+                // We special-case `__file__` here because we know that for an internal implicit global
+                // lookup in a Python module, it is always a string, even though typeshed says `str |
+                // None`.
+                "__file__" => Place::bound(KnownClass::Str.to_instance(db, &env)).into(),
 
-            // We special-case `__doc__` because a module with a literal docstring has `__doc__`
-            // set to that string at runtime. We only narrow when a docstring is present: `__doc__`
-            // may be set dynamically, so we fall back to the typeshed's `str | None`.
-            "__doc__" if module_docstring(db, file.python_file(db)).is_some() => {
-                // Docstrings are stripped in `-OO` optimized mode, but here we assume that the
-                // existence of an actual docstring AND the usage of `__doc__` is reason enough to
-                // believe that it will exist at runtime.
-                Place::bound(KnownClass::Str.to_instance(db, &env)).into()
-            }
-
-            "__builtins__" => Place::bound(Type::any()).into(),
-
-            "__debug__" => Place::bound(KnownClass::Bool.to_instance(db, &env)).into(),
-
-            // Created lazily by the warnings machinery; may be absent.
-            // Model as possibly-unbound to avoid false negatives.
-            "__warningregistry__" => Place::Defined(
-                DefinedPlace::new(KnownClass::Dict.to_specialized_instance(
-                    db,
-                    &env,
-                    &[Type::any(), KnownClass::Int.to_instance(db, &env)],
-                ))
-                .with_definedness(Definedness::PossiblyUndefined),
-            )
-            .into(),
-
-            // Marked as possibly-unbound as it is only present in the module namespace
-            // if at least one global symbol is annotated in the module.
-            "__annotate__" if env.python_version(db) >= PythonVersion::PY314 => {
-                let signature = Signature::new(
-                    Parameters::standard([Parameter::positional_only(Some(Name::new_static(
-                        "format",
-                    )))
-                    .with_annotated_type(KnownClass::Int.to_instance(db, &env))]),
-                    KnownClass::Dict.to_specialized_instance(
-                        db,
-                        &env,
-                        &[KnownClass::Str.to_instance(db, &env), Type::any()],
-                    ),
-                );
-                Place::Defined(
-                    DefinedPlace::new(Type::function_like_callable(db, signature))
-                        .with_definedness(Definedness::PossiblyUndefined),
-                )
-                .into()
-            }
-
-            // In general we wouldn't check to see whether a symbol exists on a class before doing the
-            // `.member()` call on the instance type -- we'd just do the `.member`() call on the instance
-            // type, since it has the same end result. The reason to only call `.member()` on `ModuleType`
-            // when absolutely necessary is that this function is used in a very hot path (name resolution
-            // in `infer.rs`). We use less idiomatic (and much more verbose) code here as a micro-optimisation.
-            _ => {
-                if !module_type_symbols(db, &env)
-                    .iter()
-                    .any(|module_type_member| &**module_type_member == name)
-                {
-                    return Place::Undefined.into();
+                // We special-case `__doc__` because a module with a literal docstring has `__doc__`
+                // set to that string at runtime. We only narrow when a docstring is present: `__doc__`
+                // may be set dynamically, so we fall back to the typeshed's `str | None`.
+                "__doc__" if module_docstring(db, file.python_file(db)).is_some() => {
+                    // Docstrings are stripped in `-OO` optimized mode, but here we assume that the
+                    // existence of an actual docstring AND the usage of `__doc__` is reason enough to
+                    // believe that it will exist at runtime.
+                    Place::bound(KnownClass::Str.to_instance(db, &env)).into()
                 }
-                KnownClass::ModuleType
-                    .to_instance(db, &env)
-                    .member_lookup_with_policy(
+
+                "__builtins__" => Place::bound(Type::any()).into(),
+
+                "__debug__" => Place::bound(KnownClass::Bool.to_instance(db, &env)).into(),
+
+                // Created lazily by the warnings machinery; may be absent.
+                // Model as possibly-unbound to avoid false negatives.
+                "__warningregistry__" => Place::Defined(
+                    DefinedPlace::new(KnownClass::Dict.to_specialized_instance(
                         db,
                         &env,
-                        name,
-                        MemberLookupPolicy::NO_GETATTR_LOOKUP,
+                        &[Type::any(), KnownClass::Int.to_instance(db, &env)],
+                    ))
+                    .with_definedness(Definedness::PossiblyUndefined),
+                )
+                .into(),
+
+                // Marked as possibly-unbound as it is only present in the module namespace
+                // if at least one global symbol is annotated in the module.
+                "__annotate__" if env.python_version(db) >= PythonVersion::PY314 => {
+                    let signature = Signature::new(
+                        Parameters::standard([Parameter::positional_only(Some(Name::new_static(
+                            "format",
+                        )))
+                        .with_annotated_type(KnownClass::Int.to_instance(db, &env))]),
+                        KnownClass::Dict.to_specialized_instance(
+                            db,
+                            &env,
+                            &[KnownClass::Str.to_instance(db, &env), Type::any()],
+                        ),
+                    );
+                    Place::Defined(
+                        DefinedPlace::new(Type::function_like_callable(db, signature))
+                            .with_definedness(Definedness::PossiblyUndefined),
                     )
+                    .into()
+                }
+
+                // In general we wouldn't check to see whether a symbol exists on a class before doing the
+                // `.member()` call on the instance type -- we'd just do the `.member`() call on the instance
+                // type, since it has the same end result. The reason to only call `.member()` on `ModuleType`
+                // when absolutely necessary is that this function is used in a very hot path (name resolution
+                // in `infer.rs`). We use less idiomatic (and much more verbose) code here as a micro-optimisation.
+                _ => {
+                    if !module_type_symbols(db, &env)
+                        .iter()
+                        .any(|module_type_member| &**module_type_member == name)
+                    {
+                        return Place::Undefined.into();
+                    }
+                    KnownClass::ModuleType
+                        .to_instance(db, &env)
+                        .member_lookup_with_policy(db, &env, name, MemberLookupPolicy::NO_GETATTR_LOOKUP)
+                }
             }
         }
     }
@@ -2752,23 +2753,23 @@ pub(crate) mod implicit_globals {
         db: &'db dyn Db,
         program: Program<'db>,
     ) -> smallvec::SmallVec<[ast::name::Name; 8]> {
-        SourceTypeQuery::run(db, (program,), |db, source_operation, (program,)| {
-            module_type_symbols_inner_from_source(db, source_operation, program)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::ModuleTypeSymbolsInner>(db, (program,))
     }
 
-    fn module_type_symbols_inner_from_source<'db>(
-        db: &'db dyn Db,
-        source_operation: &SourceTypeQuery<'db>,
-        program: Program<'db>,
-    ) -> smallvec::SmallVec<[ast::name::Name; 8]> {
-        let env = source_operation.operations(ProgramEnvironment::from_program(program));
-        let Some(module_type_scope) = module_type_body_scope(db, &env) else {
-            // The most likely way we get here is if a user specified a `--custom-typeshed-dir`
-            // without a resolvable `ModuleType` class in the `stdlib/types.pyi` stub.
-            return smallvec::SmallVec::default();
-        };
-        module_type_symbols_from_scope(db, module_type_scope)
+    crate::types::source_query! {
+        fn ModuleTypeSymbolsInner<'db, 'input>(
+            db: &'db dyn Db,
+            source_operation: &SourceTypeQuery<'db>,
+            program: Program<'db>,
+        ) -> smallvec::SmallVec<[ast::name::Name; 8]> {
+            let env = source_operation.operations(ProgramEnvironment::from_program(program));
+            let Some(module_type_scope) = module_type_body_scope(db, &env) else {
+                // The most likely way we get here is if a user specified a `--custom-typeshed-dir`
+                // without a resolvable `ModuleType` class in the `stdlib/types.pyi` stub.
+                return smallvec::SmallVec::default();
+            };
+            module_type_symbols_from_scope(db, module_type_scope)
+        }
     }
 
     /// Returns an iterator over all implicit module global symbols and their types.

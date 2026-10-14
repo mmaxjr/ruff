@@ -320,9 +320,7 @@ impl<'db> TupleType<'db> {
     // from `NominalInstanceType::class()`, which is a very hot method.
     #[salsa::tracked(returns(copy), cycle_initial=to_class_type_cycle_initial, heap_size=ruff_memory_usage::heap_size)]
     fn cached_class_type(self, db: &'db dyn Db) -> ClassType<'db> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.cached_class_type_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::TupleTypeCachedClassType>(db, (self,))
     }
 
     fn cached_class_type_from_source(
@@ -395,6 +393,15 @@ impl<'db> TupleType<'db> {
     ) {
         self.tuple(db)
             .find_legacy_typevars_impl(db, env, binding_context, typevars, visitor);
+    }
+}
+crate::types::source_query! {
+    fn TupleTypeCachedClassType<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: TupleType<'db>,
+    ) -> ClassType<'db> {
+        source_self.cached_class_type_from_source(db, source_operation)
     }
 }
 
@@ -953,27 +960,27 @@ fn to_class_type_cycle_initial<'db>(
     id: salsa::Id,
     self_: TupleType<'db>,
 ) -> ClassType<'db> {
-    SourceTypeQuery::run(db, (id, self_), |db, source_operation, (id, self_)| {
-        to_class_type_cycle_initial_from_source(db, source_operation, id, self_)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::ToClassTypeCycleInitial>(db, (id, self_))
 }
 
-fn to_class_type_cycle_initial_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    id: salsa::Id,
-    self_: TupleType<'db>,
-) -> ClassType<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_program(self_.program(db)));
-    self_
-        .class_literal(db)
-        .apply_specialization(db, |generic_context| {
-            if generic_context.variables(db).len() == 1 {
-                generic_context.specialize_tuple(db, Type::divergent(id), self_)
-            } else {
-                generic_context.default_specialization(db, &env, Some(KnownClass::Tuple))
-            }
-        })
+crate::types::source_query! {
+    fn ToClassTypeCycleInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        id: salsa::Id,
+        self_: TupleType<'db>,
+    ) -> ClassType<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(self_.program(db)));
+        self_
+            .class_literal(db)
+            .apply_specialization(db, |generic_context| {
+                if generic_context.variables(db).len() == 1 {
+                    generic_context.specialize_tuple(db, Type::divergent(id), self_)
+                } else {
+                    generic_context.default_specialization(db, &env, Some(KnownClass::Tuple))
+                }
+            })
+    }
 }
 
 /// A tuple spec describes the contents of a tuple type, which might be fixed- or variable-length.

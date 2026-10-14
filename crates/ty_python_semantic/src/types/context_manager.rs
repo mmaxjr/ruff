@@ -149,32 +149,10 @@ impl<'db> Type<'db> {
             manager: Type<'db>,
             is_async: bool,
         ) -> bool {
-            SourceTypeQuery::run(
+            SourceTypeQuery::run::<crate::types::source_queries::TypeCanSuppressExceptionsImpl>(
                 db,
                 (program, manager, is_async),
-                |db, source_operation, (program, manager, is_async)| {
-                    can_suppress_exceptions_impl_from_source(
-                        db,
-                        source_operation,
-                        program,
-                        manager,
-                        is_async,
-                    )
-                },
             )
-        }
-
-        fn can_suppress_exceptions_impl_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            program: Program<'db>,
-            manager: Type<'db>,
-            is_async: bool,
-        ) -> bool {
-            let env = source_operation.operations(ProgramEnvironment::from_program(program));
-            TypeQueryContext::with_root(&env, CanSuppressExceptions { is_async }, |traversal| {
-                traversal.visit(db, manager)
-            })
         }
 
         env.cached_query(
@@ -311,6 +289,20 @@ impl<'db> Type<'db> {
                 mode,
             }),
         }
+    }
+}
+crate::types::source_query! {
+    fn TypeCanSuppressExceptionsImpl<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        manager: Type<'db>,
+        is_async: bool,
+    ) -> bool {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
+        TypeQueryContext::with_root(&env, CanSuppressExceptions { is_async }, |traversal| {
+            traversal.visit(db, manager)
+        })
     }
 }
 

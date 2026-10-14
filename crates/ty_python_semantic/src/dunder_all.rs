@@ -20,7 +20,14 @@ pub(crate) fn dunder_all_names(db: &dyn Db, file: ProgramFile<'_>) -> Option<FxH
         return Some(names.iter().cloned().collect());
     }
 
-    SourceTypeQuery::run(db, file, |db, source, file| {
+    SourceTypeQuery::run::<crate::types::source_queries::DunderAllNames>(db, (file,))
+}
+crate::types::source_query! {
+    fn DunderAllNames<'db, 'input>(
+        db: &'db dyn Db,
+        source: &SourceTypeQuery<'db>,
+        file: ProgramFile<'db>,
+    ) -> Option<FxHashSet<Name>> {
         let env = source.operations(ProgramEnvironment::from_file(file));
         let source_file = file.file(db);
         let _span = tracing::trace_span!("dunder_all_names", file=?source_file.path(db)).entered();
@@ -30,7 +37,7 @@ pub(crate) fn dunder_all_names(db: &dyn Db, file: ProgramFile<'_>) -> Option<FxH
         let mut collector = DunderAllNamesCollector::new(db, &env, file, index);
         collector.visit_body(module.suite());
         collector.into_names()
-    })
+    }
 }
 
 /// A visitor that collects the names in the `__all__` variable of a module.

@@ -101,9 +101,10 @@ impl<'db> StaticClassLiteral<'db> {
         db: &'db dyn Db,
         attribute: ImplicitAttributeName<'db>,
     ) -> ImplicitAttribute<'db> {
-        SourceTypeQuery::run(db, (attribute,), |db, source_operation, (attribute,)| {
-            Self::implicit_attribute_impl_from_source(db, source_operation, attribute)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::StaticClassLiteralImplicitAttributeImpl>(
+            db,
+            (attribute,),
+        )
     }
 
     fn implicit_attribute_impl_from_source(
@@ -335,6 +336,15 @@ impl<'db> StaticClassLiteral<'db> {
         }
     }
 }
+crate::types::source_query! {
+    fn StaticClassLiteralImplicitAttributeImpl<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        attribute: ImplicitAttributeName<'db>,
+    ) -> ImplicitAttribute<'db> {
+        StaticClassLiteral::implicit_attribute_impl_from_source(db, source_operation, attribute)
+    }
+}
 
 /// Attributes assigned by instance methods or classmethods on a single class.
 ///
@@ -342,7 +352,7 @@ impl<'db> StaticClassLiteral<'db> {
 /// directly. Augmented assignments first require an existing instance or class attribute to supply
 /// the value they read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct ImplicitAttribute<'db> {
+pub(crate) struct ImplicitAttribute<'db> {
     /// The attribute established by assignments that do not depend on an existing value.
     pub(super) member: Member<'db>,
     /// Augmented assignments that require an existing instance or class attribute.
@@ -360,7 +370,7 @@ pub(super) struct AugmentedBindings<'db> {
 impl get_size2::GetSize for AugmentedBindings<'_> {}
 
 #[salsa::interned(debug, heap_size=ruff_memory_usage::heap_size)]
-struct ImplicitAttributeName<'db> {
+pub(crate) struct ImplicitAttributeName<'db> {
     #[returns(copy)]
     class_body_scope: ScopeId<'db>,
     #[returns(ref)]
@@ -377,105 +387,108 @@ fn implicit_attribute_binding_type<'db>(
     db: &'db dyn Db,
     definition: Definition<'db>,
 ) -> Option<Type<'db>> {
-    SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-        implicit_attribute_binding_type_from_source(db, source_operation, definition)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::ImplicitAttributeBindingType>(
+        db,
+        (definition,),
+    )
 }
 
-fn implicit_attribute_binding_type_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-) -> Option<Type<'db>> {
-    let program_file = definition.program_file(db);
-    let module = parsed_module(db, program_file.python_file(db)).load(db);
-    let index = semantic_index(db, program_file);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+crate::types::source_query! {
+    fn ImplicitAttributeBindingType<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> Option<Type<'db>> {
+        let program_file = definition.program_file(db);
+        let module = parsed_module(db, program_file.python_file(db)).load(db);
+        let index = semantic_index(db, program_file);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
 
-    match definition.kind(db) {
-        DefinitionKind::AnnotatedAssignment(_) => {
-            // Annotated assignments are handled before inferring ordinary attribute bindings.
-            None
+        match definition.kind(db) {
+            DefinitionKind::AnnotatedAssignment(_) => {
+                // Annotated assignments are handled before inferring ordinary attribute bindings.
+                None
+            }
+            DefinitionKind::Assignment(assignment) => match assignment.unpack() {
+                Some(unpack) => {
+                    // (..., self.name, ...) = <value>
+                    let unpacked = infer_unpack_types(db, unpack);
+                    Some(unpacked.expression_type(assignment.target(&module)))
+                }
+                None => {
+                    // self.name = <value>
+                    Some(infer_expression_type(
+                        db,
+                        index.expression(assignment.value(&module)),
+                        TypeContext::default(),
+                    ))
+                }
+            },
+            DefinitionKind::For(for_stmt) => match for_stmt.target_kind() {
+                TargetKind::Sequence(_, unpack) => {
+                    // for ..., self.name, ... in <iterable>:
+                    let unpacked = infer_unpack_types(db, unpack);
+                    Some(unpacked.expression_type(for_stmt.target(&module)))
+                }
+                TargetKind::Single => {
+                    // for self.name in <iterable>:
+                    let iterable_ty = infer_expression_type(
+                        db,
+                        index.expression(for_stmt.iterable(&module)),
+                        TypeContext::default(),
+                    );
+                    // TODO: Potential diagnostics resulting from the iterable are not reported.
+                    Some(
+                        iterable_ty
+                            .iterate(db, &env)
+                            .homogeneous_element_type(db, &env),
+                    )
+                }
+            },
+            DefinitionKind::WithItem(with_item) => match with_item.target_kind() {
+                TargetKind::Sequence(_, unpack) => {
+                    // with <context_manager> as ..., self.name, ...:
+                    let unpacked = infer_unpack_types(db, unpack);
+                    Some(unpacked.expression_type(with_item.target(&module)))
+                }
+                TargetKind::Single => {
+                    // with <context_manager> as self.name:
+                    let context_ty = infer_expression_type(
+                        db,
+                        index.expression(with_item.context_expr(&module)),
+                        TypeContext::default(),
+                    );
+                    Some(if with_item.is_async() {
+                        context_ty.aenter(db, &env)
+                    } else {
+                        context_ty.enter(db, &env)
+                    })
+                }
+            },
+            DefinitionKind::Comprehension(comprehension) => match comprehension.target_kind() {
+                TargetKind::Sequence(_, unpack) => {
+                    // [... for ..., self.name, ... in <iterable>]
+                    let unpacked = infer_unpack_types(db, unpack);
+                    Some(unpacked.expression_type(comprehension.target(&module)))
+                }
+                TargetKind::Single => {
+                    // [... for self.name in <iterable>]
+                    let iterable_ty = infer_expression_type(
+                        db,
+                        index.expression(comprehension.iterable(&module)),
+                        TypeContext::default(),
+                    );
+                    // TODO: Potential diagnostics resulting from the iterable are not reported.
+                    Some(
+                        iterable_ty
+                            .iterate(db, &env)
+                            .homogeneous_element_type(db, &env),
+                    )
+                }
+            },
+            // Named expressions cannot target attributes, and other definitions do not write one.
+            _ => None,
         }
-        DefinitionKind::Assignment(assignment) => match assignment.unpack() {
-            Some(unpack) => {
-                // (..., self.name, ...) = <value>
-                let unpacked = infer_unpack_types(db, unpack);
-                Some(unpacked.expression_type(assignment.target(&module)))
-            }
-            None => {
-                // self.name = <value>
-                Some(infer_expression_type(
-                    db,
-                    index.expression(assignment.value(&module)),
-                    TypeContext::default(),
-                ))
-            }
-        },
-        DefinitionKind::For(for_stmt) => match for_stmt.target_kind() {
-            TargetKind::Sequence(_, unpack) => {
-                // for ..., self.name, ... in <iterable>:
-                let unpacked = infer_unpack_types(db, unpack);
-                Some(unpacked.expression_type(for_stmt.target(&module)))
-            }
-            TargetKind::Single => {
-                // for self.name in <iterable>:
-                let iterable_ty = infer_expression_type(
-                    db,
-                    index.expression(for_stmt.iterable(&module)),
-                    TypeContext::default(),
-                );
-                // TODO: Potential diagnostics resulting from the iterable are not reported.
-                Some(
-                    iterable_ty
-                        .iterate(db, &env)
-                        .homogeneous_element_type(db, &env),
-                )
-            }
-        },
-        DefinitionKind::WithItem(with_item) => match with_item.target_kind() {
-            TargetKind::Sequence(_, unpack) => {
-                // with <context_manager> as ..., self.name, ...:
-                let unpacked = infer_unpack_types(db, unpack);
-                Some(unpacked.expression_type(with_item.target(&module)))
-            }
-            TargetKind::Single => {
-                // with <context_manager> as self.name:
-                let context_ty = infer_expression_type(
-                    db,
-                    index.expression(with_item.context_expr(&module)),
-                    TypeContext::default(),
-                );
-                Some(if with_item.is_async() {
-                    context_ty.aenter(db, &env)
-                } else {
-                    context_ty.enter(db, &env)
-                })
-            }
-        },
-        DefinitionKind::Comprehension(comprehension) => match comprehension.target_kind() {
-            TargetKind::Sequence(_, unpack) => {
-                // [... for ..., self.name, ... in <iterable>]
-                let unpacked = infer_unpack_types(db, unpack);
-                Some(unpacked.expression_type(comprehension.target(&module)))
-            }
-            TargetKind::Single => {
-                // [... for self.name in <iterable>]
-                let iterable_ty = infer_expression_type(
-                    db,
-                    index.expression(comprehension.iterable(&module)),
-                    TypeContext::default(),
-                );
-                // TODO: Potential diagnostics resulting from the iterable are not reported.
-                Some(
-                    iterable_ty
-                        .iterate(db, &env)
-                        .homogeneous_element_type(db, &env),
-                )
-            }
-        },
-        // Named expressions cannot target attributes, and other definitions do not write one.
-        _ => None,
     }
 }
 
@@ -508,40 +521,32 @@ fn implicit_attribute_cycle_recover<'db>(
     attribute_member: ImplicitAttribute<'db>,
     attribute: ImplicitAttributeName<'db>,
 ) -> ImplicitAttribute<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::ImplicitAttributeCycleRecover>(
         db,
         (cycle, previous, attribute_member, attribute),
-        |db, source_operation, (cycle, previous, attribute_member, attribute)| {
-            implicit_attribute_cycle_recover_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous,
-                attribute_member,
-                attribute,
-            )
-        },
     )
 }
 
-fn implicit_attribute_cycle_recover_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous: &ImplicitAttribute<'db>,
-    attribute_member: ImplicitAttribute<'db>,
-    attribute: ImplicitAttributeName<'db>,
-) -> ImplicitAttribute<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_scope(
-        attribute.class_body_scope(db),
-    ));
-    let inner =
-        attribute_member
-            .member
-            .inner
-            .cycle_normalized(db, &env, previous.member.inner, cycle);
-    ImplicitAttribute {
-        member: Member { inner },
-        ..attribute_member
+crate::types::source_query! {
+    fn ImplicitAttributeCycleRecover<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: &'input ImplicitAttribute<'db>,
+        attribute_member: ImplicitAttribute<'db>,
+        attribute: ImplicitAttributeName<'db>,
+    ) -> ImplicitAttribute<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(
+            attribute.class_body_scope(db),
+        ));
+        let inner =
+            attribute_member
+                .member
+                .inner
+                .cycle_normalized(db, &env, previous.member.inner, cycle);
+        ImplicitAttribute {
+            member: Member { inner },
+            ..attribute_member
+        }
     }
 }

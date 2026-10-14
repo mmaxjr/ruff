@@ -134,104 +134,107 @@ pub fn fixture_bindings_for_parameter<'db>(
     db: &'db dyn Db,
     parameter: Definition<'db>,
 ) -> Box<[FixtureBinding<'db>]> {
-    SourceTypeQuery::run(db, (parameter,), |db, source_operation, (parameter,)| {
-        fixture_bindings_for_parameter_from_source(db, source_operation, parameter)
-    })
+    SourceTypeQuery::run::<crate::types::source_queries::FixtureBindingsForParameter>(
+        db,
+        (parameter,),
+    )
 }
 
-fn fixture_bindings_for_parameter_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    parameter: Definition<'db>,
-) -> Box<[FixtureBinding<'db>]> {
-    let env = &source_operation.operations(ProgramEnvironment::from_definition(parameter));
-    let Some(request) = fixture_request_for_parameter(db, env, parameter) else {
-        return Box::default();
-    };
+crate::types::source_query! {
+    fn FixtureBindingsForParameter<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        parameter: Definition<'db>,
+    ) -> Box<[FixtureBinding<'db>]> {
+        let env = &source_operation.operations(ProgramEnvironment::from_definition(parameter));
+        let Some(request) = fixture_request_for_parameter(db, env, parameter) else {
+            return Box::default();
+        };
 
-    // pytest creates the special `request` fixture on demand, so there is no decorated fixture
-    // declaration to return as a `FixtureBinding`.
-    // https://docs.pytest.org/en/stable/reference/reference.html#request
-    if request.name == "request" {
-        return Box::default();
-    }
+        // pytest creates the special `request` fixture on demand, so there is no decorated fixture
+        // declaration to return as a `FixtureBinding`.
+        // https://docs.pytest.org/en/stable/reference/reference.html#request
+        if request.name == "request" {
+            return Box::default();
+        }
 
-    // First, resolve bindings from the containing class scope, if any.
-    let containing_scope = request.function_definition.scope(db);
-    let class_scope = containing_scope
-        .node(db)
-        .as_class()
-        .map(|_| containing_scope.file_scope_id(db));
-    if let Some(class_scope) = class_scope {
-        let file = parameter.program_file(db);
-        let index = semantic_index(db, file);
-        for class_ref in std::iter::successors(Some(class_scope), |scope| {
-            non_type_parameter_parent(index, *scope)
-        })
-        .map_while(|scope| index.scope(scope).node().as_class())
-        {
-            let class_definition = index.expect_single_definition(class_ref);
-            let Some(class) = original_class_type(db, class_definition) else {
-                return Box::default();
-            };
-            let bindings =
-                bindings_in_search_scope(db, env, &request, FixtureSearchScope::Class(class));
+        // First, resolve bindings from the containing class scope, if any.
+        let containing_scope = request.function_definition.scope(db);
+        let class_scope = containing_scope
+            .node(db)
+            .as_class()
+            .map(|_| containing_scope.file_scope_id(db));
+        if let Some(class_scope) = class_scope {
+            let file = parameter.program_file(db);
+            let index = semantic_index(db, file);
+            for class_ref in std::iter::successors(Some(class_scope), |scope| {
+                non_type_parameter_parent(index, *scope)
+            })
+            .map_while(|scope| index.scope(scope).node().as_class())
+            {
+                let class_definition = index.expect_single_definition(class_ref);
+                let Some(class) = original_class_type(db, class_definition) else {
+                    return Box::default();
+                };
+                let bindings =
+                    bindings_in_search_scope(db, env, &request, FixtureSearchScope::Class(class));
+                if !bindings.is_empty() {
+                    return bindings;
+                }
+            }
+        }
+
+        // Second, resolve bindings from the module scope.
+        let request_file = parameter.program_file(db);
+        let bindings = bindings_in_search_scope(
+            db,
+            env,
+            &request,
+            FixtureSearchScope::Scope(global_scope(db, request_file)),
+        );
+        if !bindings.is_empty() {
+            return bindings;
+        }
+
+        // Third, resolve bindings from the conftest hierarchy.
+        for conftest in conftest_files(db, request_file) {
+            let bindings = bindings_in_search_scope(
+                db,
+                env,
+                &request,
+                FixtureSearchScope::Scope(global_scope(db, conftest)),
+            );
             if !bindings.is_empty() {
                 return bindings;
             }
         }
-    }
 
-    // Second, resolve bindings from the module scope.
-    let request_file = parameter.program_file(db);
-    let bindings = bindings_in_search_scope(
-        db,
-        env,
-        &request,
-        FixtureSearchScope::Scope(global_scope(db, request_file)),
-    );
-    if !bindings.is_empty() {
-        return bindings;
-    }
-
-    // Third, resolve bindings from the conftest hierarchy.
-    for conftest in conftest_files(db, request_file) {
-        let bindings = bindings_in_search_scope(
-            db,
-            env,
-            &request,
-            FixtureSearchScope::Scope(global_scope(db, conftest)),
-        );
-        if !bindings.is_empty() {
-            return bindings;
+        // Finally, search installed core plugins in reverse registration order. The legacy
+        // temporary-directory plugin is registered after the static core plugins, so it comes first.
+        if let Some(plugin) = pytest_legacy_tmpdir_plugin(db, request_file.program(db)) {
+            let bindings =
+                bindings_in_search_scope(db, env, &request, FixtureSearchScope::Class(plugin));
+            if !bindings.is_empty() {
+                return bindings;
+            }
         }
-    }
-
-    // Finally, search installed core plugins in reverse registration order. The legacy
-    // temporary-directory plugin is registered after the static core plugins, so it comes first.
-    if let Some(plugin) = pytest_legacy_tmpdir_plugin(db, request_file.program(db)) {
-        let bindings =
-            bindings_in_search_scope(db, env, &request, FixtureSearchScope::Class(plugin));
-        if !bindings.is_empty() {
-            return bindings;
+        for plugin in pytest_global_plugin_files(db, request_file.program(db))
+            .iter()
+            .rev()
+        {
+            let bindings = bindings_in_search_scope(
+                db,
+                env,
+                &request,
+                FixtureSearchScope::Scope(global_scope(db, *plugin)),
+            );
+            if !bindings.is_empty() {
+                return bindings;
+            }
         }
-    }
-    for plugin in pytest_global_plugin_files(db, request_file.program(db))
-        .iter()
-        .rev()
-    {
-        let bindings = bindings_in_search_scope(
-            db,
-            env,
-            &request,
-            FixtureSearchScope::Scope(global_scope(db, *plugin)),
-        );
-        if !bindings.is_empty() {
-            return bindings;
-        }
-    }
 
-    Box::default()
+        Box::default()
+    }
 }
 
 /// A pytest fixture request and the fixture selected by static fixture lookup.
@@ -1456,47 +1459,39 @@ fn is_known_class_instance<'db>(
     class_name: &str,
     modules: &[KnownModule],
 ) -> bool {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::IsKnownClassInstance>(
         db,
         (definition, ty, class_name, modules),
-        |db, source_operation, (definition, ty, class_name, modules)| {
-            is_known_class_instance_from_source(
-                db,
-                source_operation,
-                definition,
-                ty,
-                class_name,
-                modules,
-            )
-        },
     )
 }
 
-fn is_known_class_instance_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-    ty: Option<Type<'db>>,
-    class_name: &str,
-    modules: &[KnownModule],
-) -> bool {
-    let Some(Type::NominalInstance(instance)) = ty else {
-        return false;
-    };
-    let environment =
-        source_operation.operations(ProgramEnvironment::from_file(definition.program_file(db)));
-    let Some(class) = instance
-        .class(db, &environment)
-        .class_literal(db)
-        .as_static()
-    else {
-        return false;
-    };
+crate::types::source_query! {
+    fn IsKnownClassInstance<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+        ty: Option<Type<'db>>,
+        class_name: &'input str,
+        modules: &'input [KnownModule],
+    ) -> bool {
+        let Some(Type::NominalInstance(instance)) = ty else {
+            return false;
+        };
+        let environment =
+            source_operation.operations(ProgramEnvironment::from_file(definition.program_file(db)));
+        let Some(class) = instance
+            .class(db, &environment)
+            .class_literal(db)
+            .as_static()
+        else {
+            return false;
+        };
 
-    class.name(db) == class_name
-        && file_to_module(db, class.program_file(db).resolver_file(db))
-            .and_then(|module| module.known(db))
-            .is_some_and(|module| modules.contains(&module))
+        class.name(db) == class_name
+            && file_to_module(db, class.program_file(db).resolver_file(db))
+                .and_then(|module| module.known(db))
+                .is_some_and(|module| modules.contains(&module))
+    }
 }
 
 /// Returns how `parameter_name` is configured by the `indirect` argument.
@@ -1601,49 +1596,43 @@ fn static_string_sequence_from_expression<'db>(
     definition: Definition<'db>,
     expression: &ast::Expr,
 ) -> Option<Vec<String>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::StaticStringSequenceFromExpression>(
         db,
         (definition, expression),
-        |db, source_operation, (definition, expression)| {
-            static_string_sequence_from_expression_from_source(
-                db,
-                source_operation,
-                definition,
-                expression,
-            )
-        },
     )
 }
 
-fn static_string_sequence_from_expression_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    definition: Definition<'db>,
-    expression: &ast::Expr,
-) -> Option<Vec<String>> {
-    if let ast::Expr::BinOp(binary) = expression
-        && binary.op == ast::Operator::Add
-    {
-        let mut strings = static_string_sequence_from_expression(db, definition, &binary.left)?;
-        strings.extend(static_string_sequence_from_expression(
-            db,
-            definition,
-            &binary.right,
-        )?);
-        return Some(strings);
-    }
+crate::types::source_query! {
+    fn StaticStringSequenceFromExpression<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+        expression: &'input ast::Expr,
+    ) -> Option<Vec<String>> {
+        if let ast::Expr::BinOp(binary) = expression
+            && binary.op == ast::Operator::Add
+        {
+            let mut strings = static_string_sequence_from_expression(db, definition, &binary.left)?;
+            strings.extend(static_string_sequence_from_expression(
+                db,
+                definition,
+                &binary.right,
+            )?);
+            return Some(strings);
+        }
 
-    let environment = source_operation.operations(ProgramEnvironment::from_definition(definition));
-    extract_fixed_length_iterable_element_types(db, &environment, expression, |element| {
-        definition_expression_type(db, definition, element)
-    })?
-    .iter()
-    .map(|element| {
-        element
-            .as_string_literal()
-            .map(|string| string.value(db).to_owned())
-    })
-    .collect()
+        let environment = source_operation.operations(ProgramEnvironment::from_definition(definition));
+        extract_fixed_length_iterable_element_types(db, &environment, expression, |element| {
+            definition_expression_type(db, definition, element)
+        })?
+        .iter()
+        .map(|element| {
+            element
+                .as_string_literal()
+                .map(|string| string.value(db).to_owned())
+        })
+        .collect()
+    }
 }
 
 /// Returns the sole definition bound to a module symbol at the end of its scope.

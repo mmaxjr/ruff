@@ -156,7 +156,7 @@ bitflags::bitflags! {
     /// This combines properties derived from the MRO into the existing class-classification
     /// query, avoiding a separate cached query for each property.
     #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
-    pub(super) struct ClassInstanceFlags: u8 {
+    pub(crate) struct ClassInstanceFlags: u8 {
         /// The class is, or inherits from, a `TypedDict` specification.
         const TYPED_DICT = 1 << 0;
         /// The class directly or indirectly inherits from an explicit `Any` base.
@@ -217,69 +217,9 @@ impl<'db> CodeGeneratorKind<'db> {
             db: &'db dyn Db,
             class: StaticClassLiteral<'db>,
         ) -> Option<CodeGeneratorKind<'db>> {
-            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-                code_generator_of_static_class_from_source(db, source_operation, class)
-            })
-        }
-
-        fn code_generator_of_static_class_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            class: StaticClassLiteral<'db>,
-        ) -> Option<CodeGeneratorKind<'db>> {
-            let env =
-                source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
-            // If a class is directly decorated as a dataclass, it's a dataclass.
-            // If a class' metaclass is a dataclass transformer, it's a dataclass.
-            // If a class inherits from a base class that is a dataclass
-            // transformer, it's a dataclass (unless it is a subclass of `type`,
-            // in which case we assume the subclass is itself also meant for use
-            // as a metaclass dataclass transformer, not itself supposed to be a
-            // dataclass.)
-            if class.dataclass_params(db).is_some() {
-                Some(CodeGeneratorKind::DataclassLike(None))
-            } else if let Ok((_, Some(info))) = class.try_metaclass(db) {
-                Some(CodeGeneratorKind::from_dataclass_transformer(
-                    db,
-                    &env,
-                    class,
-                    info.params,
-                ))
-            } else if KnownClass::Type
-                .try_to_class_literal(db, &env)
-                .is_none_or(|type_class| {
-                    !class.is_subclass_of(
-                        db,
-                        &env,
-                        None,
-                        ClassType::NonGeneric(ClassLiteral::Static(type_class)),
-                    )
-                })
-                && let Some(transformer_params) =
-                    class.iter_mro(db, &env).skip(1).find_map(|base| {
-                        base.into_class().and_then(|class| {
-                            class
-                                .static_class_literal(db)
-                                .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
-                        })
-                    })
-            {
-                Some(CodeGeneratorKind::from_dataclass_transformer(
-                    db,
-                    &env,
-                    class,
-                    transformer_params,
-                ))
-            } else if class
-                .explicit_bases(db)
-                .contains(&Type::SpecialForm(SpecialFormType::NamedTuple))
-            {
-                Some(CodeGeneratorKind::NamedTuple)
-            } else if class.is_typed_dict(db) {
-                Some(CodeGeneratorKind::TypedDict)
-            } else {
-                None
-            }
+            SourceTypeQuery::run::<
+                crate::types::source_queries::CodeGeneratorKindCodeGeneratorOfStaticClass,
+            >(db, (class,))
         }
 
         code_generator_of_static_class(db, class)
@@ -312,31 +252,9 @@ impl<'db> CodeGeneratorKind<'db> {
             db: &'db dyn Db,
             class: DynamicClassLiteral<'db>,
         ) -> Option<CodeGeneratorKind<'db>> {
-            SourceTypeQuery::run(db, (class,), |db, source_operation, (class,)| {
-                code_generator_of_dynamic_class_from_source(db, source_operation, class)
-            })
-        }
-
-        fn code_generator_of_dynamic_class_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            class: DynamicClassLiteral<'db>,
-        ) -> Option<CodeGeneratorKind<'db>> {
-            let env = source_operation.operations(ProgramEnvironment::from_scope(class.scope(db)));
-            // Check if the dynamic class was passed to `dataclass()` as a function.
-            if class.dataclass_params(db).is_some() {
-                return Some(CodeGeneratorKind::DataclassLike(None));
-            }
-
-            // Dynamic classes can also inherit from classes with dataclass_transform.
-            class.iter_mro(db, &env).skip(1).find_map(|base| {
-                base.into_class().and_then(|class| {
-                    class
-                        .static_class_literal(db)
-                        .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
-                        .map(|params| CodeGeneratorKind::DataclassLike(Some(params)))
-                })
-            })
+            SourceTypeQuery::run::<
+                crate::types::source_queries::CodeGeneratorKindCodeGeneratorOfDynamicClass,
+            >(db, (class,))
         }
 
         code_generator_of_dynamic_class(db, class)
@@ -432,6 +350,89 @@ impl<'db> CodeGeneratorKind<'db> {
         match self {
             Self::Pydantic(metadata) => Some(metadata),
             Self::DataclassLike(_) | Self::NamedTuple | Self::TypedDict => None,
+        }
+    }
+}
+crate::types::source_query! {
+    fn CodeGeneratorKindCodeGeneratorOfDynamicClass<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: DynamicClassLiteral<'db>,
+    ) -> Option<CodeGeneratorKind<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(class.scope(db)));
+        // Check if the dynamic class was passed to `dataclass()` as a function.
+        if class.dataclass_params(db).is_some() {
+            return Some(CodeGeneratorKind::DataclassLike(None));
+        }
+
+        // Dynamic classes can also inherit from classes with dataclass_transform.
+        class.iter_mro(db, &env).skip(1).find_map(|base| {
+            base.into_class().and_then(|class| {
+                class
+                    .static_class_literal(db)
+                    .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
+                    .map(|params| CodeGeneratorKind::DataclassLike(Some(params)))
+            })
+        })
+    }
+}
+
+crate::types::source_query! {
+    fn CodeGeneratorKindCodeGeneratorOfStaticClass<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        class: StaticClassLiteral<'db>,
+    ) -> Option<CodeGeneratorKind<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_scope(class.body_scope(db)));
+        // If a class is directly decorated as a dataclass, it's a dataclass.
+        // If a class' metaclass is a dataclass transformer, it's a dataclass.
+        // If a class inherits from a base class that is a dataclass
+        // transformer, it's a dataclass (unless it is a subclass of `type`,
+        // in which case we assume the subclass is itself also meant for use
+        // as a metaclass dataclass transformer, not itself supposed to be a
+        // dataclass.)
+        if class.dataclass_params(db).is_some() {
+            Some(CodeGeneratorKind::DataclassLike(None))
+        } else if let Ok((_, Some(info))) = class.try_metaclass(db) {
+            Some(CodeGeneratorKind::from_dataclass_transformer(
+                db,
+                &env,
+                class,
+                info.params,
+            ))
+        } else if KnownClass::Type
+            .try_to_class_literal(db, &env)
+            .is_none_or(|type_class| {
+                !class.is_subclass_of(
+                    db,
+                    &env,
+                    None,
+                    ClassType::NonGeneric(ClassLiteral::Static(type_class)),
+                )
+            })
+            && let Some(transformer_params) = class.iter_mro(db, &env).skip(1).find_map(|base| {
+                base.into_class().and_then(|class| {
+                    class
+                        .static_class_literal(db)
+                        .and_then(|(lit, _)| lit.dataclass_transformer_params(db))
+                })
+            })
+        {
+            Some(CodeGeneratorKind::from_dataclass_transformer(
+                db,
+                &env,
+                class,
+                transformer_params,
+            ))
+        } else if class
+            .explicit_bases(db)
+            .contains(&Type::SpecialForm(SpecialFormType::NamedTuple))
+        {
+            Some(CodeGeneratorKind::NamedTuple)
+        } else if class.is_typed_dict(db) {
+            Some(CodeGeneratorKind::TypedDict)
+        } else {
+            None
         }
     }
 }
@@ -592,36 +593,14 @@ impl<'db> GenericAlias<'db> {
     ) -> Result<Cow<'db, Mro<'db>>, Cow<'db, StaticMroError<'db>>> {
         #[salsa::tracked(
             returns(as_ref),
-            cycle_initial=|db, _, alias: GenericAlias<'db>| SourceTypeQuery::run(db, (alias,), |db, source_operation, (alias,)| {
-                let origin = alias.origin(db);
-                let env = source_operation.operations(ProgramEnvironment::from_scope(origin.body_scope(db)));
-                Err(Box::new(StaticMroError::cycle(
-                    db,
-                    &env,
-                    origin.apply_optional_specialization(db, &env, Some(alias.specialization(db))),
-                )))
-            }),
+            cycle_initial=|db, _, alias: GenericAlias<'db>| SourceTypeQuery::run::<crate::types::source_queries::GenericAliasCachedInitial>(db, (alias,)),
             heap_size=ruff_memory_usage::heap_size
         )]
         fn cached<'db>(
             db: &'db dyn Db,
             alias: GenericAlias<'db>,
         ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
-            SourceTypeQuery::run(db, (alias,), |db, source_operation, (alias,)| {
-                cached_from_source(db, source_operation, alias)
-            })
-        }
-
-        fn cached_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            alias: GenericAlias<'db>,
-        ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
-            let origin = alias.origin(db);
-            tracing::trace!("GenericAlias::try_mro: {}", origin.name(db));
-            let env =
-                source_operation.operations(ProgramEnvironment::from_scope(origin.body_scope(db)));
-            Mro::of_static_class(db, &env, origin, Some(alias.specialization(db))).map_err(Box::new)
+            SourceTypeQuery::run::<crate::types::source_queries::GenericAliasTryMro>(db, (alias,))
         }
 
         let env = env.in_environment(ProgramEnvironment::from_scope(
@@ -672,12 +651,9 @@ impl<'db> GenericAlias<'db> {
         db: &'db dyn Db,
         typevar: BoundTypeVarIdentity<'db>,
     ) -> VarianceTerm<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::GenericAliasVarianceEquation>(
             db,
             (self, typevar),
-            |db, source_operation, (source_self, typevar)| {
-                source_self.variance_equation_from_source(db, source_operation, typevar)
-            },
         )
     }
 
@@ -721,6 +697,45 @@ impl<'db> GenericAlias<'db> {
                 })
             });
         VarianceTerm::join(db, variances)
+    }
+}
+crate::types::source_query! {
+    fn GenericAliasCachedInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        alias: GenericAlias<'db>,
+    ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
+        let origin = alias.origin(db);
+        let env = source_operation.operations(ProgramEnvironment::from_scope(origin.body_scope(db)));
+        Err(Box::new(StaticMroError::cycle(
+            db,
+            &env,
+            origin.apply_optional_specialization(db, &env, Some(alias.specialization(db))),
+        )))
+    }
+}
+
+crate::types::source_query! {
+    fn GenericAliasVarianceEquation<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: GenericAlias<'db>,
+        typevar: BoundTypeVarIdentity<'db>,
+    ) -> VarianceTerm<'db> {
+        source_self.variance_equation_from_source(db, source_operation, typevar)
+    }
+}
+
+crate::types::source_query! {
+    fn GenericAliasTryMro<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        alias: GenericAlias<'db>,
+    ) -> Result<Mro<'db>, Box<StaticMroError<'db>>> {
+        let origin = alias.origin(db);
+        tracing::trace!("GenericAlias::try_mro: {}", origin.name(db));
+        let env = source_operation.operations(ProgramEnvironment::from_scope(origin.body_scope(db)));
+        Mro::of_static_class(db, &env, origin, Some(alias.specialization(db))).map_err(Box::new)
     }
 }
 
@@ -1265,9 +1280,7 @@ impl<'db> ClassLiteral<'db> {
     /// Note that when this is a namedtuple this always returns a sequence
     /// of length one corresponding to `tuple`.
     pub(crate) fn explicit_bases(self, db: &'db dyn Db) -> Box<[Type<'db>]> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.explicit_bases_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::ClassLiteralExplicitBases>(db, (self,))
     }
 
     fn explicit_bases_from_source(
@@ -1289,6 +1302,15 @@ impl<'db> ClassLiteral<'db> {
             }
             Self::DynamicEnum(enum_lit) => enum_lit.explicit_bases(db),
         }
+    }
+}
+crate::types::source_query! {
+    fn ClassLiteralExplicitBases<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: ClassLiteral<'db>,
+    ) -> Box<[Type<'db>]> {
+        source_self.explicit_bases_from_source(db, source_operation)
     }
 }
 
@@ -1798,9 +1820,10 @@ impl<'db> ClassType<'db> {
         heap_size=ruff_memory_usage::heap_size
     )]
     pub(super) fn nearest_disjoint_base(self, db: &'db dyn Db) -> Option<DisjointBase<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.nearest_disjoint_base_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::ClassTypeNearestDisjointBase>(
+            db,
+            (self,),
+        )
     }
 
     fn nearest_disjoint_base_from_source(
@@ -2602,12 +2625,9 @@ impl<'db> ClassType<'db> {
         db: &'db dyn Db,
         receiver: Type<'db>,
     ) -> CallableTypes<'db> {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::ClassTypeCachedConstructorCallables>(
             db,
             (self, receiver),
-            |db, source_operation, (source_self, receiver)| {
-                source_self.cached_constructor_callables_from_source(db, source_operation, receiver)
-            },
         )
     }
 
@@ -2881,6 +2901,26 @@ impl<'db> ClassType<'db> {
     /// For dynamic classes, this is the `type()` call expression.
     pub(super) fn definition_span(self, db: &'db dyn Db) -> Span {
         self.class_literal(db).header_span(db)
+    }
+}
+crate::types::source_query! {
+    fn ClassTypeCachedConstructorCallables<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: ClassType<'db>,
+        receiver: Type<'db>,
+    ) -> CallableTypes<'db> {
+        source_self.cached_constructor_callables_from_source(db, source_operation, receiver)
+    }
+}
+
+crate::types::source_query! {
+    fn ClassTypeNearestDisjointBase<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: ClassType<'db>,
+    ) -> Option<DisjointBase<'db>> {
+        source_self.nearest_disjoint_base_from_source(db, source_operation)
     }
 }
 
@@ -3768,7 +3808,7 @@ impl std::fmt::Display for QualifiedClassName<'_> {
 ///
 /// [PEP 800]: https://peps.python.org/pep-0800/
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct DisjointBase<'db> {
+pub(crate) struct DisjointBase<'db> {
     pub(super) class: ClassLiteral<'db>,
     pub(super) kind: DisjointBaseKind,
 }
@@ -3853,7 +3893,7 @@ pub(super) fn metaclass_instance_type<'db>(
 /// Outside those stubs, a `Protocol` base selects its actual `_ProtocolMeta` metaclass, even in a
 /// stub file. It participates in metaclass selection and constrains subclasses in the usual way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) enum ClassMetaclass<'db> {
+pub(crate) enum ClassMetaclass<'db> {
     Selected(Type<'db>),
     /// A lookup-only fallback originating in typeshed. Inheritance preserves this provenance.
     ProtocolFallback,
@@ -3893,7 +3933,7 @@ impl<'db> ClassMetaclass<'db> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct MetaclassError<'db> {
+pub(crate) struct MetaclassError<'db> {
     kind: MetaclassErrorKind<'db>,
 }
 

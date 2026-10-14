@@ -204,38 +204,9 @@ impl<'db> DynamicClassLiteral<'db> {
             db: &'db dyn Db,
             definition: Definition<'db>,
         ) -> Box<[Type<'db>]> {
-            SourceTypeQuery::run(db, (definition,), |db, source_operation, (definition,)| {
-                deferred_explicit_bases_from_source(db, source_operation, definition)
-            })
-        }
-
-        fn deferred_explicit_bases_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            definition: Definition<'db>,
-        ) -> Box<[Type<'db>]> {
-            let program_file = definition.program_file(db);
-            let python_file = program_file.python_file(db);
-            let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-            let module = parsed_module(db, python_file).load(db);
-
-            let value = definition
-                .kind(db)
-                .value(&module)
-                .expect("DynamicClassAnchor::Definition should only be used for assignments");
-            let call_expr = value
-                .as_call_expr()
-                .expect("Definition value should be a call expression");
-
-            let Some(bases_arg) = dynamic_class_bases_argument(&call_expr.arguments) else {
-                return Box::default();
-            };
-
-            // Use `definition_expression_type` for deferred inference support.
-            extract_fixed_length_iterable_element_types(db, &env, bases_arg, |expr| {
-                definition_expression_type(db, definition, expr)
-            })
-            .unwrap_or_else(|| Box::from([Type::unknown()]))
+            SourceTypeQuery::run::<
+                crate::types::source_queries::DynamicClassLiteralDeferredExplicitBases,
+            >(db, (definition,))
         }
 
         match self.anchor(db) {
@@ -300,9 +271,10 @@ impl<'db> DynamicClassLiteral<'db> {
         self,
         db: &'db dyn Db,
     ) -> Result<ClassMetaclass<'db>, DynamicMetaclassConflict<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.try_metaclass_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::DynamicClassLiteralTryMetaclass>(
+            db,
+            (self,),
+        )
     }
 
     fn try_metaclass_from_source(
@@ -500,18 +472,11 @@ impl<'db> DynamicClassLiteral<'db> {
     /// an error (duplicate bases or C3 linearization failure).
     #[salsa::tracked(
         returns(ref),
-        cycle_initial=|db, _, self_: DynamicClassLiteral<'db>| SourceTypeQuery::run(db, (self_,), |db, source_operation, (self_,)| {
-            Ok(Mro::from([
-                ClassBase::Class(ClassType::NonGeneric(ClassLiteral::Dynamic(self_))),
-                ClassBase::object(db, &source_operation.operations(ProgramEnvironment::from_scope(self_.scope(db)))),
-            ]))
-        }),
+        cycle_initial=|db, _, self_: DynamicClassLiteral<'db>| SourceTypeQuery::run::<crate::types::source_queries::DynamicClassLiteralTryMroInitial>(db, (self_,)),
         heap_size=ruff_memory_usage::heap_size
     )]
     pub(crate) fn try_mro(self, db: &'db dyn Db) -> Result<Mro<'db>, DynamicMroError<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.try_mro_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::DynamicClassLiteralTryMro>(db, (self,))
     }
 
     fn try_mro_from_source(
@@ -589,6 +554,72 @@ impl<'db> DynamicClassLiteral<'db> {
             self.has_dynamic_namespace(db),
             dataclass_params,
         )
+    }
+}
+crate::types::source_query! {
+    fn DynamicClassLiteralTryMroInitial<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        self_: DynamicClassLiteral<'db>,
+    ) -> Result<Mro<'db>, DynamicMroError<'db>> {
+        Ok(Mro::from([
+            ClassBase::Class(ClassType::NonGeneric(ClassLiteral::Dynamic(self_))),
+            ClassBase::object(
+                db,
+                &source_operation.operations(ProgramEnvironment::from_scope(self_.scope(db))),
+            ),
+        ]))
+    }
+}
+
+crate::types::source_query! {
+    fn DynamicClassLiteralTryMro<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: DynamicClassLiteral<'db>,
+    ) -> Result<Mro<'db>, DynamicMroError<'db>> {
+        source_self.try_mro_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn DynamicClassLiteralTryMetaclass<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: DynamicClassLiteral<'db>,
+    ) -> Result<ClassMetaclass<'db>, DynamicMetaclassConflict<'db>> {
+        source_self.try_metaclass_from_source(db, source_operation)
+    }
+}
+
+crate::types::source_query! {
+    fn DynamicClassLiteralDeferredExplicitBases<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        definition: Definition<'db>,
+    ) -> Box<[Type<'db>]> {
+        let program_file = definition.program_file(db);
+        let python_file = program_file.python_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        let module = parsed_module(db, python_file).load(db);
+
+        let value = definition
+            .kind(db)
+            .value(&module)
+            .expect("DynamicClassAnchor::Definition should only be used for assignments");
+        let call_expr = value
+            .as_call_expr()
+            .expect("Definition value should be a call expression");
+
+        let Some(bases_arg) = dynamic_class_bases_argument(&call_expr.arguments) else {
+            return Box::default();
+        };
+
+        // Use `definition_expression_type` for deferred inference support.
+        extract_fixed_length_iterable_element_types(db, &env, bases_arg, |expr| {
+            definition_expression_type(db, definition, expr)
+        })
+        .unwrap_or_else(|| Box::from([Type::unknown()]))
     }
 }
 

@@ -528,9 +528,10 @@ impl<'db> TypeVarInstance<'db> {
         heap_size=ruff_memory_usage::heap_size
     )]
     fn lazy_constraints_unchecked(self, db: &'db dyn Db) -> Option<TypeVarConstraints<'db>> {
-        SourceTypeQuery::run(db, (self,), |db, source_operation, (source_self,)| {
-            source_self.lazy_constraints_unchecked_from_source(db, source_operation)
-        })
+        SourceTypeQuery::run::<crate::types::source_queries::TypeVarInstanceLazyConstraintsUnchecked>(
+            db,
+            (self,),
+        )
     }
 
     fn lazy_constraints_unchecked_from_source(
@@ -729,6 +730,15 @@ impl<'db> TypeVarInstance<'db> {
             .child_scopes(typevar_definition.file_scope(db))
             .next()?;
         GenericContext::of_node(db, env, child.node(), index)?.binds_typevar(db, self)
+    }
+}
+crate::types::source_query! {
+    fn TypeVarInstanceLazyConstraintsUnchecked<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: TypeVarInstance<'db>,
+    ) -> Option<TypeVarConstraints<'db>> {
+        source_self.lazy_constraints_unchecked_from_source(db, source_operation)
     }
 }
 
@@ -1212,12 +1222,9 @@ impl<'db> BoundTypeVarInstance<'db> {
         db: &'db dyn Db,
         polarity: TypeVarVariance,
     ) -> TypeVarVariance {
-        SourceTypeQuery::run(
+        SourceTypeQuery::run::<crate::types::source_queries::BoundTypeVarInstanceVarianceWithPolarity>(
             db,
             (self, polarity),
-            |db, source_operation, (source_self, polarity)| {
-                source_self.variance_with_polarity_from_source(db, source_operation, polarity)
-            },
         )
     }
 
@@ -1406,49 +1413,9 @@ impl<'db> BoundTypeVarInstance<'db> {
             db: &'db dyn Db,
             bound_typevar: BoundTypeVarInstance<'db>,
         ) -> Option<Type<'db>> {
-            SourceTypeQuery::run(
-                db,
-                (bound_typevar,),
-                |db, source_operation, (bound_typevar,)| {
-                    top_materialized_upper_bound_inner_from_source(
-                        db,
-                        source_operation,
-                        bound_typevar,
-                    )
-                },
-            )
-        }
-
-        fn top_materialized_upper_bound_inner_from_source<'db>(
-            db: &'db dyn Db,
-            source_operation: &SourceTypeQuery<'db>,
-            bound_typevar: BoundTypeVarInstance<'db>,
-        ) -> Option<Type<'db>> {
-            let env = source_operation.operations(ProgramEnvironment::from_program(
-                bound_typevar.binding_context(db).program(db),
-            ));
-
-            compute(db, &env, bound_typevar)
-        }
-
-        fn compute<'db>(
-            db: &'db dyn Db,
-            env: &TypeOperations<'db>,
-            bound_typevar: BoundTypeVarInstance<'db>,
-        ) -> Option<Type<'db>> {
-            env.context()
-                .state()
-                .materialized_bounds
-                .visit(env, &bound_typevar, || {
-                    bound_typevar.typevar(db).bound_or_constraints(db, env).map(
-                        |bound_or_constraints| {
-                            bound_or_constraints
-                                .as_type(db, env)
-                                .top_materialization(db, env)
-                        },
-                    )
-                })
-                .flatten()
+            SourceTypeQuery::run::<
+                crate::types::source_queries::BoundTypeVarInstanceTopMaterializedUpperBoundInner,
+            >(db, (bound_typevar,))
         }
 
         let env = env.in_environment(ProgramEnvironment::from_program(
@@ -1456,8 +1423,53 @@ impl<'db> BoundTypeVarInstance<'db> {
         ));
         env.cached_query(
             || top_materialized_upper_bound_inner(db, self),
-            || compute(db, &env, self),
+            || top_materialized_upper_bound_in_operation(db, &env, self),
         )
+    }
+}
+crate::types::source_query! {
+    fn BoundTypeVarInstanceVarianceWithPolarity<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        source_self: BoundTypeVarInstance<'db>,
+        polarity: TypeVarVariance,
+    ) -> TypeVarVariance {
+        source_self.variance_with_polarity_from_source(db, source_operation, polarity)
+    }
+}
+
+fn top_materialized_upper_bound_in_operation<'db>(
+    db: &'db dyn Db,
+    env: &TypeOperations<'db>,
+    bound_typevar: BoundTypeVarInstance<'db>,
+) -> Option<Type<'db>> {
+    env.context()
+        .state()
+        .materialized_bounds
+        .visit(env, &bound_typevar, || {
+            bound_typevar
+                .typevar(db)
+                .bound_or_constraints(db, env)
+                .map(|bound_or_constraints| {
+                    bound_or_constraints
+                        .as_type(db, env)
+                        .top_materialization(db, env)
+                })
+        })
+        .flatten()
+}
+
+crate::types::source_query! {
+    fn BoundTypeVarInstanceTopMaterializedUpperBoundInner<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        bound_typevar: BoundTypeVarInstance<'db>,
+    ) -> Option<Type<'db>> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(
+            bound_typevar.binding_context(db).program(db),
+        ));
+
+        top_materialized_upper_bound_in_operation(db, &env, bound_typevar)
     }
 }
 
@@ -1723,41 +1735,33 @@ fn lazy_bound_cycle_recover<'db>(
     current: Option<Type<'db>>,
     typevar: TypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::LazyBoundCycleRecover>(
         db,
         (cycle, *previous, current, typevar),
-        |db, source_operation, (cycle, previous, current, typevar)| {
-            lazy_bound_cycle_recover_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous,
-                current,
-                typevar,
-            )
-        },
     )
 }
 
-fn lazy_bound_cycle_recover_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous: Option<Type<'db>>,
-    current: Option<Type<'db>>,
-    typevar: TypeVarInstance<'db>,
-) -> Option<Type<'db>> {
-    // Normalize the bounds/constraints to ensure cycle convergence.
-    let current = current?;
-    let program_file = typevar
-        .definition(db)
-        .expect("a lazy TypeVar bound must have a source definition")
-        .program_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    Some(match previous {
-        Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
-        None => current.recursive_type_normalized(db, &env, cycle),
-    })
+crate::types::source_query! {
+    fn LazyBoundCycleRecover<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: Option<Type<'db>>,
+        current: Option<Type<'db>>,
+        typevar: TypeVarInstance<'db>,
+    ) -> Option<Type<'db>> {
+        // Normalize the bounds/constraints to ensure cycle convergence.
+        let current = current?;
+        let program_file = typevar
+            .definition(db)
+            .expect("a lazy TypeVar bound must have a source definition")
+            .program_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        Some(match previous {
+            Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
+            None => current.recursive_type_normalized(db, &env, cycle),
+        })
+    }
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1769,41 +1773,33 @@ fn lazy_constraints_cycle_recover<'db>(
     current: Option<TypeVarConstraints<'db>>,
     typevar: TypeVarInstance<'db>,
 ) -> Option<TypeVarConstraints<'db>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::LazyConstraintsCycleRecover>(
         db,
         (cycle, *previous, current, typevar),
-        |db, source_operation, (cycle, previous, current, typevar)| {
-            lazy_constraints_cycle_recover_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous,
-                current,
-                typevar,
-            )
-        },
     )
 }
 
-fn lazy_constraints_cycle_recover_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous: Option<TypeVarConstraints<'db>>,
-    current: Option<TypeVarConstraints<'db>>,
-    typevar: TypeVarInstance<'db>,
-) -> Option<TypeVarConstraints<'db>> {
-    // Normalize the bounds/constraints to ensure cycle convergence.
-    let current = current?;
-    let program_file = typevar
-        .definition(db)
-        .expect("lazy TypeVar constraints must have a source definition")
-        .program_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    Some(match previous {
-        Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
-        None => current.recursive_type_normalized(db, &env, cycle),
-    })
+crate::types::source_query! {
+    fn LazyConstraintsCycleRecover<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous: Option<TypeVarConstraints<'db>>,
+        current: Option<TypeVarConstraints<'db>>,
+        typevar: TypeVarInstance<'db>,
+    ) -> Option<TypeVarConstraints<'db>> {
+        // Normalize the bounds/constraints to ensure cycle convergence.
+        let current = current?;
+        let program_file = typevar
+            .definition(db)
+            .expect("lazy TypeVar constraints must have a source definition")
+            .program_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        Some(match previous {
+            Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
+            None => current.recursive_type_normalized(db, &env, cycle),
+        })
+    }
 }
 
 #[expect(clippy::ref_option)]
@@ -1814,41 +1810,33 @@ fn lazy_default_cycle_recover<'db>(
     current: Option<Type<'db>>,
     typevar: TypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::LazyDefaultCycleRecover>(
         db,
         (cycle, *previous_default, current, typevar),
-        |db, source_operation, (cycle, previous_default, current, typevar)| {
-            lazy_default_cycle_recover_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous_default,
-                current,
-                typevar,
-            )
-        },
     )
 }
 
-fn lazy_default_cycle_recover_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous_default: Option<Type<'db>>,
-    current: Option<Type<'db>>,
-    typevar: TypeVarInstance<'db>,
-) -> Option<Type<'db>> {
-    // Normalize the default to ensure cycle convergence.
-    let current = current?;
-    let program_file = typevar
-        .definition(db)
-        .expect("a lazy TypeVar default must have a source definition")
-        .program_file(db);
-    let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
-    Some(match previous_default {
-        Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
-        None => current.recursive_type_normalized(db, &env, cycle),
-    })
+crate::types::source_query! {
+    fn LazyDefaultCycleRecover<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous_default: Option<Type<'db>>,
+        current: Option<Type<'db>>,
+        typevar: TypeVarInstance<'db>,
+    ) -> Option<Type<'db>> {
+        // Normalize the default to ensure cycle convergence.
+        let current = current?;
+        let program_file = typevar
+            .definition(db)
+            .expect("a lazy TypeVar default must have a source definition")
+            .program_file(db);
+        let env = source_operation.operations(ProgramEnvironment::from_file(program_file));
+        Some(match previous_default {
+            Some(prev) => current.cycle_normalized(db, &env, prev, cycle),
+            None => current.recursive_type_normalized(db, &env, cycle),
+        })
+    }
 }
 
 /// Where a type variable is bound and usable.
@@ -1900,31 +1888,30 @@ fn paramspec_attribute_upper_bound<'db>(
     program: Program<'db>,
     kind: ParamSpecAttrKind,
 ) -> Type<'db> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::ParamspecAttributeUpperBound>(
         db,
         (program, kind),
-        |db, source_operation, (program, kind)| {
-            paramspec_attribute_upper_bound_from_source(db, source_operation, program, kind)
-        },
     )
 }
 
-fn paramspec_attribute_upper_bound_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    program: Program<'db>,
-    kind: ParamSpecAttrKind,
-) -> Type<'db> {
-    let env = source_operation.operations(ProgramEnvironment::from_program(program));
-    match kind {
-        ParamSpecAttrKind::Args => Type::homogeneous_tuple(db, &env, Type::object()),
-        ParamSpecAttrKind::Kwargs => KnownClass::Dict
-            .to_specialized_instance(
-                db,
-                &env,
-                &[KnownClass::Str.to_instance(db, &env), Type::any()],
-            )
-            .top_materialization(db, &env),
+crate::types::source_query! {
+    fn ParamspecAttributeUpperBound<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        program: Program<'db>,
+        kind: ParamSpecAttrKind,
+    ) -> Type<'db> {
+        let env = source_operation.operations(ProgramEnvironment::from_program(program));
+        match kind {
+            ParamSpecAttrKind::Args => Type::homogeneous_tuple(db, &env, Type::object()),
+            ParamSpecAttrKind::Kwargs => KnownClass::Dict
+                .to_specialized_instance(
+                    db,
+                    &env,
+                    &[KnownClass::Str.to_instance(db, &env), Type::any()],
+                )
+                .top_materialization(db, &env),
+        }
     }
 }
 
@@ -2101,22 +2088,21 @@ fn bound_typevar_default_type<'db>(
     db: &'db dyn Db,
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::BoundTypevarDefaultType>(
         db,
         (bound_typevar,),
-        |db, source_operation, (bound_typevar,)| {
-            bound_typevar_default_type_from_source(db, source_operation, bound_typevar)
-        },
     )
 }
 
-fn bound_typevar_default_type_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    bound_typevar: BoundTypeVarInstance<'db>,
-) -> Option<Type<'db>> {
-    let env = source_operation.operations(bound_typevar.default_environment(db));
-    bound_typevar.compute_default_type(db, &env)
+crate::types::source_query! {
+    fn BoundTypevarDefaultType<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        bound_typevar: BoundTypeVarInstance<'db>,
+    ) -> Option<Type<'db>> {
+        let env = source_operation.operations(bound_typevar.default_environment(db));
+        bound_typevar.compute_default_type(db, &env)
+    }
 }
 
 #[expect(clippy::ref_option)]
@@ -2127,36 +2113,28 @@ fn bound_typevar_default_type_cycle_recover<'db>(
     default: Option<Type<'db>>,
     bound_typevar: BoundTypeVarInstance<'db>,
 ) -> Option<Type<'db>> {
-    SourceTypeQuery::run(
+    SourceTypeQuery::run::<crate::types::source_queries::BoundTypevarDefaultTypeCycleRecover>(
         db,
         (cycle, *previous_default, default, bound_typevar),
-        |db, source_operation, (cycle, previous_default, default, bound_typevar)| {
-            bound_typevar_default_type_cycle_recover_from_source(
-                db,
-                source_operation,
-                cycle,
-                previous_default,
-                default,
-                bound_typevar,
-            )
-        },
     )
 }
 
-fn bound_typevar_default_type_cycle_recover_from_source<'db>(
-    db: &'db dyn Db,
-    source_operation: &SourceTypeQuery<'db>,
-    cycle: &salsa::Cycle,
-    previous_default: Option<Type<'db>>,
-    default: Option<Type<'db>>,
-    bound_typevar: BoundTypeVarInstance<'db>,
-) -> Option<Type<'db>> {
-    let default = default?;
-    let env = source_operation.operations(bound_typevar.default_environment(db));
-    Some(match previous_default {
-        Some(previous) => default.cycle_normalized(db, &env, previous, cycle),
-        None => default.recursive_type_normalized(db, &env, cycle),
-    })
+crate::types::source_query! {
+    fn BoundTypevarDefaultTypeCycleRecover<'db, 'input>(
+        db: &'db dyn Db,
+        source_operation: &SourceTypeQuery<'db>,
+        cycle: &'input salsa::Cycle<'input>,
+        previous_default: Option<Type<'db>>,
+        default: Option<Type<'db>>,
+        bound_typevar: BoundTypeVarInstance<'db>,
+    ) -> Option<Type<'db>> {
+        let default = default?;
+        let env = source_operation.operations(bound_typevar.default_environment(db));
+        Some(match previous_default {
+            Some(previous) => default.cycle_normalized(db, &env, previous, cycle),
+            None => default.recursive_type_normalized(db, &env, cycle),
+        })
+    }
 }
 
 /// Whether a typevar default is eagerly specified or lazily evaluated.

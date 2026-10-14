@@ -734,7 +734,7 @@ impl DoubleEndedIterator for MroIterator<'_> {
 
 /// Boxed in cached MRO results so successful MROs do not reserve space for failure details.
 #[derive(Clone, Debug, PartialEq, Eq, get_size2::GetSize, salsa::SalsaValue)]
-pub(super) struct StaticMroError<'db> {
+pub(crate) struct StaticMroError<'db> {
     kind: StaticMroErrorKind<'db>,
     fallback_mro: Mro<'db>,
 }
