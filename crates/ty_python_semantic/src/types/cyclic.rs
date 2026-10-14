@@ -21,6 +21,7 @@
 //! `Type`.
 
 use crate::types::TypeOperations;
+use crate::types::operations::{RecursiveOperationScope, TypeOperationIdentity};
 use crate::types::visitor::{TypeVisit, TypeVisitorContext, TypeVisitorHooks};
 use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::Eq;
@@ -46,6 +47,15 @@ use crate::types::{
     walk_signature,
 };
 use crate::{Db, ProgramEnvironment};
+
+/// A borrow of a recursion guard; only guard implementations can create this capability.
+pub(super) struct GuardToken<'guard>(PhantomData<&'guard ()>);
+
+impl<'guard> GuardToken<'guard> {
+    fn new<G>(_guard: &'guard G) -> Self {
+        Self(PhantomData)
+    }
+}
 
 /// The type identity used for recursive checks/transformations.
 #[derive(Debug, Clone, Copy, Eq, Hash, PartialEq)]
@@ -1054,6 +1064,7 @@ pub struct CycleDetector<'db, Tag, T: HasIdentity<'db>, R, const INLINE_CAPACITY
 
     /// Memoized results from earlier visits in the current recursive operation.
     cache: RefCell<CycleDetectorCache<T, R>>,
+    cache_context: RefCell<Option<TypeOperationIdentity>>,
 
     fallback: R,
 
@@ -1068,8 +1079,12 @@ where
         self.revision.get()
     }
 
-    pub(super) fn is_active(&self) -> bool {
-        !self.seen.borrow().is_empty()
+    fn validate_cache_owner(&self, env: &TypeOperations<'db>) {
+        let context = env.identity();
+        if self.cache_context.borrow().as_ref() != Some(&context) {
+            *self.cache_context.borrow_mut() = Some(context);
+            *self.cache.borrow_mut() = CycleDetectorCache::new();
+        }
     }
 
     pub(crate) fn new(fallback: R) -> Self {
@@ -1077,6 +1092,7 @@ where
             seen: RefCell::new(SmallVec::new()),
             revision: Cell::new(0),
             cache: RefCell::new(CycleDetectorCache::new()),
+            cache_context: RefCell::new(None),
             fallback,
             _tag: PhantomData,
         }
@@ -1101,7 +1117,7 @@ where
             CycleDetectorVisit::Cycle(..) => self.fallback.clone(),
             CycleDetectorVisit::Pending(guard) => {
                 let result = compute();
-                self.finish_visit(guard, result)
+                self.finish_visit(env, guard, result)
             }
         }
     }
@@ -1123,6 +1139,7 @@ where
         reuse_cached: impl FnOnce(&R) -> bool,
         compute: impl FnOnce() -> R,
     ) -> Result<R, (T, T)> {
+        self.validate_cache_owner(env);
         let cached_result = self.cache.borrow().get(&item).cloned();
         let was_cached = cached_result.is_some();
         if let Some(result) = cached_result
@@ -1140,7 +1157,7 @@ where
                     drop(guard);
                     Ok(result)
                 } else {
-                    Ok(self.finish_visit(guard, result))
+                    Ok(self.finish_visit(env, guard, result))
                 }
             }
         }
@@ -1152,6 +1169,7 @@ where
         env: &TypeOperations<'db>,
         item: T,
     ) -> CycleDetectorVisit<'_, 'db, T, R, INLINE_CAPACITY> {
+        self.validate_cache_owner(env);
         if let Some(result) = self.cache.borrow().get(&item) {
             return CycleDetectorVisit::Ready(result.clone());
         }
@@ -1191,6 +1209,7 @@ where
             seen: &self.seen,
             revision: &self.revision,
             item: item.clone(),
+            _scope: env.enter_recursive_scope(GuardToken::new(self)),
         };
         if !candidates.is_empty() {
             self.resolve_active_identity(db, env, index);
@@ -1241,9 +1260,15 @@ where
     }
 
     /// Finish a [`CycleDetectorVisit::Pending`] visit and cache its result.
-    fn finish_visit(&self, guard: ActiveTypeVisit<'_, 'db, T, INLINE_CAPACITY>, result: R) -> R {
+    fn finish_visit(
+        &self,
+        env: &TypeOperations<'db>,
+        guard: ActiveTypeVisit<'_, 'db, T, INLINE_CAPACITY>,
+        result: R,
+    ) -> R {
         let item = guard.item.clone();
         drop(guard);
+        self.validate_cache_owner(env);
         self.cache
             .borrow_mut()
             .insert_completed(item, result.clone());
@@ -1312,6 +1337,7 @@ pub enum CycleKind {
 }
 
 struct ActiveTypeVisit<'a, 'db, T: HasIdentity<'db> + PartialEq, const INLINE_CAPACITY: usize> {
+    _scope: RecursiveOperationScope<'a, 'db>,
     seen: &'a RefCell<SmallVec<[ActiveCycleDetectorVisit<'db, T>; INLINE_CAPACITY]>>,
     revision: &'a Cell<u64>,
     item: T,
@@ -1360,6 +1386,7 @@ pub(crate) struct TypeTransformer<'db, Tag> {
 
     /// Memoized transformations from earlier visits in the current recursive operation.
     cache: RefCell<CycleDetectorCache<Type<'db>, Type<'db>>>,
+    cache_context: RefCell<Option<TypeOperationIdentity>>,
 
     _tag: PhantomData<fn() -> Tag>,
 }
@@ -1369,6 +1396,7 @@ impl<Tag> Default for TypeTransformer<'_, Tag> {
         Self {
             seen: RefCell::default(),
             cache: RefCell::default(),
+            cache_context: RefCell::new(None),
             _tag: PhantomData,
         }
     }
@@ -1376,73 +1404,71 @@ impl<Tag> Default for TypeTransformer<'_, Tag> {
 
 impl<'db, Tag> TypeTransformer<'db, Tag> {
     #[inline]
+    fn validate_cache_owner(&self, env: &TypeOperations<'db>) {
+        let context = env.identity();
+        if self.cache_context.borrow().as_ref() != Some(&context) {
+            *self.cache_context.borrow_mut() = Some(context);
+            *self.cache.borrow_mut() = CycleDetectorCache::new();
+        }
+    }
+
     pub(crate) fn visit_type(
         &self,
         db: &'db dyn Db,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         compute: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
-        self.visit_with_identity(ty, || ty.to_type_identity(db), compute)
+        self.visit_with_identity(env, ty, || ty.to_type_identity(db), compute)
     }
 
     /// Rewrite stored type data without inspecting the definition it refers to.
     pub(crate) fn visit_stored_type(
         &self,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         compute: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
-        self.visit_with_identity(ty, || TypeIdentity::Other(ty), compute)
+        self.visit_with_identity(env, ty, || TypeIdentity::Other(ty), compute)
     }
 
     fn visit_with_identity(
         &self,
+        env: &TypeOperations<'db>,
         ty: Type<'db>,
         identity: impl FnOnce() -> TypeIdentity<'db>,
         compute: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
-        match self.begin_visit(ty, identity) {
-            TypeTransformerVisit::Ready(result) => result,
-            TypeTransformerVisit::Pending(ty) => {
-                let result = compute();
-                self.finish_visit(ty, result)
-            }
-        }
-    }
-
-    fn begin_visit(
-        &self,
-        ty: Type<'db>,
-        identity: impl FnOnce() -> TypeIdentity<'db>,
-    ) -> TypeTransformerVisit<'db> {
+        self.validate_cache_owner(env);
         if let Some(result) = self.cache.borrow().get(&ty) {
-            return TypeTransformerVisit::Ready(*result);
+            return *result;
+        }
+        if self.seen.borrow().iter().any(|active| active.ty == ty) {
+            return ty;
         }
 
-        if self.seen.borrow().iter().any(|active| active.ty == ty) {
-            return TypeTransformerVisit::Ready(ty);
-        }
-        // Identity analysis can infer a definition. Register the exact input before that work
-        // so a nested operation cannot restart the same transformation while setting up its guard.
+        // Guard the exact input before identity analysis, which can infer another definition.
+        let scope = env.enter_recursive_scope(GuardToken::new(self));
         let index = self.seen.borrow().len();
         self.seen
             .borrow_mut()
             .push(ActiveTypeTransformation { ty, identity: None });
+        let guard = TypeTransformationGuard { seen: &self.seen };
         let identity = identity();
-        let mut seen = self.seen.borrow_mut();
-        if seen[..index]
-            .iter()
-            .any(|active| active.identity == Some(identity))
         {
-            seen.pop();
-            return TypeTransformerVisit::Ready(ty);
+            let mut seen = self.seen.borrow_mut();
+            if seen[..index]
+                .iter()
+                .any(|active| active.identity == Some(identity))
+            {
+                return ty;
+            }
+            seen[index].identity = Some(identity);
         }
-        seen[index].identity = Some(identity);
-        TypeTransformerVisit::Pending(ty)
-    }
-
-    fn finish_visit(&self, ty: Type<'db>, result: Type<'db>) -> Type<'db> {
-        let active = self.seen.borrow_mut().pop();
-        debug_assert_eq!(active.map(|active| active.ty), Some(ty));
+        let result = compute();
+        drop(guard);
+        drop(scope);
+        self.validate_cache_owner(env);
         self.cache.borrow_mut().insert_completed(ty, result);
         result
     }
@@ -1454,9 +1480,14 @@ struct ActiveTypeTransformation<'db> {
     identity: Option<TypeIdentity<'db>>,
 }
 
-enum TypeTransformerVisit<'db> {
-    Ready(Type<'db>),
-    Pending(Type<'db>),
+struct TypeTransformationGuard<'a, 'db> {
+    seen: &'a RefCell<SmallVec<[ActiveTypeTransformation<'db>; 3]>>,
+}
+
+impl Drop for TypeTransformationGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.seen.borrow_mut().pop();
+    }
 }
 
 impl<'db, Tag, T, R: Default, const INLINE_CAPACITY: usize> Default
@@ -1578,7 +1609,6 @@ impl<T> Default for ActiveRecursionDetector<T> {
 }
 
 impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
-    /// Changes whenever an active guard enters or leaves, including during unwinding.
     pub(super) fn revision(&self) -> u64 {
         self.revision.get()
     }
@@ -1597,6 +1627,7 @@ impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
 
     pub(crate) fn visit<R>(
         &self,
+        env: &TypeOperations<'_>,
         item: &T,
         on_cycle: impl FnOnce() -> R,
         func: impl FnOnce() -> R,
@@ -1604,6 +1635,7 @@ impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
         if !self.seen.borrow_mut().insert(item.clone()) {
             return on_cycle();
         }
+
         self.revision.set(self.revision.get().wrapping_add(1));
 
         // Keep the active-recursion state scoped even if `func` unwinds. In some cases, we catch
@@ -1612,22 +1644,24 @@ impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
             seen: &self.seen,
             revision: &self.revision,
             item,
+            _scope: env.enter_recursive_scope(GuardToken::new(self)),
         };
 
         func()
     }
 }
 
-struct ActiveRecursionGuard<'a, T: Hash + Eq> {
+struct ActiveRecursionGuard<'a, 'db, T: Hash + Eq> {
+    _scope: RecursiveOperationScope<'a, 'db>,
     seen: &'a RefCell<FxHashSet<T>>,
     revision: &'a Cell<u64>,
     item: &'a T,
 }
 
-impl<T: Hash + Eq> Drop for ActiveRecursionGuard<'_, T> {
+impl<T: Hash + Eq> Drop for ActiveRecursionGuard<'_, '_, T> {
     fn drop(&mut self) {
-        self.seen.borrow_mut().remove(self.item);
         self.revision.set(self.revision.get().wrapping_add(1));
+        self.seen.borrow_mut().remove(self.item);
     }
 }
 
@@ -1654,17 +1688,46 @@ mod tests {
 
     #[test]
     fn guards_transformations_before_resolving_identity() {
+        let db = setup_db();
+        let env = db.program_environment();
         let transformer = TypeTransformer::<TestVisit>::default();
         let ty = Type::unknown();
         let result = transformer.visit_with_identity(
+            &env,
             ty,
             || {
-                assert_eq!(transformer.visit_stored_type(ty, || Type::Never), ty);
+                assert_eq!(transformer.visit_stored_type(&env, ty, || Type::Never), ty);
                 TypeIdentity::Other(ty)
             },
             || Type::Never,
         );
         assert_eq!(result, Type::Never);
+    }
+
+    #[test]
+    fn transformation_visits_are_released_when_unwinding() {
+        let db = setup_db();
+        let env = db.program_environment();
+        for cancel_during_identity in [false, true] {
+            let transformer = TypeTransformer::<TestVisit>::default();
+            let ty = Type::unknown();
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                transformer.visit_with_identity(
+                    &env,
+                    ty,
+                    || {
+                        assert!(!cancel_during_identity, "cancel identity inference");
+                        TypeIdentity::Other(ty)
+                    },
+                    || panic!("cancel transformation"),
+                );
+            }));
+            assert!(result.is_err());
+            assert_eq!(
+                transformer.visit_stored_type(&env, ty, || Type::Never),
+                Type::Never
+            );
+        }
     }
 
     type Detector<'db> = CycleDetector<'db, TestVisit, u8, u8, 1>;
@@ -2383,7 +2446,7 @@ class RecursivePropertySetter[T](Protocol):
         };
         assert_eq!(item.0, 2);
         assert_eq!(previous.0, 1);
-        detector.finish_visit(pending, 1);
+        detector.finish_visit(&env, pending, 1);
 
         let CycleDetectorVisit::Ready(seen) =
             detector.begin_visit(db, &env, ConstantIdentityItem(1))
@@ -2396,7 +2459,7 @@ class RecursivePropertySetter[T](Protocol):
         else {
             panic!("the second identity should be pending after the first is finished");
         };
-        detector.finish_visit(pending, 2);
+        detector.finish_visit(&env, pending, 2);
         let CycleDetectorVisit::Ready(seen) =
             detector.begin_visit(db, &env, ConstantIdentityItem(2))
         else {

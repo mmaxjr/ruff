@@ -1,10 +1,13 @@
 //! Entry points for semantic type operations and the state borrowed by their recursive helpers.
 
+use std::cell::Cell;
 use std::ops::Deref;
 use std::rc::Rc;
 
+use salsa::plumbing::AsId;
 use ty_python_core::{Program, ProgramFile};
 
+use super::cyclic::GuardToken;
 use super::{ApplyTypeMappingVisitor, TypeRecursionState};
 use crate::{Db, ProgramEnvironment};
 
@@ -81,6 +84,27 @@ impl<'db> TypeOperations<'db> {
         }
     }
 
+    /// Keep global query caches unavailable while a local recursive operation is active.
+    pub(super) fn enter_recursive_scope<'guard>(
+        &self,
+        guard: GuardToken<'guard>,
+    ) -> RecursiveOperationScope<'guard, 'db> {
+        let operation = &self.context.state().operation;
+        let previous = operation.depth.replace(operation.depth.get() + 1);
+        RecursiveOperationScope {
+            context: self.context.clone(),
+            previous,
+            _guard: guard,
+        }
+    }
+
+    pub(super) fn identity(&self) -> TypeOperationIdentity {
+        TypeOperationIdentity {
+            owner: self.context.state().operation.identity.clone(),
+            program: self.program(self.db).as_id(),
+        }
+    }
+
     /// Read source metadata from another environment without replacing the active operation.
     pub(crate) fn in_environment(&self, env: ProgramEnvironment<'db>) -> Self {
         Self {
@@ -97,6 +121,47 @@ impl<'db> TypeOperations<'db> {
 
     pub(super) fn context(&self) -> &TypeRecursionContext<'db> {
         &self.context
+    }
+}
+
+#[derive(Default)]
+pub(super) struct OperationState {
+    identity: Rc<()>,
+    depth: Cell<usize>,
+}
+
+impl OperationState {
+    pub(super) fn is_active(&self) -> bool {
+        self.depth.get() != 0
+    }
+}
+
+/// A local cache belongs to one operation and one program environment.
+#[derive(Clone, Debug)]
+pub(super) struct TypeOperationIdentity {
+    owner: Rc<()>,
+    program: salsa::Id,
+}
+
+impl PartialEq for TypeOperationIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.owner, &other.owner) && self.program == other.program
+    }
+}
+
+impl Eq for TypeOperationIdentity {}
+
+/// Restores the enclosing guard scope even when recursive analysis unwinds.
+#[must_use]
+pub(super) struct RecursiveOperationScope<'guard, 'db> {
+    context: TypeRecursionContext<'db>,
+    previous: usize,
+    _guard: GuardToken<'guard>,
+}
+
+impl Drop for RecursiveOperationScope<'_, '_> {
+    fn drop(&mut self) {
+        self.context.state().operation.depth.set(self.previous);
     }
 }
 

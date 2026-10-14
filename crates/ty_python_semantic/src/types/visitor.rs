@@ -88,6 +88,7 @@ impl<'db, V: TypeVisitorHooks<'db>> TypeVisitor<'db> for TypeVisitorContext<'_, 
     fn visit_type_var_type(&self, db: &'db dyn Db, typevar: TypeVarInstance<'db>) {
         let ty = Type::KnownInstance(KnownInstanceType::TypeVar(typevar));
         self.active.visit(
+            self.visitor.program_environment(),
             &ty,
             || (),
             || {
@@ -154,7 +155,7 @@ fn guarded_visit<'db, V: TypeVisitorHooks<'db>>(
     };
     match TypeKind::from(ty) {
         TypeKind::Atomic => visit(),
-        TypeKind::NonAtomic(_) => active.visit(&ty, || (), visit),
+        TypeKind::NonAtomic(_) => active.visit(visitor.program_environment(), &ty, || (), visit),
     }
 }
 
@@ -168,6 +169,7 @@ fn guarded_visit_contents<'db, V: TypeVisitorHooks<'db>>(
     active: &ActiveRecursionDetector<Type<'db>>,
 ) {
     active.visit(
+        visitor.program_environment(),
         &ty,
         || (),
         || {
@@ -176,7 +178,7 @@ fn guarded_visit_contents<'db, V: TypeVisitorHooks<'db>>(
                 active,
                 ty,
             }
-            .walk_children(db)
+            .walk_children(db);
         },
     );
 }
@@ -847,6 +849,7 @@ pub(super) fn dynamic_content_impl<'db>(
             // A recursive return can reach the same lambda with different captured arguments.
             // An exact-type guard cannot finish that walk or prove the absence of dynamic types.
             self.active_lambdas.visit(
+                self.env,
                 &lambda.scope(db),
                 || self.record(DynamicContent::Indeterminate),
                 || walk_callable_type(db, callable, visit),
@@ -922,6 +925,7 @@ pub(super) fn dynamic_content_impl<'db>(
             alias: TypeAliasType<'db>,
         ) {
             self.active_type_aliases.visit(
+                self.env,
                 &alias.definition(db),
                 || self.record(DynamicContent::Indeterminate),
                 || walk_type_alias_type(db, alias, visit),
@@ -976,6 +980,7 @@ pub(super) fn dynamic_content_impl<'db>(
             }
 
             self.active_class_protocols.visit(
+                self.env,
                 &origin,
                 || self.record(DynamicContent::Indeterminate),
                 || {
@@ -1006,6 +1011,7 @@ pub(super) fn dynamic_content_impl<'db>(
             };
 
             self.active_class_typed_dicts.visit(
+                self.env,
                 &origin,
                 || self.record(DynamicContent::Indeterminate),
                 || walk_typed_dict_type(db, typed_dict, visit),
@@ -1112,6 +1118,7 @@ pub(super) fn contains_growing_type<'db>(
                 return;
             };
             self.active_lambdas.visit(
+                self.env,
                 &lambda.scope(db),
                 || self.found.set(true),
                 || walk_callable_type(db, callable, visit),
@@ -1143,6 +1150,7 @@ pub(super) fn contains_growing_type<'db>(
             }
 
             self.active_class_protocols.visit(
+                self.env,
                 &origin,
                 || self.found.set(true),
                 || {

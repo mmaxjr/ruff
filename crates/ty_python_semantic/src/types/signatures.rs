@@ -2723,7 +2723,7 @@ impl<'c, 'db> TypeRelationChecker<'_, 'c, 'db> {
         // the finite layer still bubbles out of `work`, because only exact active revisits take
         // this branch and the result is not memoized.
         self.signature_relation_visitor
-            .visit(&key, || self.always(), work)
+            .visit(self.env, &key, || self.always(), work)
     }
 
     fn check_signature_return_pair(

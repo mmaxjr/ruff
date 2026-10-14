@@ -136,7 +136,7 @@ fn merge_truthiness_guarded_pair<'db>(
     let visitor = ApplyTypeMappingVisitor::new(env);
     let equivalent =
         || left_core.is_equivalent_to_with_materialization_visitor(db, right_core, &visitor);
-    if context.compare_for_simplification(equivalent) {
+    if context.compare_for_simplification(env, equivalent) {
         return Some(left_core);
     }
 

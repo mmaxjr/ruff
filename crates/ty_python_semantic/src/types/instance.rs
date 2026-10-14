@@ -1493,6 +1493,7 @@ fn non_recursive_protocol_interface<'db>(
             type_alias: TypeAliasType<'db>,
         ) {
             self.active_aliases.visit(
+                self.env,
                 &Type::TypeAlias(type_alias).to_type_identity(db),
                 || self.found.set(true),
                 || type_alias.walk_body(db, visit),

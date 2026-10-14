@@ -1674,7 +1674,7 @@ impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
         on_cycle: impl FnOnce() -> R,
         compute: impl FnOnce(&StructuralExpansionContext<'_, '_, 'db>) -> R,
     ) -> R {
-        self.visit(item, on_cycle, || {
+        self.visit(mapping.env, item, on_cycle, || {
             compute(&StructuralExpansionContext::new(mapping))
         })
     }
@@ -1686,7 +1686,7 @@ impl<T: Hash + Eq + Clone> ActiveRecursionDetector<T> {
         on_cycle: impl FnOnce() -> R,
         compute: impl FnOnce(&TypeExpansionContext<'_, '_, 'db>) -> R,
     ) -> R {
-        self.visit(item, on_cycle, || {
+        self.visit(mapping.env, item, on_cycle, || {
             compute(&TypeExpansionContext::new(mapping))
         })
     }
@@ -1700,7 +1700,9 @@ impl<'db, Tag> TypeTransformer<'db, Tag> {
         mapping: &ApplyTypeMappingVisitor<'_, 'db>,
         compute: impl FnOnce(&TypeExpansionContext<'_, '_, 'db>) -> Type<'db>,
     ) -> Type<'db> {
-        self.visit_type(db, ty, || compute(&TypeExpansionContext::new(mapping)))
+        self.visit_type(db, mapping.env, ty, || {
+            compute(&TypeExpansionContext::new(mapping))
+        })
     }
 }
 
@@ -2282,8 +2284,7 @@ where
     fn validate_recursion_context(&self) {
         let revision = Some(self.mapping_visitor().recursion_context().revision());
         if self.recursion_revision.replace(revision) != revision {
-            // Shared guards can change in a nested projection or specialization without entering
-            // this query's local traversal. Discard answers computed under the previous context.
+            // Shared guards can change in a nested projection without entering this traversal.
             *self.cache.borrow_mut() = CycleDetectorCache::new();
         }
     }
@@ -3491,7 +3492,7 @@ mod query_tests {
                 _ty: Type<'db>,
                 (): (),
             ) -> bool {
-                self.0.meta_type().is_active()
+                !self.0.meta_type().typevars.is_empty()
             }
 
             fn on_cycle(
@@ -3521,7 +3522,7 @@ mod query_tests {
             shared
                 .meta_type()
                 .typevars
-                .visit(&key, || (), || assert!(query.visit(&db, ty)));
+                .visit(&env, &key, || (), || assert!(query.visit(&db, ty)));
             assert!(!query.visit(&db, ty));
         });
     }

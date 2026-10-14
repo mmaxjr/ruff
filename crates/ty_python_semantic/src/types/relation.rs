@@ -75,10 +75,6 @@ impl<'db> ComparisonRecursion<'db> {
         self.active.revision()
     }
 
-    pub(super) fn is_active(&self) -> bool {
-        self.active.is_active()
-    }
-
     fn visit<R>(
         &self,
         db: &'db dyn Db,
@@ -716,7 +712,7 @@ impl<'db> Type<'db> {
         relation: TypeRelation,
     ) -> bool {
         let context = env.context();
-        context.compare_for_simplification(|| {
+        context.compare_for_simplification(env, || {
             let constraints = ConstraintSetBuilder::new();
             let relation_visitor = HasRelationToVisitor::default(&constraints);
             let disjointness_visitor = IsDisjointVisitor::default(&constraints);
@@ -993,7 +989,7 @@ impl<'db> Type<'db> {
         other: Type<'db>,
     ) -> bool {
         let context = env.context();
-        context.compare_for_simplification(|| {
+        context.compare_for_simplification(env, || {
             let constraints = ConstraintSetBuilder::new();
             let relation_visitor = HasRelationToVisitor::default(&constraints);
             let disjointness_visitor = IsDisjointVisitor::default(&constraints);

@@ -820,6 +820,7 @@ impl<'db> GenericContext<'db> {
                 // `should_visit_lazy_type_attributes`. However, this is the _only_ lazy type
                 // attribute that we want to recurse into, so we do it by hand.
                 self.active_aliases.visit(
+                    self.env,
                     &Type::TypeAlias(type_alias).to_type_identity(db),
                     || (),
                     || type_alias.walk_body(db, visit),

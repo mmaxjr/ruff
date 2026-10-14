@@ -1905,6 +1905,7 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'_, 'db> {
             Type::Recursive(recursive) if recursive.alias(db).is_none() => {
                 // The recursive identity also covers specializations that grow on each unfolding.
                 let result = self.settings.active_recursive_types.visit(
+                    self.env,
                     &self.ty.to_type_identity(db),
                     || None,
                     || {

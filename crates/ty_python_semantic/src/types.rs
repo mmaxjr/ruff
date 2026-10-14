@@ -483,32 +483,19 @@ impl<'db> TypeRecursionContext<'db> {
     }
 
     fn is_active(&self) -> bool {
-        let TypeRecursionState {
-            meta_type,
-            normalization,
-            redundancy,
-            signatures,
-            intersections,
-            materialization_equivalence,
-            alias_materialization,
-            comparisons,
-        } = self.state();
-        meta_type.is_active()
-            || !normalization.is_empty()
-            || redundancy.get().is_some_and(|guard| guard.is_active())
-            || signatures.get().is_some_and(|guard| guard.is_active())
-            || intersections.get().is_some_and(|guard| guard.is_active())
-            || materialization_equivalence
-                .get()
-                .is_some_and(|guard| guard.is_active())
-            || !alias_materialization.is_empty()
-            || comparisons.get().is_some_and(|guard| guard.is_active())
+        self.state().operation.is_active()
     }
 
     /// Compare two types for simplification. Nested builders retain their members until this
     /// comparison finishes, so signature substitution cannot restart it with new type arguments.
-    fn compare_for_simplification(&self, compare: impl FnOnce() -> bool) -> bool {
-        self.state().normalization.visit(&(), || false, compare)
+    fn compare_for_simplification(
+        &self,
+        env: &TypeOperations<'db>,
+        compare: impl FnOnce() -> bool,
+    ) -> bool {
+        self.state()
+            .normalization
+            .visit(env, &(), || false, compare)
     }
 
     /// Return `None` if obtaining a signature would reopen an active type expansion.
@@ -556,22 +543,28 @@ impl<'db> TypeRecursionContext<'db> {
     /// Keep the marked alias if materializing its body requests the same materialization again.
     fn materialize_alias(
         &self,
+        env: &TypeOperations<'db>,
         alias: TypeAliasType<'db>,
         materialize: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
-        self.state()
-            .alias_materialization
-            .visit(&alias, || Type::TypeAlias(alias), materialize)
+        self.state().alias_materialization.visit(
+            env,
+            &alias,
+            || Type::TypeAlias(alias),
+            materialize,
+        )
     }
 }
 
-type TypeRecursionRevision = [u64; 10];
+type TypeRecursionRevision = [u64; 11];
 
 impl TypeRecursionContext<'_> {
     /// Identify every shared guard that can affect a cached query.
     fn revision(&self) -> TypeRecursionRevision {
         // Keep this pattern exhaustive: each new guard must also invalidate cached queries.
         let TypeRecursionState {
+            operation: _,
+            function_normalization,
             meta_type:
                 MetaTypeRecursion {
                     aliases,
@@ -587,6 +580,7 @@ impl TypeRecursionContext<'_> {
             comparisons,
         } = self.state();
         [
+            function_normalization.revision(),
             aliases.revision(),
             growing_aliases.revision(),
             typevars.revision(),
@@ -605,6 +599,8 @@ impl TypeRecursionContext<'_> {
 
 #[derive(Default)]
 struct TypeRecursionState<'db> {
+    function_normalization: ActiveRecursionDetector<(salsa::Id, bool)>,
+    operation: operations::OperationState,
     meta_type: MetaTypeRecursion<'db>,
     normalization: ActiveRecursionDetector<()>,
     redundancy: OnceCell<Box<RedundancyRecursion<'db>>>,
@@ -639,12 +635,6 @@ struct MetaTypeRecursion<'db> {
     aliases: ActiveRecursionDetector<(Program<'db>, TypeAliasType<'db>)>,
     growing_aliases: ActiveRecursionDetector<(Program<'db>, Definition<'db>)>,
     typevars: ActiveRecursionDetector<(Program<'db>, BoundTypeVarIdentity<'db>)>,
-}
-
-impl MetaTypeRecursion<'_> {
-    fn is_active(&self) -> bool {
-        !self.aliases.is_empty() || !self.growing_aliases.is_empty() || !self.typevars.is_empty()
-    }
 }
 
 struct ApplyTypeMappingTag;
@@ -724,7 +714,8 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         func: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
-        self.transformer(type_mapping).visit_type(db, ty, func)
+        self.transformer(type_mapping)
+            .visit_type(db, self.env, ty, func)
     }
 
     /// Transform a stored type without expanding its definition to identify recursive visits.
@@ -734,7 +725,8 @@ impl<'env, 'db> ApplyTypeMappingVisitor<'env, 'db> {
         type_mapping: &TypeMapping<'_, 'db>,
         func: impl FnOnce() -> Type<'db>,
     ) -> Type<'db> {
-        self.transformer(type_mapping).visit_stored_type(ty, func)
+        self.transformer(type_mapping)
+            .visit_stored_type(self.env, ty, func)
     }
 
     fn transformer(
@@ -7967,7 +7959,7 @@ impl<'db> Type<'db> {
         // Key recursion by the full receiver type. Descriptor overloads can distinguish `C` from
         // `type[C]`, and different specializations need separate expansion even if one contains
         // the other, because a constructor may ignore its nested type arguments.
-        recursion_guard.visit(&self_type, on_cycle, || {
+        recursion_guard.visit(env, &self_type, on_cycle, || {
             // Check for a custom `__call__` on the metaclass (excluding `type.__call__`).
             // We preserve its full overload set here and defer constructor branching decisions
             // until call-time overload resolution.
@@ -10563,6 +10555,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
         // Re-entering through another projection can introduce metaclasses, so retain the guards
         // shared with specialization and materialization as well.
         context.meta_type().aliases.visit(
+            env,
             &(env.program(db), alias),
             || KnownClass::Type.to_instance(db, env),
             || {
@@ -10571,6 +10564,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
                     Type::TypeAlias(alias).to_type_identity(db)
                 {
                     context.meta_type().growing_aliases.visit(
+                        env,
                         &(env.program(db), definition),
                         || KnownClass::Type.to_instance(db, env),
                         project,
@@ -10643,6 +10637,7 @@ impl<'db> TypeQuery<'db> for ProjectMetaType<'_, 'db> {
                 // Transposition changes a type variable's bounds but preserves its bound
                 // identity. Guard by that identity so newly transposed instances still match.
                 context.meta_type().typevars.visit(
+                    env,
                     &(env.program(db), typevar.identity(db)),
                     || KnownClass::Type.to_instance(db, env),
                     || subclass_of_ty.metaclass_upper_bound(db, env),

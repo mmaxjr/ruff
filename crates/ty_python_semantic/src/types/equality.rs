@@ -1012,14 +1012,18 @@ impl<'db> TypeWalk<'db, (), StructuralTraversal> for EnumDomain<'db> {
     fn visit_alias_like(
         &self,
         db: &'db dyn Db,
-        _traversal: &StructuralTypeTraversal<'_, 'db, Self>,
+        traversal: &StructuralTypeTraversal<'_, 'db, Self>,
         ty: Type<'db>,
         (): (),
         visit_body: impl FnOnce(()) -> bool,
     ) -> bool {
         if let Type::TypeAlias(alias) = ty {
-            self.active_definitions
-                .visit(&alias.definition(db), || false, || visit_body(()))
+            self.active_definitions.visit(
+                traversal.environment(),
+                &alias.definition(db),
+                || false,
+                || visit_body(()),
+            )
         } else {
             visit_body(())
         }

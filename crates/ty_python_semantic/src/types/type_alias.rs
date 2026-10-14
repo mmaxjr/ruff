@@ -542,7 +542,7 @@ impl<'db> TypeAliasType<'db> {
         let env = env.in_environment(ProgramEnvironment::from_definition(self.definition(db)));
         match self.materialization_kind(db) {
             None => self.specialized_value_type(db, &env),
-            Some(kind) => env.context().materialize_alias(self, || {
+            Some(kind) => env.context().materialize_alias(&env, self, || {
                 self.with_materialization_kind(db, None)
                     .specialized_value_type(db, &env)
                     .materialize(db, kind, &env.mapping())
