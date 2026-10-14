@@ -2990,28 +2990,11 @@ impl<'db> Type<'db> {
             | Type::BoundSuper(_)
             | Type::SpecialForm(_) => self,
             Type::NominalInstance(instance) if !instance.is_definition_generic(db) => self,
-            _ => self.cached_materialization(db, env.program(db), materialization_kind),
+            _ => {
+                let env = env.in_environment(ProgramEnvironment::from_program(env.program(db)));
+                self.materialize(db, materialization_kind, &env.mapping())
+            }
         }
-    }
-
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, id, _, _, materialization_kind| {
-            Type::Divergent(DivergentType::new(id).materialized(materialization_kind))
-        },
-        cycle_fn=|db, cycle, previous: &Type<'db>, value: Type<'db>, _, program, _| {
-            value.cycle_normalized_impl(db, &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program)), *previous, cycle)
-        },
-        heap_size=ruff_memory_usage::heap_size
-    )]
-    fn cached_materialization(
-        self,
-        db: &'db dyn Db,
-        program: Program<'db>,
-        materialization_kind: MaterializationKind,
-    ) -> Type<'db> {
-        let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-        self.materialize(db, materialization_kind, &ApplyTypeMappingVisitor::new(env))
     }
 
     /// If this type is an instance type where the class has a tuple spec, returns the tuple spec.
@@ -4287,22 +4270,12 @@ impl<'db> Type<'db> {
         env: &TypeOperations<'db>,
         policy: MemberLookupPolicy,
     ) -> Option<PlaceAndQualifiers<'db>> {
-        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, _, _| None, heap_size=ruff_memory_usage::heap_size)]
-        fn lookup_dunder_new_inner<'db>(
-            db: &'db dyn Db,
-            program: Program<'db>,
-            ty: Type<'db>,
-            policy: MemberLookupPolicy,
-        ) -> Option<PlaceAndQualifiers<'db>> {
-            let env = &TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
-            let mut flags = policy | MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK;
-            if !ty.is_subtype_of(db, env, KnownClass::Type.to_instance(db, env)) {
-                flags |= MemberLookupPolicy::META_CLASS_NO_TYPE_FALLBACK;
-            }
-            ty.find_name_in_mro_with_policy(db, env, "__new__", flags)
+        let env = &env.in_environment(ProgramEnvironment::from_program(env.program(db)));
+        let mut flags = policy | MemberLookupPolicy::MRO_NO_OBJECT_FALLBACK;
+        if !self.is_subtype_of(db, env, KnownClass::Type.to_instance(db, env)) {
+            flags |= MemberLookupPolicy::META_CLASS_NO_TYPE_FALLBACK;
         }
-
-        lookup_dunder_new_inner(db, env.program(db), self, policy)
+        self.find_name_in_mro_with_policy(db, env, "__new__", flags)
     }
 
     /// Look up an attribute in the MRO of the meta-type of `self`. This returns class-level attributes
@@ -5027,10 +5000,9 @@ impl<'db> Type<'db> {
         instance: Option<Type<'db>>,
         owner: Type<'db>,
     ) -> Result<Option<DescriptorGetResult<'db>>, DescriptorGetError<'db>> {
-        #[salsa::tracked(returns(copy), cycle_initial=|_, _, _, _, _, _| Ok(None), heap_size=ruff_memory_usage::heap_size)]
         fn try_call_dunder_get_inner<'db>(
             db: &'db dyn Db,
-            program: Program<'db>,
+            env: &TypeOperations<'db>,
             ty: Type<'db>,
             instance: Option<Type<'db>>,
             owner: Type<'db>,
@@ -5191,7 +5163,7 @@ impl<'db> Type<'db> {
                 }
             }
 
-            let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+            let env = env.in_environment(ProgramEnvironment::from_program(env.program(db)));
             TypeQueryContext::with_root(&env, DescriptorGet { instance, owner }, |root| {
                 root.visit(db, ty)
             })
@@ -5209,7 +5181,7 @@ impl<'db> Type<'db> {
         if let ControlFlow::Break(result) = self.fixed_descriptor_get(db, env, instance, owner) {
             return Ok(result);
         }
-        try_call_dunder_get_inner(db, env.program(db), self, instance, owner)
+        try_call_dunder_get_inner(db, env, self, instance, owner)
     }
 
     fn fixed_descriptor_get(
@@ -5444,7 +5416,7 @@ impl<'db> Type<'db> {
     /// If this type is a union, requires all elements of union to be data descriptors.
     /// A directly dynamic type is treated as a data descriptor because it could inhabit one.
     fn is_data_descriptor(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
-        self.is_data_descriptor_impl(db, env.program(db), false)
+        self.is_data_descriptor_impl(db, env, false)
     }
 
     /// Returns whether this type should be considered a possible data descriptor.
@@ -5453,7 +5425,7 @@ impl<'db> Type<'db> {
     /// For practical convenience, dynamic union elements are not considered possible data
     /// descriptors here, because doing so would disable narrowing too frequently.
     fn may_be_data_descriptor(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
-        self.is_data_descriptor_impl(db, env.program(db), true)
+        self.is_data_descriptor_impl(db, env, true)
     }
 
     /// Returns whether this type is known not to be a data descriptor.
@@ -5463,21 +5435,16 @@ impl<'db> Type<'db> {
     /// describe the represented instance types, not the runtime values whose metaclasses determine
     /// descriptor behavior.
     fn is_definitely_non_data_descriptor(self, db: &'db dyn Db, env: &TypeOperations<'db>) -> bool {
-        self.is_definitely_non_data_descriptor_impl(db, env.program(db))
+        self.is_definitely_non_data_descriptor_impl(db, env)
     }
 
     // Recursive aliases use `true`, the identity for the all-of classifications above.
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, _, _, _| true,
-        heap_size=ruff_memory_usage::heap_size
-    )]
     fn is_definitely_non_data_descriptor_impl(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        env: &TypeOperations<'db>,
     ) -> bool {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        let env = env.in_environment(ProgramEnvironment::from_program(env.program(db)));
         TypeQueryContext::with_root(&env, IsDefinitelyNonDataDescriptor, |traversal| {
             traversal.visit(db, self)
         })
@@ -5485,18 +5452,13 @@ impl<'db> Type<'db> {
 
     // Definite data descriptors use an all-of union fold; possible data descriptors use any-of.
     // Seed recursive aliases with the corresponding identity value.
-    #[salsa::tracked(
-        returns(copy),
-        cycle_initial=|_, _, _, _, any_of_union: bool| !any_of_union,
-        heap_size=ruff_memory_usage::heap_size
-    )]
     fn is_data_descriptor_impl(
         self,
         db: &'db dyn Db,
-        program: Program<'db>,
+        env: &TypeOperations<'db>,
         any_of_union: bool,
     ) -> bool {
-        let env = TypeOperations::for_inference(db, ProgramEnvironment::from_program(program));
+        let env = env.in_environment(ProgramEnvironment::from_program(env.program(db)));
         TypeQueryContext::with_root(&env, IsDataDescriptor { any_of_union }, |traversal| {
             traversal.visit(db, self)
         })
